@@ -2327,6 +2327,7 @@ dependencies = [
     { name = "nova-act" },
     { name = "numpy" },
     { name = "opencv-python" },
+    { name = "python-dotenv" },
     { name = "reachy-mini" },
 ]
 
@@ -2337,6 +2338,7 @@ requires-dist = [
     { name = "nova-act", specifier = ">=3.0.0" },
     { name = "numpy" },
     { name = "opencv-python" },
+    { name = "python-dotenv" },
     { name = "reachy-mini" },
 ]
 

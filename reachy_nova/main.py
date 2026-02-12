@@ -4,10 +4,16 @@ Integrates Amazon Nova Sonic (voice), Nova Pro (vision), and Nova Act (browser)
 to create an interactive AI-powered robot experience.
 """
 
-import json
 import logging
+import os
 import threading
 import time
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env from project root
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 import numpy as np
 from pydantic import BaseModel

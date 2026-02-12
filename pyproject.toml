@@ -16,6 +16,7 @@ dependencies = [
     "nova-act>=3.0.0",
     "numpy",
     "opencv-python",
+    "python-dotenv",
 ]
 keywords = ["reachy-mini-app"]
 

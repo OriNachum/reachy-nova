@@ -25,13 +25,10 @@ AI-powered brain for Reachy Mini, integrating three Amazon Nova services:
 # Install with uv
 uv sync
 
-# Set AWS credentials for Nova Sonic & Nova Pro
-export AWS_ACCESS_KEY_ID=your_key
-export AWS_SECRET_ACCESS_KEY=your_secret
-export AWS_DEFAULT_REGION=us-east-1
-
-# Set Nova Act API key
-export NOVA_ACT_API_KEY=your_nova_act_key
+# Copy .env.sample to .env and fill in your AWS credentials
+cp .env.sample .env
+# Edit .env with your AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+# (same credentials work for Nova Sonic, Nova Pro, and Nova Act)
 
 # Run
 uv run python -m reachy_nova.main
