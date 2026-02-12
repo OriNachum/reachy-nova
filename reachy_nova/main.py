@@ -195,12 +195,20 @@ class ReachyNova(ReachyMiniApp):
         browser.start(stop_event)
 
         # Start audio recording from robot mic
+        mic_sr = 16000
         try:
             reachy_mini.media.start_recording()
+            mic_sr = reachy_mini.media.get_input_audio_samplerate()
+            mic_ch = reachy_mini.media.get_input_channels()
+            logger.info(f"Mic recording started: samplerate={mic_sr}, channels={mic_ch}")
+            if mic_sr != 16000 or mic_ch != 1:
+                logger.info(f"Will resample {mic_sr}Hz/{mic_ch}ch → 16000Hz/mono for Nova Sonic")
         except Exception as e:
             logger.warning(f"Could not start mic recording: {e}")
 
+        logger.info(f"Media backend: {reachy_mini.media.backend}, audio={reachy_mini.media.audio}")
         logger.info("Reachy Nova is alive! All systems go.")
+        audio_chunk_count = 0
 
         # --- Main control loop ---
         while not stop_event.is_set():
@@ -265,9 +273,33 @@ class ReachyNova(ReachyMiniApp):
             try:
                 audio = reachy_mini.media.get_audio_sample()
                 if audio is not None:
+                    # Convert to numpy float32 if needed
+                    if isinstance(audio, bytes):
+                        audio = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
+                    elif audio.dtype != np.float32:
+                        audio = audio.astype(np.float32)
+
+                    # Mix to mono if multi-channel
+                    if audio.ndim == 2:
+                        audio = audio.mean(axis=1)
+
+                    # Resample to 16kHz if needed
+                    if mic_sr != 16000:
+                        ratio = 16000 / mic_sr
+                        n_out = int(len(audio) * ratio)
+                        audio = np.interp(
+                            np.linspace(0, len(audio) - 1, n_out),
+                            np.arange(len(audio)),
+                            audio,
+                        ).astype(np.float32)
+
                     sonic.feed_audio(audio)
-            except Exception:
-                pass
+                    audio_chunk_count += 1
+                    if audio_chunk_count % 500 == 1:
+                        rms = np.sqrt(np.mean(audio ** 2))
+                        logger.info(f"Audio chunks fed: {audio_chunk_count}, RMS: {rms:.4f}, sonic.state={sonic.state}")
+            except Exception as e:
+                logger.warning(f"Audio feed error: {e}")
 
             # --- Feed camera frames to Nova Vision ---
             if vision_enabled:
