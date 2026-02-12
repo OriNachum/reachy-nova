@@ -20,6 +20,7 @@ from aws_sdk_bedrock_runtime.models import (
     InvokeModelWithBidirectionalStreamInputChunk,
 )
 from aws_sdk_bedrock_runtime.config import Config
+from smithy_aws_core.identity.environment import EnvironmentCredentialsResolver
 
 logger = logging.getLogger(__name__)
 
@@ -89,31 +90,35 @@ class NovaSonic:
         config = Config(
             endpoint_uri=endpoint,
             region=self.region,
-            aws_access_key_id=key_id,
-            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
-            aws_session_token=os.environ.get("AWS_SESSION_TOKEN"),
+            aws_credentials_identity_resolver=EnvironmentCredentialsResolver(),
         )
         self._client = BedrockRuntimeClient(config=config)
         logger.info("Client created OK")
 
     async def _send(self, event: dict) -> None:
+        event_type = next(iter(event.keys()), "unknown")
+        logger.debug(f"SEND → {event_type}")
         payload = json.dumps({"event": event}).encode("utf-8")
         chunk = InvokeModelWithBidirectionalStreamInputChunk(
             value=BidirectionalInputPayloadPart(bytes_=payload)
         )
         await self._stream.input_stream.send(chunk)
+        logger.debug(f"SEND → {event_type} OK")
 
     async def _start_session(self) -> None:
         if not self._client:
             self._init_client()
 
+        logger.info(f"Opening bidirectional stream for model={self.model_id}")
         self._stream = await self._client.invoke_model_with_bidirectional_stream(
             InvokeModelWithBidirectionalStreamOperationInput(model_id=self.model_id)
         )
+        logger.info("Stream opened OK")
         self._active = True
         self._set_state("listening")
 
         # Session start
+        logger.info("Sending sessionStart")
         await self._send({
             "sessionStart": {
                 "inferenceConfiguration": {
@@ -125,6 +130,7 @@ class NovaSonic:
         })
 
         # Prompt start with audio output config
+        logger.info(f"Sending promptStart (voice={self.voice_id})")
         await self._send({
             "promptStart": {
                 "promptName": self._prompt_name,
@@ -142,6 +148,7 @@ class NovaSonic:
         })
 
         # System prompt
+        logger.info(f"Sending system prompt ({len(self.system_prompt)} chars)")
         await self._send({
             "contentStart": {
                 "promptName": self._prompt_name,
@@ -167,6 +174,7 @@ class NovaSonic:
         })
 
         # Start audio input stream
+        logger.info("Sending audio input contentStart")
         await self._send({
             "contentStart": {
                 "promptName": self._prompt_name,
@@ -199,6 +207,9 @@ class NovaSonic:
 
                     data = json.loads(result.value.bytes_.decode("utf-8"))
                     event = data.get("event", {})
+                    event_type = next(iter(event.keys()), "unknown")
+                    if event_type != "audioOutput":  # don't spam audio chunks
+                        logger.debug(f"RECV ← {event_type}: {json.dumps(event.get(event_type, {}))[:200]}")
 
                     if "textOutput" in event:
                         text = event["textOutput"].get("content", "")
@@ -277,6 +288,8 @@ class NovaSonic:
 
     def start(self, stop_event: threading.Event) -> None:
         """Start the Nova Sonic session in a background thread."""
+        import traceback
+
         def _run():
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
@@ -284,6 +297,7 @@ class NovaSonic:
                 self._loop.run_until_complete(self._run_loop(stop_event))
             except Exception as e:
                 logger.error(f"Nova Sonic loop error: {e}")
+                logger.error(traceback.format_exc())
             finally:
                 self._loop.close()
 

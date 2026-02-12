@@ -69,7 +69,12 @@ def main():
     parser.add_argument("--voice", default="matthew", help="Voice ID (default: matthew)")
     parser.add_argument("--system", default=None, help="System prompt override")
     parser.add_argument("--region", default="us-east-1", help="AWS region")
+    parser.add_argument("--debug", action="store_true", help="Enable DEBUG logging")
     args = parser.parse_args()
+
+    if args.debug:
+        logging.getLogger("reachy_nova.nova_sonic").setLevel(logging.DEBUG)
+        logger.setLevel(logging.DEBUG)
 
     system_prompt = args.system or (
         "You are Nova, a friendly voice assistant. "
@@ -94,15 +99,10 @@ def main():
         stop_event.set()
     signal.signal(signal.SIGINT, handle_signal)
 
-    # ── Start Nova Sonic ───────────────────────────────────────────
-    logger.info("Starting Nova Sonic...")
-    sonic.start(stop_event)
-    time.sleep(1)  # Let the session establish
-
-    # ── Start PyAudio ──────────────────────────────────────────────
+    # ── Start PyAudio first (ALSA spam happens here) ───────────────
+    logger.info("Initialising audio...")
     pa = pyaudio.PyAudio()
 
-    # Speaker output stream (24kHz)
     speaker_stream = pa.open(
         format=pyaudio.paInt16,
         channels=1,
@@ -112,7 +112,6 @@ def main():
         stream_callback=speaker_callback,
     )
 
-    # Mic input stream (16kHz)
     mic_stream = pa.open(
         format=pyaudio.paInt16,
         channels=1,
@@ -120,17 +119,41 @@ def main():
         input=True,
         frames_per_buffer=INPUT_CHUNK_SIZE,
     )
+    logger.info("Audio OK")
 
+    # ── Start Nova Sonic ───────────────────────────────────────────
+    logger.info("Starting Nova Sonic...")
+    sonic.start(stop_event)
+
+    # Wait for session to come up (or fail)
+    for i in range(50):  # up to 5 seconds
+        time.sleep(0.1)
+        if sonic.state != "idle":
+            break
+    if sonic.state == "idle":
+        logger.error("Nova Sonic failed to start — state is still 'idle'. Check errors above.")
+        stop_event.set()
+        mic_stream.close()
+        speaker_stream.close()
+        pa.terminate()
+        sys.exit(1)
+
+    logger.info(f"Nova Sonic ready (state={sonic.state})")
     logger.info("Listening — speak into your mic (Ctrl+C to quit)")
     speaker_stream.start_stream()
 
     # ── Main loop: read mic → feed sonic ───────────────────────────
+    chunk_count = 0
     try:
         while not stop_event.is_set():
             try:
                 pcm_data = mic_stream.read(INPUT_CHUNK_SIZE, exception_on_overflow=False)
                 samples = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
                 sonic.feed_audio(samples)
+                chunk_count += 1
+                if chunk_count % 100 == 0:  # every ~10s at 100ms chunks
+                    rms = np.sqrt(np.mean(samples ** 2))
+                    logger.info(f"Mic chunks sent: {chunk_count}, RMS: {rms:.4f}, sonic.state={sonic.state}")
             except OSError:
                 pass
     except KeyboardInterrupt:
