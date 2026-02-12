@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "reachy_nova"
+version = "0.1.0"
+description = "Reachy Nova - Voice, Vision & Browser AI for Reachy Mini"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "reachy-mini",
+    "boto3>=1.35.0",
+    "aws_sdk_bedrock_runtime>=0.3.0",
+    "nova-act>=3.0.0",
+    "numpy",
+    "opencv-python",
+]
+keywords = ["reachy-mini-app"]
+
+[project.entry-points."reachy_mini_apps"]
+reachy_nova = "reachy_nova.main:ReachyNova"
+
+[tool.setuptools]
+package-dir = { "" = "." }
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools.package-data]
+reachy_nova = ["**/*"] # Also include all non-.py files

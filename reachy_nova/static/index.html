@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Reachy Nova - AI Command Center</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Header -->
+    <header>
+        <div class="header-left">
+            <div class="logo">
+                <div class="robot-face" id="robot-face">
+                    <div class="eye left"></div>
+                    <div class="eye right"></div>
+                    <div class="mouth"></div>
+                </div>
+            </div>
+            <div>
+                <h1>Reachy Nova</h1>
+                <span class="subtitle">Voice + Vision + Browser AI</span>
+            </div>
+        </div>
+        <div class="header-right">
+            <div class="mood-badge" id="mood-badge">happy</div>
+            <div class="uptime" id="uptime">00:00</div>
+        </div>
+    </header>
+
+    <!-- Main Grid -->
+    <main>
+        <!-- Voice Panel -->
+        <section class="panel voice-panel">
+            <div class="panel-header">
+                <h2><span class="icon">&#127908;</span> Nova Sonic</h2>
+                <div class="status-dot" id="voice-dot"></div>
+            </div>
+            <div class="voice-state" id="voice-state">
+                <div class="waveform" id="waveform">
+                    <div class="wave-bar"></div>
+                    <div class="wave-bar"></div>
+                    <div class="wave-bar"></div>
+                    <div class="wave-bar"></div>
+                    <div class="wave-bar"></div>
+                    <div class="wave-bar"></div>
+                    <div class="wave-bar"></div>
+                </div>
+                <span class="state-label" id="voice-label">Idle</span>
+            </div>
+            <div class="transcript-box">
+                <div class="transcript-entry user" id="user-text">
+                    <span class="role">You:</span>
+                    <span class="text">...</span>
+                </div>
+                <div class="transcript-entry assistant" id="assistant-text">
+                    <span class="role">Nova:</span>
+                    <span class="text">...</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Vision Panel -->
+        <section class="panel vision-panel">
+            <div class="panel-header">
+                <h2><span class="icon">&#128065;</span> Nova Pro Vision</h2>
+                <div class="vision-controls">
+                    <label class="toggle">
+                        <input type="checkbox" id="vision-toggle" checked>
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <button class="btn btn-sm" id="vision-snap" title="Analyze now">&#128248;</button>
+                </div>
+            </div>
+            <div class="vision-content">
+                <div class="vision-status" id="vision-status">
+                    <div class="eye-scanner" id="eye-scanner">
+                        <div class="scan-line"></div>
+                    </div>
+                </div>
+                <div class="vision-description" id="vision-description">
+                    Waiting for first frame analysis...
+                </div>
+            </div>
+        </section>
+
+        <!-- Browser Panel -->
+        <section class="panel browser-panel">
+            <div class="panel-header">
+                <h2><span class="icon">&#127760;</span> Nova Act Browser</h2>
+                <div class="status-dot" id="browser-dot"></div>
+            </div>
+            <div class="browser-input">
+                <input type="text" id="browser-instruction" placeholder="Tell the robot to browse something...">
+                <button class="btn btn-primary" id="browser-go">Go</button>
+            </div>
+            <div class="browser-content">
+                <div class="browser-screenshot" id="browser-screenshot">
+                    <div class="placeholder-screen">
+                        <span>No browser session</span>
+                    </div>
+                </div>
+                <div class="browser-result" id="browser-result"></div>
+            </div>
+        </section>
+
+        <!-- Robot Control Panel -->
+        <section class="panel control-panel">
+            <div class="panel-header">
+                <h2><span class="icon">&#129302;</span> Robot</h2>
+            </div>
+            <div class="control-grid">
+                <div class="control-group">
+                    <label>Antenna Mode</label>
+                    <div class="btn-group">
+                        <button class="btn btn-sm antenna-btn active" data-mode="auto">Auto</button>
+                        <button class="btn btn-sm antenna-btn" data-mode="excited">Hyper</button>
+                        <button class="btn btn-sm antenna-btn" data-mode="calm">Chill</button>
+                        <button class="btn btn-sm antenna-btn" data-mode="off">Off</button>
+                    </div>
+                </div>
+                <div class="control-group">
+                    <label>Mood Override</label>
+                    <div class="btn-group">
+                        <button class="btn btn-sm mood-btn" data-mood="happy">Happy</button>
+                        <button class="btn btn-sm mood-btn" data-mood="curious">Curious</button>
+                        <button class="btn btn-sm mood-btn" data-mood="excited">Excited</button>
+                        <button class="btn btn-sm mood-btn" data-mood="thinking">Thinking</button>
+                    </div>
+                </div>
+                <div class="quick-commands">
+                    <label>Quick Commands</label>
+                    <button class="btn btn-sm" id="cmd-look">What do you see?</button>
+                    <button class="btn btn-sm" id="cmd-weather">Check the weather</button>
+                    <button class="btn btn-sm" id="cmd-news">Read the news</button>
+                    <button class="btn btn-sm" id="cmd-joke">Tell a joke</button>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/main.js"></script>
+</body>
+</html>
