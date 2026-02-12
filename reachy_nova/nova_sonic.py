@@ -19,12 +19,7 @@ from aws_sdk_bedrock_runtime.models import (
     BidirectionalInputPayloadPart,
     InvokeModelWithBidirectionalStreamInputChunk,
 )
-from aws_sdk_bedrock_runtime.config import (
-    Config,
-    HTTPAuthSchemeResolver,
-    SigV4AuthScheme,
-)
-from smithy_aws_core.identity.environment import EnvironmentCredentialsResolver
+from aws_sdk_bedrock_runtime.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -86,14 +81,20 @@ class NovaSonic:
                 pass
 
     def _init_client(self) -> None:
+        import os
+        endpoint = f"https://bedrock-runtime.{self.region}.amazonaws.com"
+        key_id = os.environ.get("AWS_ACCESS_KEY_ID", "")
+        logger.info(f"Init client: region={self.region}, endpoint={endpoint}")
+        logger.info(f"  AWS_ACCESS_KEY_ID={key_id[:8]}..., session_token={'yes' if os.environ.get('AWS_SESSION_TOKEN') else 'no'}")
         config = Config(
-            endpoint_uri=f"https://bedrock-runtime.{self.region}.amazonaws.com",
+            endpoint_uri=endpoint,
             region=self.region,
-            aws_credentials_identity_resolver=EnvironmentCredentialsResolver(),
-            http_auth_scheme_resolver=HTTPAuthSchemeResolver(),
-            http_auth_schemes={"aws.auth#sigv4": SigV4AuthScheme()},
+            aws_access_key_id=key_id,
+            aws_secret_access_key=os.environ.get("AWS_SECRET_ACCESS_KEY"),
+            aws_session_token=os.environ.get("AWS_SESSION_TOKEN"),
         )
         self._client = BedrockRuntimeClient(config=config)
+        logger.info("Client created OK")
 
     async def _send(self, event: dict) -> None:
         payload = json.dumps({"event": event}).encode("utf-8")

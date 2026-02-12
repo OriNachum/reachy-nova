@@ -17,8 +17,12 @@ dependencies = [
     "numpy",
     "opencv-python",
     "python-dotenv",
+    "pyaudio",
 ]
 keywords = ["reachy-mini-app"]
+
+[project.scripts]
+sonic-demo = "tools.sonic_demo:main"
 
 [project.entry-points."reachy_mini_apps"]
 reachy_nova = "reachy_nova.main:ReachyNova"
