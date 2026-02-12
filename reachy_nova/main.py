@@ -23,6 +23,7 @@ from reachy_mini.utils import create_head_pose
 from .nova_sonic import NovaSonic, OUTPUT_SAMPLE_RATE
 from .nova_vision import NovaVision
 from .nova_browser import NovaBrowser
+from .tracking import TrackingManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -58,6 +59,8 @@ class ReachyNova(ReachyMiniApp):
             "last_assistant_text": "",
             "antenna_mode": "auto",  # auto, excited, calm, off
             "mood": "happy",  # happy, curious, excited, thinking
+            "tracking_enabled": True,
+            "tracking_mode": "idle",  # idle, speaker, face, snap
         }
 
         def update_state(**kwargs):
@@ -189,6 +192,20 @@ class ReachyNova(ReachyMiniApp):
             update_state(mood=mood)
             return {"mood": mood}
 
+        class TrackingToggle(BaseModel):
+            enabled: bool
+
+        @self.settings_app.post("/api/tracking/toggle")
+        def toggle_tracking(body: TrackingToggle):
+            update_state(tracking_enabled=body.enabled)
+            if not body.enabled:
+                update_state(tracking_mode="idle")
+            return {"tracking_enabled": body.enabled}
+
+        # --- Tracking manager ---
+        tracker = TrackingManager()
+        last_doa_time = 0.0
+
         # --- Start services ---
         sonic.start(stop_event)
         vision.start(stop_event)
@@ -220,24 +237,36 @@ class ReachyNova(ReachyMiniApp):
                 voice_state = app_state["voice_state"]
                 antenna_mode = app_state["antenna_mode"]
                 vision_enabled = app_state["vision_enabled"]
+                tracking_enabled = app_state["tracking_enabled"]
 
-            # --- Head animation based on state ---
-            if voice_state == "listening":
-                # Subtle attentive movement
-                yaw_deg = 5.0 * np.sin(2.0 * np.pi * 0.1 * t)
-                pitch_deg = -5.0  # Slight downward look (attentive)
-            elif voice_state == "speaking":
-                # Animated, expressive head movement
-                yaw_deg = 15.0 * np.sin(2.0 * np.pi * SPEAK_YAW_SPEED * t)
-                pitch_deg = 5.0 * np.sin(2.0 * np.pi * 0.4 * t)
-            elif voice_state == "thinking":
-                # Look up and to the side (thinking pose)
-                yaw_deg = 20.0 * np.sin(2.0 * np.pi * 0.05 * t)
-                pitch_deg = -10.0
+            # --- Active tracking ---
+            if tracking_enabled:
+                # Update DoA (throttled to ~5Hz to avoid I2C bus contention)
+                if t - last_doa_time > 0.2:
+                    last_doa_time = t
+                    try:
+                        doa = reachy_mini.media.audio.get_DoA()
+                        tracker.update_doa(doa)
+                    except Exception:
+                        pass
+
+                # Get tracked head target (falls back to idle animation)
+                yaw_deg, pitch_deg = tracker.get_head_target(t, voice_state, mood)
+                update_state(tracking_mode=tracker.mode)
             else:
-                # Idle - gentle scanning
-                yaw_deg = 25.0 * np.sin(2.0 * np.pi * IDLE_YAW_SPEED * t)
-                pitch_deg = 3.0 * np.sin(2.0 * np.pi * 0.08 * t)
+                # Original sinusoidal head animation
+                if voice_state == "listening":
+                    yaw_deg = 5.0 * np.sin(2.0 * np.pi * 0.1 * t)
+                    pitch_deg = -5.0
+                elif voice_state == "speaking":
+                    yaw_deg = 15.0 * np.sin(2.0 * np.pi * SPEAK_YAW_SPEED * t)
+                    pitch_deg = 5.0 * np.sin(2.0 * np.pi * 0.4 * t)
+                elif voice_state == "thinking":
+                    yaw_deg = 20.0 * np.sin(2.0 * np.pi * 0.05 * t)
+                    pitch_deg = -10.0
+                else:
+                    yaw_deg = 25.0 * np.sin(2.0 * np.pi * IDLE_YAW_SPEED * t)
+                    pitch_deg = 3.0 * np.sin(2.0 * np.pi * 0.08 * t)
 
             head_pose = create_head_pose(yaw=yaw_deg, pitch=pitch_deg, degrees=True)
 
@@ -293,6 +322,10 @@ class ReachyNova(ReachyMiniApp):
                             audio,
                         ).astype(np.float32)
 
+                    # Feed audio to snap detector
+                    if tracking_enabled:
+                        tracker.detect_snap(audio)
+
                     sonic.feed_audio(audio)
                     audio_chunk_count += 1
                     if audio_chunk_count % 500 == 1:
@@ -301,12 +334,14 @@ class ReachyNova(ReachyMiniApp):
             except Exception as e:
                 logger.warning(f"Audio feed error: {e}")
 
-            # --- Feed camera frames to Nova Vision ---
+            # --- Feed camera frames to Nova Vision and Tracking ---
             if vision_enabled:
                 try:
                     frame = reachy_mini.media.get_frame()
                     if frame is not None:
                         vision.update_frame(frame)
+                        if tracking_enabled:
+                            tracker.update_vision(frame, t)
                 except Exception:
                     pass
 

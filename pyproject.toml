@@ -18,6 +18,7 @@ dependencies = [
     "opencv-python",
     "python-dotenv",
     "pyaudio",
+    "ultralytics",
 ]
 keywords = ["reachy-mini-app"]
 

@@ -19,6 +19,8 @@ const els = {
     browserGo: document.getElementById('browser-go'),
     browserScreenshot: document.getElementById('browser-screenshot'),
     browserResult: document.getElementById('browser-result'),
+    trackingToggle: document.getElementById('tracking-toggle'),
+    trackingMode: document.getElementById('tracking-mode'),
 };
 
 // --- State polling ---
@@ -99,6 +101,16 @@ function updateUI(state) {
     if (state.browser_screenshot) {
         els.browserScreenshot.innerHTML = `<img src="data:image/png;base64,${state.browser_screenshot}" alt="Browser">`;
     }
+
+    // Tracking
+    if (els.trackingMode) {
+        const mode = state.tracking_mode || 'idle';
+        els.trackingMode.textContent = mode;
+        els.trackingMode.className = 'tracking-mode-label ' + mode;
+    }
+    if (els.trackingToggle && state.tracking_enabled !== undefined) {
+        els.trackingToggle.checked = state.tracking_enabled;
+    }
 }
 
 // --- API helpers ---
@@ -135,6 +147,11 @@ els.browserGo.addEventListener('click', () => {
 
 els.browserInstruction.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') els.browserGo.click();
+});
+
+// Tracking toggle
+els.trackingToggle?.addEventListener('change', (e) => {
+    postJSON('/api/tracking/toggle', { enabled: e.target.checked });
 });
 
 // Antenna mode buttons
