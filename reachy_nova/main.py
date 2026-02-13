@@ -33,9 +33,92 @@ logger = logging.getLogger(__name__)
 IDLE_YAW_SPEED = 0.15      # Slow idle head sweep
 LISTEN_YAW_SPEED = 0.0     # Stay still when listening
 SPEAK_YAW_SPEED = 0.3      # Animated when speaking
-ANTENNA_SPEED = 0.5         # Antenna wiggle speed
-EXCITED_ANTENNA_AMP = 35.0  # Bigger wiggles when excited
-CALM_ANTENNA_AMP = 15.0     # Gentle wiggles when calm
+
+# All moods available to the system
+VALID_MOODS = {
+    "happy", "excited", "curious", "thinking",
+    "sad", "disappointed", "surprised", "sleepy", "proud", "calm",
+}
+
+
+def ease_sin(t: float, freq: float) -> float:
+    """Pure sine wave — naturally smooth, decelerates at peaks."""
+    return np.sin(2.0 * np.pi * freq * t)
+
+
+def ease_sin_soft(t: float, freq: float) -> float:
+    """Sine-of-sine — extra dwell time at the extremes for organic feel.
+
+    sin(π/2 · sin(θ)) spends more time near ±1 and moves faster
+    through the center, giving a softer, more deliberate motion.
+    """
+    return float(np.sin(0.5 * np.pi * np.sin(2.0 * np.pi * freq * t)))
+
+
+# --- Mood antenna profiles ---
+# Each mood defines: (frequency, amplitude, phase_pattern, easing_fn)
+# phase_pattern: "oppose" = [a, -a], "sync" = [a, a], or a custom callable
+MOOD_ANTENNAS = {
+    # Cheerful default - gentle opposing sway
+    "happy": {
+        "freq": 0.25, "amp": 18.0, "phase": "oppose",
+        "ease": ease_sin,
+    },
+    # High energy - faster, bigger wiggles
+    "excited": {
+        "freq": 0.7, "amp": 30.0, "phase": "oppose",
+        "ease": ease_sin,
+    },
+    # Attentive - antennas tilt forward together
+    "curious": {
+        "freq": 0.35, "amp": 18.0, "phase": "sync",
+        "ease": ease_sin,
+        "offset": 10.0,  # bias forward
+    },
+    # Processing - asymmetric, one up one tilted
+    "thinking": {
+        "freq": 0.12, "amp": 15.0, "phase": "custom",
+        "ease": ease_sin_soft,
+    },
+    # Droopy, slow backward lean
+    "sad": {
+        "freq": 0.08, "amp": 8.0, "phase": "sync",
+        "ease": ease_sin_soft,
+        "offset": -25.0,  # antennas pulled back
+    },
+    # Low sag, barely moving
+    "disappointed": {
+        "freq": 0.06, "amp": 5.0, "phase": "sync",
+        "ease": ease_sin_soft,
+        "offset": -20.0,
+    },
+    # Quick perk then settle
+    "surprised": {
+        "freq": 0.5, "amp": 25.0, "phase": "oppose",
+        "ease": ease_sin,
+        "offset": 15.0,  # antennas perked up
+    },
+    # Very slow, drooping
+    "sleepy": {
+        "freq": 0.04, "amp": 4.0, "phase": "sync",
+        "ease": ease_sin_soft,
+        "offset": -18.0,
+    },
+    # Held high with subtle movement
+    "proud": {
+        "freq": 0.15, "amp": 6.0, "phase": "oppose",
+        "ease": ease_sin_soft,
+        "offset": 20.0,  # antennas up high
+    },
+    # Relaxed gentle movement
+    "calm": {
+        "freq": 0.12, "amp": 10.0, "phase": "oppose",
+        "ease": ease_sin_soft,
+    },
+}
+
+# Transition smoothing for mood changes (seconds to blend)
+MOOD_BLEND_TIME = 1.5
 
 
 class ReachyNova(ReachyMiniApp):
@@ -58,8 +141,8 @@ class ReachyNova(ReachyMiniApp):
             "browser_screenshot": "",
             "last_user_text": "",
             "last_assistant_text": "",
-            "antenna_mode": "auto",  # auto, excited, calm, off
-            "mood": "happy",  # happy, curious, excited, thinking
+            "antenna_mode": "auto",  # auto, off
+            "mood": "happy",  # see VALID_MOODS
             "tracking_enabled": True,
             "tracking_mode": "idle",  # idle, speaker, face, snap
         }
@@ -108,6 +191,30 @@ class ReachyNova(ReachyMiniApp):
             return vision.analyze_latest(query)
 
         skill_manager.register_executor("look", look_executor)
+
+        # Register mood skill executor
+        def mood_executor(params: dict) -> str:
+            mood = params.get("mood", "happy").lower()
+            if mood not in VALID_MOODS:
+                return f"[Unknown mood '{mood}'. Available: {', '.join(sorted(VALID_MOODS))}]"
+            update_state(mood=mood)
+            return f"[Mood changed to {mood}]"
+
+        skill_manager.register_executor(
+            "mood",
+            mood_executor,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "mood": {
+                        "type": "string",
+                        "description": "The mood to express",
+                        "enum": sorted(VALID_MOODS),
+                    }
+                },
+                "required": ["mood"],
+            },
+        )
 
         # --- Nova Sonic (Voice) ---
         def on_transcript(role: str, text: str):
@@ -223,7 +330,9 @@ class ReachyNova(ReachyMiniApp):
 
         @self.settings_app.post("/api/mood")
         def set_mood(body: dict):
-            mood = body.get("mood", "happy")
+            mood = body.get("mood", "happy").lower()
+            if mood not in VALID_MOODS:
+                return {"error": f"Unknown mood. Available: {sorted(VALID_MOODS)}"}
             update_state(mood=mood)
             return {"mood": mood}
 
@@ -275,6 +384,11 @@ class ReachyNova(ReachyMiniApp):
         logger.info("Reachy Nova is alive! All systems go.")
         audio_chunk_count = 0
 
+        # Antenna blending state for smooth mood transitions
+        prev_antennas = np.array([0.0, 0.0])
+        prev_mood = "happy"
+        mood_change_time = 0.0
+
         # --- Main control loop ---
         while not stop_event.is_set():
             t = time.time() - t0
@@ -318,30 +432,44 @@ class ReachyNova(ReachyMiniApp):
 
             head_pose = create_head_pose(yaw=yaw_deg, pitch=pitch_deg, degrees=True)
 
-            # --- Antenna animation ---
+            # --- Antenna animation (eased, mood-driven) ---
             if antenna_mode == "off":
                 antennas_deg = np.array([0.0, 0.0])
-            elif antenna_mode == "excited" or mood == "excited":
-                amp = EXCITED_ANTENNA_AMP
-                a = amp * np.sin(2.0 * np.pi * 1.5 * t)
-                antennas_deg = np.array([a, -a])
-            elif antenna_mode == "calm":
-                amp = CALM_ANTENNA_AMP
-                a = amp * np.sin(2.0 * np.pi * 0.3 * t)
-                antennas_deg = np.array([a, -a])
-            elif mood == "thinking":
-                # Asymmetric "thinking" antenna pose
-                a1 = 20.0 * np.sin(2.0 * np.pi * 0.2 * t)
-                a2 = -10.0 + 5.0 * np.sin(2.0 * np.pi * 0.3 * t)
-                antennas_deg = np.array([a1, a2])
-            elif mood == "curious":
-                amp = 20.0
-                a = amp * np.sin(2.0 * np.pi * 0.8 * t)
-                antennas_deg = np.array([a, a])  # Same direction = curious
             else:
-                amp = 20.0
-                a = amp * np.sin(2.0 * np.pi * ANTENNA_SPEED * t)
-                antennas_deg = np.array([a, -a])
+                # Detect mood change for blending
+                if mood != prev_mood:
+                    prev_mood = mood
+                    mood_change_time = t
+
+                profile = MOOD_ANTENNAS.get(mood, MOOD_ANTENNAS["happy"])
+                ease_fn = profile["ease"]
+                freq = profile["freq"]
+                amp = profile["amp"]
+                offset = profile.get("offset", 0.0)
+
+                if profile["phase"] == "custom" and mood == "thinking":
+                    # Asymmetric thinking pose
+                    a1 = offset + amp * ease_fn(t, freq)
+                    a2 = -10.0 + 5.0 * ease_fn(t, freq * 1.5)
+                    target_antennas = np.array([a1, a2])
+                elif profile["phase"] == "sync":
+                    a = offset + amp * ease_fn(t, freq)
+                    target_antennas = np.array([a, a])
+                else:  # oppose
+                    a = amp * ease_fn(t, freq)
+                    target_antennas = np.array([offset + a, offset - a])
+
+                # Smooth blend on mood transitions
+                elapsed = t - mood_change_time
+                if elapsed < MOOD_BLEND_TIME:
+                    alpha = elapsed / MOOD_BLEND_TIME
+                    # Smoothstep the blend factor
+                    alpha = alpha * alpha * (3.0 - 2.0 * alpha)
+                    antennas_deg = prev_antennas * (1.0 - alpha) + target_antennas * alpha
+                else:
+                    antennas_deg = target_antennas
+
+                prev_antennas = antennas_deg
 
             antennas_rad = np.deg2rad(antennas_deg)
             reachy_mini.set_target(head=head_pose, antennas=antennas_rad)
