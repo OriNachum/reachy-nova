@@ -21,7 +21,7 @@ AI-powered brain for Reachy Mini, integrating three Amazon Nova services:
 
 This project enables Reachy Mini to see, hear, speak, and interact with the digital world.
 
-<img width="1115" height="987" alt="image" src="https://github.com/user-attachments/assets/8523bafd-4d11-4a7c-873a-3382f8b192bd" />
+<img width="1115" height="987" alt="image" src="https://github.com/user-attachments/assets/3b66f514-3384-47a8-8fd8-dc6f82faa38c" />
 
 
 ## Documentation
