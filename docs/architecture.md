@@ -6,49 +6,33 @@ Reachy Nova is a Python application designed for the Reachy Mini robot. It integ
 
 The application is structured as a `ReachyMiniApp`, which is the standard way to build applications for Reachy Mini. The main class `ReachyNova` orchestrates the following core components:
 
-1.  **Nova Sonic (Voice)**: Handles bidirectional speech-to-speech communication using Amazon Bedrock's Nova Sonic model.
-2.  **Nova Vision (Sight)**: Analysis camera frames using Amazon Bedrock's Nova Pro model to understand the environment.
-3.  **Nova Act (Action)**: Performs browser automation tasks triggered by natural language commands using the Nova Act library.
-4.  **Tracking Manager**: Fuses audio and visual signals (DoA, Face Detection) to control the robot's head movements.
+1.  **Nova Sonic (Voice)**: Handles bidirectional speech-to-speech communication and tool use.
+2.  **Nova Vision (Sight)**: Analysis camera frames (periodically or event-triggered).
+3.  **Nova Act (Action)**: Performs browser automation tasks.
+4.  **Skill Manager**: Discovers and executes tools (like "Look Skill").
+5.  **Tracking Manager**: Fuses sensor signals and emits events (`person_detected`, `snap_detected`) to trigger system behaviors.
 
 ## Component Interaction
 
 ```mermaid
 graph TD
-    User((User))
-    Robot[Reachy Mini]
-    Main[ReachyNova Main Loop]
+    User((User)) <--> Robot[Reachy Mini]
+    Main[ReachyNova]
     Sonic[Nova Sonic]
     Vision[Nova Vision]
-    Browser[Nova Browser]
-    Tracker[Tracking Manager]
-    AWS[Amazon Bedrock]
-
-    User <-->|Audio| Robot
-    User -->|Visual| Robot
-    Robot -->|Frames| Main
-    Robot -->|Audio Samples| Main
     
-    Main -->|Audio Stream| Sonic
-    Main -->|Frames| Vision
-    Main -->|Frames| Tracker
-    Main -->|Antenna/Head Control| Robot
+    Robot -->|Frames| Vision
+    Robot -->|Audio/DoA| Tracker[Tracking Manager]
+    Tracker -->|Target Angles| Robot
+    Tracker -->|Events| Main
     
-    Sonic <-->|Bidirectional Stream| AWS
-    Sonic -->|Transcripts| Main
-    Sonic -->|Audio Output| Main
+    Main -->|Trigger| Vision
+    Vision -->|Description| Sonic
     
-    Vision -->|Analyze Request| AWS
-    Vision -->|Description| Main
-    
-    Main -->|Inject Description| Sonic
-    
-    Sonic -->|Browser Command| Browser
-    Browser -->|Execute Task| AWS
-    Browser -->|Result| Main
-    Main -->|Inject Result| Sonic
-    
-    Tracker -->|Target Angles| Main
+    Sonic <-->|Voice Stream| AWS[Amazon Bedrock]
+    Sonic -->|Tool Call| Main
+    Main -->|Execute Skill| Main
+    Main -->|Tool Result| Sonic
 ```
 
 ## State Management

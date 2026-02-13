@@ -35,20 +35,32 @@ NovaVision(
 #### Key Methods
 
 -   `start(stop_event: threading.Event)`: Starts the background thread for periodic analysis.
--   `update_frame(frame: np.ndarray)`: Stores the latest camera frame (BGR from OpenCV) for processing.
--   `trigger_analyze()`: Forces an immediate analysis, interrupting the interval timer.
--   `analyze_frame(frame: np.ndarray, prompt: str)`: Sends a single frame to Bedrock and returns the description.
+-   `update_frame(frame: np.ndarray)`: Stores the latest camera frame (BGR from OpenCV) in a ring buffer (size 3) for processing.
+-   `trigger_analyze()`: Forces an immediate analysis via the event path (`on_tracking_event`), resetting the periodic timer.
+-   `analyze_latest(prompt: str)`: Analyzes the most recent buffered frame for a specific tool query (e.g., "Look Skill"). Returns the result directly without triggering the general `on_description` callback.
+-   `reset_timer()`: Resets the fallback analysis countdown.
 
 ### Analysis Process
 
-1.  **Frame Capture**: The main application continuously calls `update_frame()` with new camera frames.
-2.  **Trigger**: The background thread waits for `analyze_interval` seconds or a manual trigger (e.g., user asks "What do you see?").
-3.  **Preprocessing**: The frame is resized (max width 1280px) and encoded as JPEG to optimize latency and cost.
+1.  **Frame Capture**: The main application calls `update_frame()` with new camera frames, which are stored in a ring buffer.
+2.  **Trigger**: The background thread waits for `analyze_interval` seconds (default: 30s) or a manual/event trigger.
+3.  **Preprocessing**: Frames are resized (max width 1280px) and encoded as JPEG.
 4.  **Bedrock Call**:
     -   Uses `boto3.client("bedrock-runtime").invoke_model()`.
-    -   Sends the JPEG image and a text prompt ("What do you see?").
-    -   Uses the `messages-v1` schema with `maxTokens=256` for concise descriptions.
-5.  **Output**: The model returns a text description, which is passed to the `on_description` callback.
+    -   Sends the JPEG image and a text prompt ("What do you see?" or custom query).
+    -   Uses the `messages-v1` schema with `maxTokens=256`.
+5.  **Output**:
+    -   Periodic/Event Trigger: Result passed to `on_description` callback.
+    -   Tool Trigger (`analyze_latest`): Result returned directly to caller.
+
+### Frame Buffering
+
+`NovaVision` maintains a `deque` of the last 3 frames to ensure that when a tool is called (e.g., "What is that?"), it has access to recent visual context even if the camera feed is slightly delayed.
+
+### Timer Logic
+
+-   **Periodic Fallback**: If no events occur for `analyze_interval` seconds, a general analysis runs.
+-   **Event Reset**: Any analysis (periodic, manual, or tool-based) resets the timer via `reset_timer()`.
 
 ### Performance Considerations
 

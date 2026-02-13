@@ -49,6 +49,8 @@ class NovaSonic:
         on_transcript: Callable[[str, str], None] | None = None,
         on_audio_output: Callable[[np.ndarray], None] | None = None,
         on_state_change: Callable[[str], None] | None = None,
+        tools: list[dict] | None = None,
+        on_tool_use: Callable[[str, str, dict], None] | None = None,
     ):
         self.region = region
         self.model_id = model_id
@@ -57,6 +59,8 @@ class NovaSonic:
         self.on_transcript = on_transcript
         self.on_audio_output = on_audio_output
         self.on_state_change = on_state_change
+        self.tools = tools
+        self.on_tool_use = on_tool_use
 
         self._client: BedrockRuntimeClient | None = None
         self._stream = None
@@ -68,6 +72,9 @@ class NovaSonic:
         self._prompt_name = str(uuid.uuid4())
         self._system_content = str(uuid.uuid4())
         self._audio_content = str(uuid.uuid4())
+
+        # Tool use tracking
+        self._current_tool_use: dict | None = None
 
         self.state = "idle"  # idle, listening, thinking, speaking
         self.last_user_text = ""
@@ -129,23 +136,26 @@ class NovaSonic:
             }
         })
 
-        # Prompt start with audio output config
+        # Prompt start with audio output config (and optional tool config)
         logger.info(f"Sending promptStart (voice={self.voice_id})")
-        await self._send({
-            "promptStart": {
-                "promptName": self._prompt_name,
-                "textOutputConfiguration": {"mediaType": "text/plain"},
-                "audioOutputConfiguration": {
-                    "mediaType": "audio/lpcm",
-                    "sampleRateHertz": OUTPUT_SAMPLE_RATE,
-                    "sampleSizeBits": 16,
-                    "channelCount": 1,
-                    "voiceId": self.voice_id,
-                    "encoding": "base64",
-                    "audioType": "SPEECH",
-                },
-            }
-        })
+        prompt_start = {
+            "promptName": self._prompt_name,
+            "textOutputConfiguration": {"mediaType": "text/plain"},
+            "audioOutputConfiguration": {
+                "mediaType": "audio/lpcm",
+                "sampleRateHertz": OUTPUT_SAMPLE_RATE,
+                "sampleSizeBits": 16,
+                "channelCount": 1,
+                "voiceId": self.voice_id,
+                "encoding": "base64",
+                "audioType": "SPEECH",
+            },
+        }
+        if self.tools:
+            prompt_start["toolUseOutputConfiguration"] = {"mediaType": "application/json"}
+            prompt_start["toolConfiguration"] = {"tools": self.tools}
+            logger.info(f"Tool configuration: {len(self.tools)} tools registered")
+        await self._send({"promptStart": prompt_start})
 
         # System prompt
         logger.info(f"Sending system prompt ({len(self.system_prompt)} chars)")
@@ -211,7 +221,24 @@ class NovaSonic:
                     if event_type != "audioOutput":  # don't spam audio chunks
                         logger.debug(f"RECV ← {event_type}: {json.dumps(event.get(event_type, {}))[:200]}")
 
-                    if "textOutput" in event:
+                    if "contentStart" in event:
+                        cs = event["contentStart"]
+                        if cs.get("type") == "TOOL":
+                            self._current_tool_use = {
+                                "toolName": "",
+                                "toolUseId": cs.get("toolUseId", ""),
+                                "content": "",
+                            }
+                            logger.info(f"Tool use started: id={cs.get('toolUseId', '')}")
+
+                    elif "toolUse" in event:
+                        tu = event["toolUse"]
+                        if self._current_tool_use is not None:
+                            self._current_tool_use["toolName"] = tu.get("toolName", "")
+                            self._current_tool_use["toolUseId"] = tu.get("toolUseId", self._current_tool_use["toolUseId"])
+                            self._current_tool_use["content"] += tu.get("content", "")
+
+                    elif "textOutput" in event:
                         text = event["textOutput"].get("content", "")
                         role = event["textOutput"].get("role", "")
                         if role == "ASSISTANT" or not role:
@@ -237,8 +264,27 @@ class NovaSonic:
                                 self.on_audio_output(float_samples)
 
                     elif "contentEnd" in event:
-                        role = event["contentEnd"].get("role", "")
-                        if role == "ASSISTANT":
+                        ce = event["contentEnd"]
+                        content_type = ce.get("type", "")
+                        role = ce.get("role", "")
+
+                        if content_type == "TOOL" and self._current_tool_use:
+                            # Tool use complete — fire callback
+                            tu = self._current_tool_use
+                            self._current_tool_use = None
+                            tool_name = tu["toolName"]
+                            tool_use_id = tu["toolUseId"]
+                            try:
+                                params = json.loads(tu["content"]) if tu["content"] else {}
+                            except json.JSONDecodeError:
+                                params = {}
+                            logger.info(f"Tool use complete: {tool_name}({params})")
+                            if self.on_tool_use:
+                                try:
+                                    self.on_tool_use(tool_name, tool_use_id, params)
+                                except Exception as e:
+                                    logger.error(f"on_tool_use callback error: {e}")
+                        elif role == "ASSISTANT":
                             self._speaking = False
                             self._set_state("listening")
 
@@ -363,5 +409,47 @@ class NovaSonic:
 
         try:
             asyncio.run_coroutine_threadsafe(_inject(), self._loop)
+        except Exception:
+            pass
+
+    def send_tool_result(self, tool_use_id: str, result: str) -> None:
+        """Send a tool result back to the Nova Sonic conversation."""
+        if not self._active or not self._loop:
+            return
+
+        content_name = str(uuid.uuid4())
+
+        async def _send_result():
+            await self._send({
+                "contentStart": {
+                    "promptName": self._prompt_name,
+                    "contentName": content_name,
+                    "interactive": False,
+                    "type": "TOOL",
+                    "role": "TOOL",
+                    "toolResultInputConfiguration": {
+                        "toolUseId": tool_use_id,
+                        "type": "TEXT",
+                        "textInputConfiguration": {"mediaType": "text/plain"},
+                    },
+                }
+            })
+            await self._send({
+                "toolResult": {
+                    "promptName": self._prompt_name,
+                    "contentName": content_name,
+                    "content": json.dumps({"result": result}),
+                }
+            })
+            await self._send({
+                "contentEnd": {
+                    "promptName": self._prompt_name,
+                    "contentName": content_name,
+                }
+            })
+            logger.info(f"Tool result sent for {tool_use_id}: {result[:100]}...")
+
+        try:
+            asyncio.run_coroutine_threadsafe(_send_result(), self._loop)
         except Exception:
             pass

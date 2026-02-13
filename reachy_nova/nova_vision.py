@@ -5,6 +5,7 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 
 import cv2
@@ -29,7 +30,7 @@ class NovaVision:
         region: str = "us-east-1",
         model_id: str = "us.amazon.nova-pro-v1:0",
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-        analyze_interval: float = 5.0,
+        analyze_interval: float = 30.0,
         on_description: Callable[[str], None] | None = None,
     ):
         self.region = region
@@ -44,6 +45,9 @@ class NovaVision:
         self._frame_lock = threading.Lock()
         self._force_analyze = threading.Event()
 
+        # Ring buffer of last 3 frames: (timestamp, frame)
+        self._frame_buffer: deque[tuple[float, np.ndarray]] = deque(maxlen=3)
+
         self.last_description = ""
         self.analyzing = False
         self.last_analyze_time = 0.0
@@ -52,10 +56,46 @@ class NovaVision:
         """Update the latest camera frame (BGR format from OpenCV)."""
         with self._frame_lock:
             self._latest_frame = frame
+            self._frame_buffer.append((time.time(), frame.copy()))
 
     def trigger_analyze(self) -> None:
-        """Force an immediate analysis of the current frame."""
+        """Force an immediate analysis of the current frame (event path)."""
         self._force_analyze.set()
+
+    def reset_timer(self) -> None:
+        """Reset the fallback analysis countdown (called after event-triggered analysis)."""
+        self.last_analyze_time = time.time()
+
+    def get_latest_frames(self) -> list[tuple[float, np.ndarray]]:
+        """Return up to 3 most recent buffered frames as (timestamp, frame) tuples."""
+        with self._frame_lock:
+            return list(self._frame_buffer)
+
+    def analyze_latest(self, prompt: str = "What do you see?") -> str:
+        """Analyze the most recent buffered frame with a custom prompt (tool path).
+
+        Returns the result directly without firing the on_description callback.
+        Resets the fallback timer.
+        """
+        with self._frame_lock:
+            if not self._frame_buffer:
+                if self._latest_frame is not None:
+                    frame = self._latest_frame.copy()
+                else:
+                    return "[No camera frame available]"
+            else:
+                _, frame = self._frame_buffer[-1]
+                frame = frame.copy()
+
+        self.reset_timer()
+        # Call analyze_frame but suppress the on_description callback
+        saved_callback = self.on_description
+        self.on_description = None
+        try:
+            result = self.analyze_frame(frame, prompt)
+        finally:
+            self.on_description = saved_callback
+        return result
 
     def analyze_frame(self, frame: np.ndarray, prompt: str = "What do you see?") -> str:
         """Analyze a single frame and return the description."""
@@ -112,10 +152,14 @@ class NovaVision:
             self.analyzing = False
 
     def _run_loop(self, stop_event: threading.Event) -> None:
-        logger.info("Nova Vision loop started")
+        logger.info("Nova Vision loop started (fallback interval={self.analyze_interval}s)")
         while not stop_event.is_set():
-            # Wait for interval or forced trigger
-            triggered = self._force_analyze.wait(timeout=self.analyze_interval)
+            # Calculate remaining time until fallback fires
+            elapsed = time.time() - self.last_analyze_time
+            remaining = max(0.1, self.analyze_interval - elapsed)
+
+            # Wait for forced trigger or fallback timeout
+            triggered = self._force_analyze.wait(timeout=remaining)
             if stop_event.is_set():
                 break
             self._force_analyze.clear()
@@ -128,6 +172,7 @@ class NovaVision:
 
             prompt = "What do you see? Be brief and fun."
             self.analyze_frame(frame, prompt)
+            self.reset_timer()
 
     def start(self, stop_event: threading.Event) -> None:
         """Start periodic vision analysis in a background thread."""

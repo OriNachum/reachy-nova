@@ -29,6 +29,7 @@ This project enables Reachy Mini to see, hear, speak, and interact with the digi
     -   [Nova Vision (Sight)](docs/components/nova_vision.md)
     -   [Nova Browser (Action)](docs/components/nova_browser.md)
     -   [Tracking Manager](docs/components/tracking.md)
+    -   [Skills System](docs/components/skills.md)
 -   [**Main Application**](docs/main.md): Core loop and state management.
 -   [**Setup Guide**](docs/setup.md): detailed installation instructions.
 

@@ -11,6 +11,7 @@ import logging
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 
 import numpy as np
 
@@ -30,7 +31,10 @@ IDLE_PITCH_SPEED = 0.08
 class TrackingManager:
     """Fuses DoA, vision, and snap signals into head target angles."""
 
-    def __init__(self):
+    def __init__(self, on_event: Callable[[str, dict], None] | None = None):
+        self.on_event = on_event
+        self._prev_mode = "idle"  # for mode_changed events
+
         # --- YOLO face/person detection (lazy-loaded, runs in bg thread) ---
         self.model = None
         self.detect_interval = 0.2  # run detection every 200ms
@@ -85,6 +89,14 @@ class TrackingManager:
             logger.error(f"Failed to load YOLO model: {e}")
             self.model = False  # sentinel to avoid retrying
 
+    def _fire_event(self, event_type: str, data: dict | None = None) -> None:
+        """Fire an event to the registered callback."""
+        if self.on_event:
+            try:
+                self.on_event(event_type, data or {})
+            except Exception as e:
+                logger.warning(f"Event callback error ({event_type}): {e}")
+
     def update_doa(self, doa_result):
         """Process DoA from XMOS mic array.
 
@@ -127,6 +139,7 @@ class TrackingManager:
 
             with self._vision_lock:
                 self.frame_shape = (h, w)
+                had_person = self.person_bbox is not None
 
                 if results and len(results[0].boxes) > 0:
                     boxes = results[0].boxes
@@ -147,6 +160,10 @@ class TrackingManager:
 
                     self.face_yaw_accum = np.clip(self.face_yaw_accum, -MAX_YAW, MAX_YAW)
                     self.face_pitch_accum = np.clip(self.face_pitch_accum, -MAX_PITCH, MAX_PITCH)
+
+                    # Fire person_detected when transitioning from no person to person
+                    if not had_person:
+                        self._fire_event("person_detected", {"bbox": self.person_bbox})
                 else:
                     if self.person_bbox is not None and self.person_lost_time == 0.0:
                         self.person_lost_time = time.time()
@@ -155,6 +172,9 @@ class TrackingManager:
                         self.person_bbox = None
                         self.face_yaw_accum *= 0.95
                         self.face_pitch_accum *= 0.95
+                        # Fire person_lost when person disappears after hold
+                        if had_person:
+                            self._fire_event("person_lost", {})
         except Exception as e:
             logger.warning(f"Vision tracking error: {e}")
         finally:
@@ -216,6 +236,7 @@ class TrackingManager:
                 yaw_rad = (np.pi / 2) - self.last_doa_angle
                 self.snap_target_yaw = np.clip(np.degrees(yaw_rad), -MAX_YAW, MAX_YAW)
             logger.info(f"Snap detected! RMS={rms:.4f}, avg={rolling_avg:.4f}, target_yaw={self.snap_target_yaw:.1f}")
+            self._fire_event("snap_detected", {"rms": float(rms), "target_yaw": float(self.snap_target_yaw)})
 
         self.prev_chunk_low = rms < 2.0 * rolling_avg
 
@@ -233,6 +254,7 @@ class TrackingManager:
         now = time.time()
         target_yaw = 0.0
         target_pitch = 0.0
+        prev_mode = self.mode
 
         # Priority 1: Snap look
         if now - self.snap_time < self.snap_duration:
@@ -242,55 +264,58 @@ class TrackingManager:
             # Fast approach for snaps
             self.current_yaw += 0.5 * (target_yaw - self.current_yaw)
             self.current_pitch += 0.5 * (target_pitch - self.current_pitch)
-            return self.current_yaw, self.current_pitch
 
         # Priority 2: Face/person tracking (read under lock)
-        with self._vision_lock:
-            has_person = self.person_bbox is not None
-            face_yaw = self.face_yaw_accum
-            face_pitch = self.face_pitch_accum
-
-        if has_person:
+        elif self._has_person():
             self.mode = "face"
-            target_yaw = face_yaw
-            target_pitch = face_pitch
+            with self._vision_lock:
+                target_yaw = self.face_yaw_accum
+                target_pitch = self.face_pitch_accum
             self.current_yaw += self.smooth_factor * (target_yaw - self.current_yaw)
             self.current_pitch += self.smooth_factor * (target_pitch - self.current_pitch)
-            return self.current_yaw, self.current_pitch
 
         # Priority 3: Speaker (DoA)
-        if self.doa_speech_active:
+        elif self.doa_speech_active:
             self.mode = "speaker"
             target_yaw = self.doa_yaw_target
             target_pitch = -5.0  # slight downward look at speaker
             alpha = 0.2  # moderate speed for speaker tracking
             self.current_yaw += alpha * (target_yaw - self.current_yaw)
             self.current_pitch += alpha * (target_pitch - self.current_pitch)
-            return self.current_yaw, self.current_pitch
 
         # Priority 4: Idle animation (sinusoidal, state-dependent)
-        self.mode = "idle"
-
-        if voice_state == "listening":
-            target_yaw = 5.0 * np.sin(2.0 * np.pi * 0.1 * t)
-            target_pitch = -5.0
-        elif voice_state == "speaking":
-            target_yaw = 15.0 * np.sin(2.0 * np.pi * 0.3 * t)
-            target_pitch = 5.0 * np.sin(2.0 * np.pi * 0.4 * t)
-        elif voice_state == "thinking":
-            target_yaw = 20.0 * np.sin(2.0 * np.pi * 0.05 * t)
-            target_pitch = -10.0
         else:
-            target_yaw = IDLE_YAW_AMP * np.sin(2.0 * np.pi * IDLE_YAW_SPEED * t)
-            target_pitch = IDLE_PITCH_AMP * np.sin(2.0 * np.pi * IDLE_PITCH_SPEED * t)
+            self.mode = "idle"
 
-        # Smooth transition from tracking back to idle
-        self.current_yaw += 0.1 * (target_yaw - self.current_yaw)
-        self.current_pitch += 0.1 * (target_pitch - self.current_pitch)
+            if voice_state == "listening":
+                target_yaw = 5.0 * np.sin(2.0 * np.pi * 0.1 * t)
+                target_pitch = -5.0
+            elif voice_state == "speaking":
+                target_yaw = 15.0 * np.sin(2.0 * np.pi * 0.3 * t)
+                target_pitch = 5.0 * np.sin(2.0 * np.pi * 0.4 * t)
+            elif voice_state == "thinking":
+                target_yaw = 20.0 * np.sin(2.0 * np.pi * 0.05 * t)
+                target_pitch = -10.0
+            else:
+                target_yaw = IDLE_YAW_AMP * np.sin(2.0 * np.pi * IDLE_YAW_SPEED * t)
+                target_pitch = IDLE_PITCH_AMP * np.sin(2.0 * np.pi * IDLE_PITCH_SPEED * t)
 
-        # Decay accumulated face tracking angles when idle
-        with self._vision_lock:
-            self.face_yaw_accum *= 0.98
-            self.face_pitch_accum *= 0.98
+            # Smooth transition from tracking back to idle
+            self.current_yaw += 0.1 * (target_yaw - self.current_yaw)
+            self.current_pitch += 0.1 * (target_pitch - self.current_pitch)
+
+            # Decay accumulated face tracking angles when idle
+            with self._vision_lock:
+                self.face_yaw_accum *= 0.98
+                self.face_pitch_accum *= 0.98
+
+        # Fire mode_changed event on any transition
+        if self.mode != prev_mode:
+            self._fire_event("mode_changed", {"from": prev_mode, "to": self.mode})
 
         return self.current_yaw, self.current_pitch
+
+    def _has_person(self) -> bool:
+        """Check if a person is currently being tracked (thread-safe)."""
+        with self._vision_lock:
+            return self.person_bbox is not None

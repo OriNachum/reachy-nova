@@ -21,17 +21,28 @@ The main class responsible for fusing sensor data and computing target angles.
 #### Constructor
 
 ```python
-TrackingManager()
+TrackingManager(on_event: Callable[[str, dict], None] | None = None)
 ```
 
-Initializes state for DoA tracking, face tracking, snap detection, and idle behaviors.
+-   **on_event**: Callback for tracking events (e.g., `person_detected`, `snap_detected`).
 
 #### Key Methods
 
 -   `update_doa(doa_result: tuple)`: Updates the speaker direction from the microphone array.
 -   `update_vision(frame: np.ndarray, t: float)`: Sends a camera frame to the background thread for face detection.
 -   `detect_snap(audio_chunk: np.ndarray)`: Detects sharp audio transients (snaps/claps) for immediate reaction.
--   `get_head_target(t: float, voice_state: str, mood: str)`: Returns the target `(yaw, pitch)` angles for the head based on the current priority.
+-   `get_head_target(t: float, voice_state: str, mood: str)`: Returns the target `(yaw, pitch)` angles.
+
+### Events
+
+The `TrackingManager` fires events to the `on_event` callback to notify the main application of significant changes:
+
+| Event Type | Data | Description |
+| :--- | :--- | :--- |
+| `person_detected` | `{"bbox": (x1,y1,x2,y2)}` | Fired when a person is first detected after a period of absence. |
+| `person_lost` | `{}` | Fired when a tracked person is lost (after hold duration). |
+| `snap_detected` | `{"rms": float, "target_yaw": float}` | Fired when a snap/clap is detected. |
+| `mode_changed` | `{"from": str, "to": str}` | Fired when the tracking priority mode changes (e.g., `idle` -> `face`). |
 
 ### Tracking Logic
 

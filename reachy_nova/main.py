@@ -23,6 +23,7 @@ from reachy_mini.utils import create_head_pose
 from .nova_sonic import NovaSonic, OUTPUT_SAMPLE_RATE
 from .nova_vision import NovaVision
 from .nova_browser import NovaBrowser
+from .skills import SkillManager
 from .tracking import TrackingManager
 
 logging.basicConfig(level=logging.INFO)
@@ -83,6 +84,31 @@ class ReachyNova(ReachyMiniApp):
                     except Exception:
                         pass
 
+        # --- Nova Pro (Vision) ---
+        def on_vision_description(desc: str):
+            update_state(vision_description=desc, vision_analyzing=False, mood="excited")
+            logger.info(f"[Vision] {desc}")
+            # Feed vision description to voice conversation (event path)
+            sonic.inject_text(
+                f"[Your camera sees: {desc}] React to what you see briefly."
+            )
+
+        vision = NovaVision(
+            on_description=on_vision_description,
+            analyze_interval=30.0,
+        )
+
+        # --- Skills system ---
+        skill_manager = SkillManager()
+        skill_manager.discover()
+
+        # Register look skill executor (needs vision instance)
+        def look_executor(params: dict) -> str:
+            query = params.get("query", "What do you see?")
+            return vision.analyze_latest(query)
+
+        skill_manager.register_executor("look", look_executor)
+
         # --- Nova Sonic (Voice) ---
         def on_transcript(role: str, text: str):
             if role == "USER":
@@ -93,7 +119,7 @@ class ReachyNova(ReachyMiniApp):
                 if any(kw in lower for kw in ["search for", "google", "look up", "browse", "open website", "go to"]):
                     browser.queue_task(text, url="https://www.google.com")
                     update_state(browser_task=text)
-                # Check for vision commands
+                # Check for vision commands (fallback keyword path)
                 if any(kw in lower for kw in ["what do you see", "look around", "describe", "what's around"]):
                     vision.trigger_analyze()
             else:
@@ -107,24 +133,33 @@ class ReachyNova(ReachyMiniApp):
             elif state == "listening":
                 update_state(mood="curious")
 
+        # Tool use callback: runs skill in a daemon thread, sends result back
+        def on_tool_use(tool_name: str, tool_use_id: str, params: dict):
+            def _execute():
+                result = skill_manager.execute(tool_name, params)
+                sonic.send_tool_result(tool_use_id, result)
+            threading.Thread(target=_execute, daemon=True).start()
+
+        # Build system prompt with skills context
+        skills_context = skill_manager.get_system_context()
+        system_prompt = (
+            "You are Nova, the AI brain of a cute robot called Reachy Mini. "
+            "You have a camera for eyes and can see the world. "
+            "You can also browse the web using Nova Act. "
+            "Keep your responses short, fun, and expressive. "
+            "You love to help and are endlessly curious about the world around you. "
+            "React with enthusiasm when you see something interesting through your camera."
+        )
+        if skills_context:
+            system_prompt += "\n\n" + skills_context
+
         sonic = NovaSonic(
+            system_prompt=system_prompt,
             on_transcript=on_transcript,
             on_audio_output=handle_audio_output,
             on_state_change=on_voice_state,
-        )
-
-        # --- Nova Pro (Vision) ---
-        def on_vision_description(desc: str):
-            update_state(vision_description=desc, vision_analyzing=False, mood="excited")
-            logger.info(f"[Vision] {desc}")
-            # Feed vision description to voice conversation
-            sonic.inject_text(
-                f"[Your camera sees: {desc}] React to what you see briefly."
-            )
-
-        vision = NovaVision(
-            on_description=on_vision_description,
-            analyze_interval=10.0,
+            tools=skill_manager.get_tool_specs(),
+            on_tool_use=on_tool_use,
         )
 
         # --- Nova Act (Browser) ---
@@ -202,8 +237,21 @@ class ReachyNova(ReachyMiniApp):
                 update_state(tracking_mode="idle")
             return {"tracking_enabled": body.enabled}
 
-        # --- Tracking manager ---
-        tracker = TrackingManager()
+        # --- Tracking manager with event-driven vision ---
+        last_vision_event_time = 0.0
+        VISION_EVENT_COOLDOWN = 3.0
+
+        def on_tracking_event(event_type: str, data: dict):
+            nonlocal last_vision_event_time
+            now = time.time()
+            if now - last_vision_event_time < VISION_EVENT_COOLDOWN:
+                return
+            if event_type in ("person_detected", "snap_detected", "mode_changed"):
+                last_vision_event_time = now
+                logger.info(f"[Tracking event] {event_type} → triggering vision")
+                vision.trigger_analyze()
+
+        tracker = TrackingManager(on_event=on_tracking_event)
         last_doa_time = 0.0
 
         # --- Start services ---

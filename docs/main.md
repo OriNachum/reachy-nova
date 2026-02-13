@@ -25,11 +25,17 @@ The application class inheriting from `ReachyMiniApp`.
 The main execution loop.
 
 1.  **Initialization**:
-    -   Sets up shared state (`app_state`) and locks (`state_lock`, `audio_lock`).
-    -   Initializes `NovaSonic`, `NovaVision`, `NovaBrowser`, and `TrackingManager`.
+    -   Sets up shared state (`app_state`) and locks.
+    -   Initializes `SkillManager` and discovers skills.
+    -   Starts `NovaSonic` (with tools), `NovaVision`, `NovaBrowser`.
+    -   Initializes `TrackingManager` with an `on_event` callback.
     -   Starts mic recording and background service threads.
 
-2.  **API Endpoints**:
+2.  **Event Handling**:
+    -   **`on_tracking_event`**: Listens for `person_detected`, `snap_detected`, etc. Triggers `vision.trigger_analyze()` (with a 3s cooldown) to proactively describe what caught the robot's attention.
+    -   **`on_tool_use`**: Triggered by Nova Sonic when the model invokes a tool. Executes the corresponding skill in a background thread and sends the result back.
+
+3.  **API Endpoints**:
     -   Defines FastAPI routes for the web dashboard (see below).
 
 3.  **Control Loop** (`while not stop_event.is_set()`):
