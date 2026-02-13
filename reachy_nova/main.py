@@ -216,17 +216,64 @@ class ReachyNova(ReachyMiniApp):
             },
         )
 
+        # --- Nova Act (Browser) ---
+        def on_browser_result(result: str):
+            update_state(browser_result=result, browser_task="")
+            logger.info(f"[Browser] {result}")
+
+        def on_browser_screenshot(b64: str):
+            update_state(browser_screenshot=b64)
+
+        def on_browser_state(state: str):
+            update_state(browser_state=state)
+
+        def on_browser_progress(message: str):
+            """Narrate browser progress through the voice stream."""
+            logger.info(f"[Browser progress] {message}")
+            sonic.inject_text(f"[Browser status: {message}]")
+
+        browser = NovaBrowser(
+            on_result=on_browser_result,
+            on_screenshot=on_browser_screenshot,
+            on_state_change=on_browser_state,
+            on_progress=on_browser_progress,
+            headless=False,
+            chrome_channel="chromium",
+        )
+
+        # Register browse skill executor
+        def browse_executor(params: dict) -> str:
+            query = params.get("query", "")
+            url = params.get("url", "https://www.google.com")
+            update_state(browser_task=query)
+            return browser.execute(query, url)
+
+        skill_manager.register_executor(
+            "browse",
+            browse_executor,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to search for or do in the browser",
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "URL to navigate to (defaults to Google)",
+                    },
+                },
+                "required": ["query"],
+            },
+        )
+
         # --- Nova Sonic (Voice) ---
         def on_transcript(role: str, text: str):
             if role == "USER":
                 update_state(last_user_text=text, mood="thinking")
                 logger.info(f"[User] {text}")
-                # Check for browser commands
-                lower = text.lower()
-                if any(kw in lower for kw in ["search for", "google", "look up", "browse", "open website", "go to"]):
-                    browser.queue_task(text, url="https://www.google.com")
-                    update_state(browser_task=text)
                 # Check for vision commands (fallback keyword path)
+                lower = text.lower()
                 if any(kw in lower for kw in ["what do you see", "look around", "describe", "what's around"]):
                     vision.trigger_analyze()
             else:
@@ -267,27 +314,6 @@ class ReachyNova(ReachyMiniApp):
             on_state_change=on_voice_state,
             tools=skill_manager.get_tool_specs(),
             on_tool_use=on_tool_use,
-        )
-
-        # --- Nova Act (Browser) ---
-        def on_browser_result(result: str):
-            update_state(browser_result=result, browser_task="")
-            logger.info(f"[Browser] {result}")
-            sonic.inject_text(
-                f"[Browser task result: {result}] Tell the user what happened."
-            )
-
-        def on_browser_screenshot(b64: str):
-            update_state(browser_screenshot=b64)
-
-        def on_browser_state(state: str):
-            update_state(browser_state=state)
-
-        browser = NovaBrowser(
-            on_result=on_browser_result,
-            on_screenshot=on_browser_screenshot,
-            on_state_change=on_browser_state,
-            headless=True,
         )
 
         # --- API Endpoints ---
