@@ -19,26 +19,56 @@ AI-powered brain for Reachy Mini, integrating three Amazon Nova services:
 - **Nova Pro** - Camera-based vision and scene understanding
 - **Nova Act** - Voice-controlled browser automation
 
-## Setup
+This project enables Reachy Mini to see, hear, speak, and interact with the digital world.
 
-```bash
-# Install with uv
-uv sync
+## Documentation
 
-# Copy .env.sample to .env and fill in your AWS credentials
-cp .env.sample .env
-# Edit .env with your AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
-# (same credentials work for Nova Sonic, Nova Pro, and Nova Act)
+-   [**Architecture Overview**](docs/architecture.md): High-level system design.
+-   [**Component Documentation**](docs/components/): Detailed docs for each module.
+    -   [Nova Sonic (Voice)](docs/components/nova_sonic.md)
+    -   [Nova Vision (Sight)](docs/components/nova_vision.md)
+    -   [Nova Browser (Action)](docs/components/nova_browser.md)
+    -   [Tracking Manager](docs/components/tracking.md)
+-   [**Main Application**](docs/main.md): Core loop and state management.
+-   [**Setup Guide**](docs/setup.md): detailed installation instructions.
 
-# Run
-uv run python -m reachy_nova.main
-```
+## Quick Start
+
+1.  **Install dependencies**:
+    ```bash
+    uv sync
+    ```
+
+2.  **Configure environment**:
+    ```bash
+    cp .env.sample .env
+    # Edit .env with your AWS credentials
+    ```
+
+3.  **Run**:
+    ```bash
+    uv run python -m reachy_nova.main
+    ```
 
 ## Features
 
-- Talk to the robot naturally - it responds with voice via Nova Sonic
-- The robot sees through its camera and describes what it sees
-- Say "search for..." or "look up..." to trigger browser automation
-- Web dashboard at `http://localhost:8042` with live status
-- Mood-reactive antenna and head animations
-- Quick command buttons for weather, news, jokes
+- **Natural Conversation**: Talk to the robot naturally - it responds with voice via Nova Sonic.
+- **Visual Understanding**: The robot sees through its camera and describes what it sees.
+- **Browser Automation**: Say "search for..." or "look up..." to trigger Google searches and more.
+- **Smart Tracking**:
+    -   Tracks faces automatically.
+    -   Turns to look at speakers.
+    -   Reacts instantly to snaps/claps.
+- **Expressive Animations**: Mood-reactive antenna and head movements.
+- **Web Dashboard**: Monitor status at `http://localhost:8042`.
+
+## Project Structure
+
+-   `reachy_nova/`: Main package.
+    -   `main.py`: Entry point and orchestration.
+    -   `nova_sonic.py`: Voice interface.
+    -   `nova_vision.py`: Vision interface.
+    -   `nova_browser.py`: Browser automation.
+    -   `tracking.py`: Head tracking logic.
+-   `tools/`: Utility scripts (e.g., demos).
+-   `docs/`: Detailed documentation.
