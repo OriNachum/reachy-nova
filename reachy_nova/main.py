@@ -23,6 +23,7 @@ from reachy_mini.utils import create_head_pose
 from .nova_sonic import NovaSonic, OUTPUT_SAMPLE_RATE
 from .nova_vision import NovaVision
 from .nova_browser import NovaBrowser
+from .nova_memory import NovaMemory
 from .skills import SkillManager
 from .tracking import TrackingManager
 
@@ -145,6 +146,8 @@ class ReachyNova(ReachyMiniApp):
             "mood": "happy",  # see VALID_MOODS
             "tracking_enabled": True,
             "tracking_mode": "idle",  # idle, speaker, face, snap
+            "memory_state": "idle",
+            "memory_last_context": "",
         }
 
         def update_state(**kwargs):
@@ -267,6 +270,54 @@ class ReachyNova(ReachyMiniApp):
             },
         )
 
+        # --- Nova Memory ---
+        def on_memory_progress(message: str):
+            logger.info(f"[Memory progress] {message}")
+            sonic.inject_text(f"[Memory: {message}]")
+
+        def on_memory_result(result: str):
+            update_state(memory_last_context=result)
+
+        def on_memory_state(state: str):
+            update_state(memory_state=state)
+
+        memory = NovaMemory(
+            on_progress=on_memory_progress,
+            on_result=on_memory_result,
+            on_state_change=on_memory_state,
+        )
+
+        # Register memory skill executor
+        def memory_executor(params: dict) -> str:
+            query = params.get("query", "")
+            mode = params.get("mode", "query")
+            if mode == "store":
+                return memory.store(query)
+            elif mode == "context":
+                return memory.get_startup_context()
+            else:
+                return memory.query(query)
+
+        skill_manager.register_executor(
+            "memory",
+            memory_executor,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to recall, look up, or remember",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "query (default), store, or context",
+                        "enum": ["query", "store", "context"],
+                    },
+                },
+                "required": ["query"],
+            },
+        )
+
         # --- Nova Sonic (Voice) ---
         def on_transcript(role: str, text: str):
             if role == "USER":
@@ -300,6 +351,9 @@ class ReachyNova(ReachyMiniApp):
             "You are Nova, the AI brain of a cute robot called Reachy Mini. "
             "You have a camera for eyes and can see the world. "
             "You can also browse the web using Nova Act. "
+            "You have a memory system that stores knowledge about your user and the world. "
+            "When you learn something new about the user, use memory to store it. "
+            "When asked about something you might know, use memory to recall it. "
             "Keep your responses short, fun, and expressive. "
             "You love to help and are endlessly curious about the world around you. "
             "React with enthusiasm when you see something interesting through your camera."
@@ -372,6 +426,20 @@ class ReachyNova(ReachyMiniApp):
                 update_state(tracking_mode="idle")
             return {"tracking_enabled": body.enabled}
 
+        # --- Memory API endpoints ---
+        class MemoryQuery(BaseModel):
+            query: str
+            mode: str = "query"
+
+        @self.settings_app.get("/api/memory/health")
+        def memory_health():
+            return memory.health()
+
+        @self.settings_app.post("/api/memory/query")
+        def memory_query(body: MemoryQuery):
+            result = memory.query(body.query) if body.mode == "query" else memory.store(body.query)
+            return {"result": result, "mode": body.mode}
+
         # --- Tracking manager with event-driven vision ---
         last_vision_event_time = 0.0
         VISION_EVENT_COOLDOWN = 3.0
@@ -393,6 +461,24 @@ class ReachyNova(ReachyMiniApp):
         sonic.start(stop_event)
         vision.start(stop_event)
         browser.start(stop_event)
+
+        # --- Inject startup context from memory ---
+        def _inject_startup_context():
+            time.sleep(2)  # Wait for Sonic to be ready
+            try:
+                ctx = memory.get_startup_context()
+                if ctx:
+                    sonic.inject_text(
+                        f"[Background knowledge about your user and world:\n{ctx}]\n"
+                        "Use this knowledge naturally in conversation."
+                    )
+                    logger.info(f"Injected startup context ({len(ctx)} chars)")
+            except Exception as e:
+                logger.warning(f"Startup context injection failed: {e}")
+
+        threading.Thread(
+            target=_inject_startup_context, daemon=True, name="memory-startup"
+        ).start()
 
         # Start audio recording from robot mic
         mic_sr = 16000
