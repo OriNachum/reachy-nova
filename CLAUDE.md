@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Reachy Nova is an AI brain for the Reachy Mini robot, integrating three Amazon Nova services: **Nova Sonic** (real-time voice), **Nova Pro** (camera vision), and **Nova Act** (browser automation). It's a `ReachyMiniApp` plugin discovered via the `reachy_mini_apps` entry point.
+Reachy Nova is an AI brain for the Reachy Mini robot, integrating three Amazon Nova services: **Nova Sonic** (real-time voice), **Nova 2 Lite** (camera vision), and **Nova Act** (browser automation). It's a `ReachyMiniApp` plugin discovered via the `reachy_mini_apps` entry point.
 
 ## Commands
 
@@ -27,8 +27,8 @@ playwright install chromium
 The app runs a **multi-threaded main loop** at ~50Hz in `ReachyNova.run()`. Each subsystem runs in its own daemon thread:
 
 - **Main thread** (`main.py`): Control loop — feeds mic audio to Sonic, camera frames to Vision/Tracking, pushes speaker audio out, animates head/antennas based on mood and voice state.
-- **Nova Sonic thread** (`nova_sonic.py`): Persistent bidirectional stream to Bedrock (`amazon.nova-sonic-v1:0`). Runs its own asyncio event loop. Audio in at 16kHz, out at 24kHz. Use `inject_text()` to feed non-audio context (vision descriptions, browser results) into the conversation.
-- **Nova Vision thread** (`nova_vision.py`): Periodically analyzes camera frames via Bedrock Nova Pro (`us.amazon.nova-pro-v1:0`). Fires `on_description` callback which injects text into the voice conversation.
+- **Nova Sonic thread** (`nova_sonic.py`): Persistent bidirectional stream to Bedrock (`amazon.nova-2-sonic-v1:0`). Runs its own asyncio event loop. Audio in at 16kHz, out at 24kHz. Use `inject_text()` to feed non-audio context (vision descriptions, browser results) into the conversation.
+- **Nova Vision thread** (`nova_vision.py`): Periodically analyzes camera frames via Bedrock Nova 2 Lite (`us.amazon.nova-2-lite-v1:0`). Fires `on_description` callback which injects text into the voice conversation.
 - **Nova Browser thread** (`nova_browser.py`): Queue-based worker using `nova-act` library. Tasks triggered by voice keywords detected in `on_transcript`. Results injected back into voice conversation.
 - **Tracking** (`tracking.py`): Fuses DoA (direction of arrival from XMOS mic), YOLO person detection (yolov8n), and snap/clap audio transients. Priority: snap > face > speaker > idle animation. YOLO runs in its own background thread to avoid blocking.
 
@@ -44,7 +44,7 @@ A thread-safe `app_state` dict in `main.py` tracks voice state, mood, vision/bro
 
 Requires `.env` file with AWS credentials (see `.env.sample`):
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION=us-east-1`
-- Bedrock models must be enabled: `amazon.nova-sonic-v1:0` and `us.amazon.nova-pro-v1:0`
+- Bedrock models must be enabled: `amazon.nova-2-sonic-v1:0` and `us.amazon.nova-2-lite-v1:0`
 
 ## Key Patterns
 

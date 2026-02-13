@@ -4,7 +4,7 @@ This documentation covers the `NovaVision` component, which enables the robot to
 
 ## Overview
 
-`NovaVision` periodically captures frames from the robot's camera and sends them to Amazon Bedrock's **Nova Pro** model for analysis. This allows the robot to "see" and describe its surroundings.
+`NovaVision` periodically captures frames from the robot's camera and sends them to Amazon Bedrock's **Nova 2 Lite** model for analysis. This allows the robot to "see" and describe its surroundings.
 
 **File:** `reachy_nova/nova_vision.py`
 
@@ -19,7 +19,7 @@ The main class responsible for vision processing.
 ```python
 NovaVision(
     region: str = "us-east-1",
-    model_id: str = "us.amazon.nova-pro-v1:0",
+    model_id: str = "us.amazon.nova-2-lite-v1:0",
     system_prompt: str = "...",
     analyze_interval: float = 5.0,
     on_description: Callable[[str], None] | None = None,
@@ -27,7 +27,7 @@ NovaVision(
 ```
 
 -   **region**: AWS region for Bedrock.
--   **model_id**: Bedrock model ID for Nova Pro.
+-   **model_id**: Bedrock model ID for Nova 2 Lite.
 -   **system_prompt**: Instructions for the vision model (e.g., "Describe what you see").
 -   **analyze_interval**: Time between automatic frame analysis (seconds).
 -   **on_description**: Callback with the text description of the scene.

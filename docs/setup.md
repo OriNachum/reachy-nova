@@ -8,8 +8,8 @@ Follow this guide to get Reachy Nova running on your Reachy Mini robot or develo
 -   **Python**: Version 3.12 or newer.
 -   **UV**: The `uv` package manager (recommended) or robust `pip`/`venv` setup.
 -   **AWS Account**: Access to Amazon Bedrock with the following models enabled:
-    -   `amazon.nova-sonic-v1:0` (us-east-1)
-    -   `us.amazon.nova-pro-v1:0` (us-east-1)
+    -   `amazon.nova-2-sonic-v1:0` (us-east-1)
+    -   `us.amazon.nova-2-lite-v1:0` (us-east-1)
     -   Access to Nova Act execution role if running browser automation.
 
 ## Installation
@@ -66,12 +66,12 @@ Ensure your Reachy Mini is connected via USB or properly networked. The `reachy-
 
 ### Voice Not Working
 -   Check AWS credentials in `.env`.
--   Verify `amazon.nova-sonic-v1:0` access in AWS Bedrock console.
+-   Verify `amazon.nova-2-sonic-v1:0` access in AWS Bedrock console.
 -   Check microphone permissions.
 
 ### Vision Not Working
 -   Verify camera access (`cv2.VideoCapture`).
--   Check `us.amazon.nova-pro-v1:0` access in AWS Bedrock.
+-   Check `us.amazon.nova-2-lite-v1:0` access in AWS Bedrock.
 
 ### Browser Automation Fails
 -   Ensure `nova-act` is installed correctly.

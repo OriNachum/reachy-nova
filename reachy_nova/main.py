@@ -1,6 +1,6 @@
 """Reachy Nova - Voice, Vision & Browser AI for Reachy Mini.
 
-Integrates Amazon Nova Sonic (voice), Nova Pro (vision), and Nova Act (browser)
+Integrates Amazon Nova Sonic (voice), Nova 2 Lite (vision), and Nova Act (browser)
 to create an interactive AI-powered robot experience.
 """
 
@@ -170,7 +170,7 @@ class ReachyNova(ReachyMiniApp):
                     except Exception:
                         pass
 
-        # --- Nova Pro (Vision) ---
+        # --- Nova 2 Lite (Vision) ---
         def on_vision_description(desc: str):
             update_state(vision_description=desc, vision_analyzing=False, mood="excited")
             logger.info(f"[Vision] {desc}")

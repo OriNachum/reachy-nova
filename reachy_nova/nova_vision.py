@@ -1,4 +1,4 @@
-"""Nova Pro Vision - Camera frame analysis via Amazon Bedrock."""
+"""Nova Vision - Camera frame analysis via Amazon Bedrock Nova 2 Lite."""
 
 import base64
 import json
@@ -23,12 +23,12 @@ DEFAULT_SYSTEM_PROMPT = (
 
 
 class NovaVision:
-    """Periodically analyzes camera frames using Nova Pro."""
+    """Periodically analyzes camera frames using Nova 2 Lite."""
 
     def __init__(
         self,
         region: str = "us-east-1",
-        model_id: str = "us.amazon.nova-pro-v1:0",
+        model_id: str = "us.amazon.nova-2-lite-v1:0",
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         analyze_interval: float = 30.0,
         on_description: Callable[[str], None] | None = None,

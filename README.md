@@ -16,7 +16,7 @@ tags:
 AI-powered brain for Reachy Mini, integrating three Amazon Nova services:
 
 - **Nova Sonic** - Real-time speech-to-speech conversation
-- **Nova Pro** - Camera-based vision and scene understanding
+- **Nova 2 Lite** - Camera-based vision and scene understanding
 - **Nova Act** - Voice-controlled browser automation
 
 This project enables Reachy Mini to see, hear, speak, and interact with the digital world.

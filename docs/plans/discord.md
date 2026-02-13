@@ -1,7 +1,7 @@
 # Discord Integration for Reachy Nova
 
 ## Context
-Reachy Nova currently integrates voice (Nova Sonic), vision (Nova Pro), and browser (Nova Act). This adds a Discord subsystem so the robot can participate in Discord conversations — listening to channel events and sending messages — with an intelligent interrupt gate that uses rule-based checks + Amazon Nova Lite to decide whether to interrupt the robot's current voice engagement.
+Reachy Nova currently integrates voice (Nova Sonic), vision (Nova 2 Lite), and browser (Nova Act). This adds a Discord subsystem so the robot can participate in Discord conversations — listening to channel events and sending messages — with an intelligent interrupt gate that uses rule-based checks + Amazon Nova Lite to decide whether to interrupt the robot's current voice engagement.
 
 ## New Files
 
@@ -12,7 +12,7 @@ Core Discord subsystem following the NovaBrowser pattern:
 - **`InterruptGate`** — three-tier decision engine:
   1. Fast rules: @mentions → interrupt, urgency keywords ("urgent", "emergency", "help") → interrupt, robot idle → interrupt
   2. Short/empty messages → ignore
-  3. Ambiguous → call `amazon.nova-lite-v1:0` via Bedrock (wrapped in `asyncio.to_thread()` to avoid blocking the async loop)
+  3. Ambiguous → call `amazon.nova-2-lite-v1:0` via Bedrock (wrapped in `asyncio.to_thread()` to avoid blocking the async loop)
 - **`NovaDiscord`** class:
   - Constructor takes callbacks: `on_event`, `on_state_change`, `on_interrupt`
   - `start(stop_event)` runs discord.py bot in its own daemon thread + asyncio event loop

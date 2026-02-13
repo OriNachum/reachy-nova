@@ -19,7 +19,7 @@ The main class responsible for managing the conversation session.
 ```python
 NovaSonic(
     region: str = "us-east-1",
-    model_id: str = "amazon.nova-sonic-v1:0",
+    model_id: str = "amazon.nova-2-sonic-v1:0",
     voice_id: str = "matthew",
     system_prompt: str = "...",
     on_transcript: Callable[[str, str], None] | None = None,
