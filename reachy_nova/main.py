@@ -24,6 +24,7 @@ from .nova_sonic import NovaSonic, OUTPUT_SAMPLE_RATE
 from .nova_vision import NovaVision
 from .nova_browser import NovaBrowser
 from .nova_memory import NovaMemory
+from .nova_slack import NovaSlack, SlackEvent
 from .skills import SkillManager
 from .tracking import TrackingManager
 
@@ -148,6 +149,9 @@ class ReachyNova(ReachyMiniApp):
             "tracking_mode": "idle",  # idle, speaker, face, snap
             "memory_state": "idle",
             "memory_last_context": "",
+            "slack_state": "idle",
+            "slack_last_event": "",
+            "slack_queued_count": 0,
         }
 
         def update_state(**kwargs):
@@ -318,6 +322,88 @@ class ReachyNova(ReachyMiniApp):
             },
         )
 
+        # --- Nova Slack ---
+        def on_slack_event(event: SlackEvent):
+            summary = f"[{event.user}] {event.text[:80]}" if event.text else f"[{event.user}] ({event.type})"
+            update_state(slack_last_event=summary, slack_queued_count=len(slack_bot._queued_messages))
+            logger.info(f"[Slack event] {summary}")
+
+        def on_slack_state(state: str):
+            update_state(slack_state=state)
+
+        def on_slack_interrupt(event: SlackEvent):
+            update_state(mood="surprised")
+            context = f"[Slack message from {event.user}: {event.text}]"
+            if event.type == "mention":
+                context = f"[You were mentioned on Slack by {event.user}: {event.text}]"
+            sonic.inject_text(
+                f"{context} Briefly acknowledge this Slack message in conversation."
+            )
+            logger.info(f"[Slack interrupt] {event.user}: {event.text[:80]}")
+
+        slack_channel_ids = [
+            ch.strip()
+            for ch in os.environ.get("SLACK_CHANNEL_IDS", "").split(",")
+            if ch.strip()
+        ]
+
+        slack_bot = NovaSlack(
+            on_event=on_slack_event,
+            on_state_change=on_slack_state,
+            on_interrupt=on_slack_interrupt,
+            channel_ids=slack_channel_ids,
+        )
+
+        # Register slack skill executor
+        def slack_executor(params: dict) -> str:
+            return slack_bot.execute(params)
+
+        skill_manager.register_executor(
+            "slack",
+            slack_executor,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "The Slack action to perform",
+                        "enum": [
+                            "send_message",
+                            "read_messages",
+                            "read_queued",
+                            "reply_to_thread",
+                            "add_reaction",
+                        ],
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Message text (for send_message/reply_to_thread)",
+                    },
+                    "channel": {
+                        "type": "string",
+                        "description": "Slack channel ID (defaults to first configured channel)",
+                    },
+                    "thread_ts": {
+                        "type": "string",
+                        "description": "Thread timestamp for reply_to_thread",
+                    },
+                    "emoji": {
+                        "type": "string",
+                        "description": "Emoji name for add_reaction (e.g. thumbsup)",
+                    },
+                    "ts": {
+                        "type": "string",
+                        "description": "Message timestamp for add_reaction",
+                    },
+                    "count": {
+                        "type": "number",
+                        "description": "Number of messages to read (default 10, max 50)",
+                    },
+                },
+                "required": ["action"],
+            },
+        )
+
         # --- Nova Sonic (Voice) ---
         def on_transcript(role: str, text: str):
             if role == "USER":
@@ -351,6 +437,7 @@ class ReachyNova(ReachyMiniApp):
             "You are Nova, the AI brain of a cute robot called Reachy Mini. "
             "You have a camera for eyes and can see the world. "
             "You can also browse the web using Nova Act. "
+            "You are connected to Slack and can read and send messages there. "
             "You have a memory system that stores knowledge about your user and the world. "
             "When you learn something new about the user, use memory to store it. "
             "When asked about something you might know, use memory to recall it. "
@@ -440,6 +527,31 @@ class ReachyNova(ReachyMiniApp):
             result = memory.query(body.query) if body.mode == "query" else memory.store(body.query)
             return {"result": result, "mode": body.mode}
 
+        # --- Slack API endpoints ---
+        class SlackMessage(BaseModel):
+            channel: str | None = None
+            text: str
+
+        @self.settings_app.get("/api/slack/state")
+        def get_slack_state():
+            with state_lock:
+                return {
+                    "slack_state": app_state["slack_state"],
+                    "slack_last_event": app_state["slack_last_event"],
+                    "slack_queued_count": app_state["slack_queued_count"],
+                    "recent_count": len(slack_bot._recent_messages),
+                }
+
+        @self.settings_app.post("/api/slack/send")
+        def send_slack_message(body: SlackMessage):
+            channel = body.channel
+            if not channel and slack_channel_ids:
+                channel = slack_channel_ids[0]
+            if not channel:
+                return {"error": "No channel specified and no default configured"}
+            slack_bot.queue_task("send_message", channel=channel, text=body.text)
+            return {"status": "queued", "channel": channel}
+
         # --- Tracking manager with event-driven vision ---
         last_vision_event_time = 0.0
         VISION_EVENT_COOLDOWN = 3.0
@@ -461,6 +573,7 @@ class ReachyNova(ReachyMiniApp):
         sonic.start(stop_event)
         vision.start(stop_event)
         browser.start(stop_event)
+        slack_bot.start(stop_event)
 
         # --- Inject startup context from memory ---
         def _inject_startup_context():
@@ -512,6 +625,16 @@ class ReachyNova(ReachyMiniApp):
                 antenna_mode = app_state["antenna_mode"]
                 vision_enabled = app_state["vision_enabled"]
                 tracking_enabled = app_state["tracking_enabled"]
+
+            # --- Feed Slack interrupt gate ---
+            engagement = 0.0
+            if voice_state == "speaking":
+                engagement = 0.8
+            elif voice_state == "listening":
+                engagement = 0.5
+            elif voice_state == "thinking":
+                engagement = 0.6
+            slack_bot.update_context(voice_state, engagement)
 
             # --- Active tracking ---
             if tracking_enabled:
