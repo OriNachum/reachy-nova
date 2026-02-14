@@ -1,11 +1,9 @@
 """Nova Slack - Slack integration for Reachy Nova using Socket Mode.
 
 Connects to Slack via slack-bolt (Socket Mode, no public URL needed).
-Features an interrupt gate that decides whether incoming messages should
-interrupt the robot's current voice engagement, be queued for later, or ignored.
+Publishes events to MQTT; the Nervous System handles interrupt decisions.
 """
 
-import json
 import logging
 import os
 import threading
@@ -14,13 +12,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-import boto3
-
 logger = logging.getLogger(__name__)
-
-LLM_MODEL = "us.amazon.nova-2-lite-v1:0"
-
-URGENCY_KEYWORDS = {"urgent", "emergency", "help", "asap", "critical", "important"}
 
 
 @dataclass
@@ -39,102 +31,6 @@ class SlackEvent:
     raw: dict = field(default_factory=dict)
 
 
-class InterruptGate:
-    """Three-tier decision engine for incoming Slack messages.
-
-    1. Fast rules: @mentions / DMs -> interrupt, urgency keywords -> interrupt, robot idle -> interrupt
-    2. Short/empty messages -> ignore
-    3. Ambiguous -> call Nova 2 Lite via Bedrock
-    """
-
-    def __init__(self, bot_user_id: str | None = None):
-        self.bot_user_id = bot_user_id
-        self._voice_state = "idle"
-        self._engagement_level = 0.0  # 0.0 = idle, 1.0 = deeply engaged
-        self._bedrock_client = None
-        try:
-            self._bedrock_client = boto3.client(
-                "bedrock-runtime",
-                region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
-            )
-        except Exception as e:
-            logger.warning(f"InterruptGate: Bedrock client init failed: {e}")
-
-    def update_context(self, voice_state: str, engagement_level: float) -> None:
-        self._voice_state = voice_state
-        self._engagement_level = max(0.0, min(1.0, engagement_level))
-
-    def evaluate(self, event: SlackEvent) -> str:
-        """Evaluate whether to interrupt, queue, or ignore.
-
-        Returns: "interrupt", "queue", or "ignore"
-        """
-        # Fast rule: @mentions and DMs always interrupt
-        if event.is_mention or event.is_dm:
-            return "interrupt"
-
-        # Fast rule: urgency keywords interrupt
-        lower = event.text.lower()
-        if any(kw in lower for kw in URGENCY_KEYWORDS):
-            return "interrupt"
-
-        # Fast rule: robot idle -> interrupt
-        if self._voice_state == "idle" and self._engagement_level < 0.3:
-            return "interrupt"
-
-        # Short/empty messages -> ignore
-        if len(event.text.strip()) < 5:
-            return "ignore"
-
-        # Reactions without text -> ignore
-        if event.type == "reaction" and not event.text:
-            return "ignore"
-
-        # Ambiguous -> LLM evaluation
-        return self._llm_evaluate(event)
-
-    def _llm_evaluate(self, event: SlackEvent) -> str:
-        """Use Nova 2 Lite to decide on ambiguous messages."""
-        if not self._bedrock_client:
-            return "queue"
-
-        try:
-            prompt = (
-                f"You are an interrupt gate for a social robot. "
-                f"The robot is currently in voice state '{self._voice_state}' "
-                f"with engagement level {self._engagement_level:.1f}/1.0.\n\n"
-                f"A Slack message arrived:\n"
-                f"Channel: {event.channel}\n"
-                f"User: {event.user}\n"
-                f"Text: {event.text[:500]}\n\n"
-                f"Should the robot be interrupted to hear this message? "
-                f"Reply with exactly one word: INTERRUPT, QUEUE, or IGNORE."
-            )
-            body = {
-                "messages": [{"role": "user", "content": [{"text": prompt}]}],
-                "inferenceConfig": {
-                    "maxTokens": 10,
-                    "temperature": 0.1,
-                    "topP": 0.9,
-                },
-            }
-            response = self._bedrock_client.invoke_model(
-                modelId=LLM_MODEL, body=json.dumps(body)
-            )
-            result = json.loads(response["body"].read())
-            answer = result["output"]["message"]["content"][0]["text"].strip().upper()
-
-            if "INTERRUPT" in answer:
-                return "interrupt"
-            elif "IGNORE" in answer:
-                return "ignore"
-            else:
-                return "queue"
-        except Exception as e:
-            logger.warning(f"InterruptGate LLM error: {e}")
-            return "queue"
-
-
 class NovaSlack:
     """Manages Slack integration via Socket Mode."""
 
@@ -142,18 +38,15 @@ class NovaSlack:
         self,
         on_event: Callable[[SlackEvent], None] | None = None,
         on_state_change: Callable[[str], None] | None = None,
-        on_interrupt: Callable[[SlackEvent], None] | None = None,
         channel_ids: list[str] | None = None,
     ):
         self.on_event = on_event
         self.on_state_change = on_state_change
-        self.on_interrupt = on_interrupt
         self.channel_ids = set(channel_ids or [])
 
         self._recent_messages: deque[SlackEvent] = deque(maxlen=50)
         self._queued_messages: deque[SlackEvent] = deque(maxlen=20)
         self._thread: threading.Thread | None = None
-        self._gate: InterruptGate | None = None
         self._app = None  # Slack Bolt App
         self._client = None  # Slack WebClient
         self._bot_user_id: str | None = None
@@ -171,7 +64,7 @@ class NovaSlack:
                 pass
 
     def _handle_event(self, event: SlackEvent) -> None:
-        """Process an incoming Slack event through the interrupt gate."""
+        """Process an incoming Slack event — publish via on_event callback."""
         self._recent_messages.append(event)
         self.last_event = event
 
@@ -180,26 +73,6 @@ class NovaSlack:
                 self.on_event(event)
             except Exception:
                 pass
-
-        if not self._gate:
-            return
-
-        decision = self._gate.evaluate(event)
-        logger.info(f"[Slack] Gate decision for '{event.text[:50]}': {decision}")
-
-        if decision == "interrupt":
-            if self.on_interrupt:
-                try:
-                    self.on_interrupt(event)
-                except Exception as e:
-                    logger.error(f"on_interrupt callback error: {e}")
-        elif decision == "queue":
-            self._queued_messages.append(event)
-
-    def update_context(self, voice_state: str, engagement_level: float) -> None:
-        """Feed robot state into the interrupt gate."""
-        if self._gate:
-            self._gate.update_context(voice_state, engagement_level)
 
     def execute(self, params: dict) -> str:
         """Blocking skill executor for Sonic tool_use.
@@ -342,8 +215,6 @@ class NovaSlack:
                 logger.info(f"Slack bot user ID: {self._bot_user_id}")
             except Exception as e:
                 logger.warning(f"Could not get bot user ID: {e}")
-
-            self._gate = InterruptGate(bot_user_id=self._bot_user_id)
 
             # --- Event handlers ---
 

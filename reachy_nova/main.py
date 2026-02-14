@@ -222,10 +222,7 @@ class ReachyNova(ReachyMiniApp):
         def on_vision_description(desc: str):
             update_state(vision_description=desc, vision_analyzing=False, mood="excited")
             logger.info(f"[Vision] {desc}")
-            # Feed vision description to voice conversation (event path)
-            sonic.inject_text(
-                f"[Your camera sees: {desc}] React to what you see briefly."
-            )
+            # Nervous System decides whether/when to inject via MQTT
             publish_event("vision", "vision_description", {"description": desc})
 
         vision = NovaVision(
@@ -282,7 +279,6 @@ class ReachyNova(ReachyMiniApp):
         def on_browser_progress(message: str):
             """Narrate browser progress through the voice stream."""
             logger.info(f"[Browser progress] {message}")
-            sonic.inject_text(f"[Browser status: {message}]")
             publish_event("browser", "progress", {"message": message})
 
         browser = NovaBrowser(
@@ -323,7 +319,6 @@ class ReachyNova(ReachyMiniApp):
         # --- Nova Memory ---
         def on_memory_progress(message: str):
             logger.info(f"[Memory progress] {message}")
-            sonic.inject_text(f"[Memory: {message}]")
             publish_event("memory", "query_result", {"result": message})
 
         def on_memory_result(result: str):
@@ -386,16 +381,6 @@ class ReachyNova(ReachyMiniApp):
         def on_slack_state(state: str):
             update_state(slack_state=state)
 
-        def on_slack_interrupt(event: SlackEvent):
-            update_state(mood="surprised")
-            context = f"[Slack message from {event.user}: {event.text}]"
-            if event.type == "mention":
-                context = f"[You were mentioned on Slack by {event.user}: {event.text}]"
-            sonic.inject_text(
-                f"{context} Briefly acknowledge this Slack message in conversation."
-            )
-            logger.info(f"[Slack interrupt] {event.user}: {event.text[:80]}")
-
         slack_channel_ids = [
             ch.strip()
             for ch in os.environ.get("SLACK_CHANNEL_IDS", "").split(",")
@@ -405,7 +390,6 @@ class ReachyNova(ReachyMiniApp):
         slack_bot = NovaSlack(
             on_event=on_slack_event,
             on_state_change=on_slack_state,
-            on_interrupt=on_slack_interrupt,
             channel_ids=slack_channel_ids,
         )
 
@@ -699,16 +683,6 @@ class ReachyNova(ReachyMiniApp):
                 antenna_mode = app_state["antenna_mode"]
                 vision_enabled = app_state["vision_enabled"]
                 tracking_enabled = app_state["tracking_enabled"]
-
-            # --- Feed Slack interrupt gate ---
-            engagement = 0.0
-            if voice_state == "speaking":
-                engagement = 0.8
-            elif voice_state == "listening":
-                engagement = 0.5
-            elif voice_state == "thinking":
-                engagement = 0.6
-            slack_bot.update_context(voice_state, engagement)
 
             # --- Active tracking ---
             if tracking_enabled:
