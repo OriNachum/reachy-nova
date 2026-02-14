@@ -632,6 +632,22 @@ class ReachyNova(ReachyMiniApp):
         browser.start(stop_event)
         slack_bot.start(stop_event)
 
+        # --- Subscribe to Nervous System inject commands ---
+        if mqtt_available:
+            def _on_inject(client, userdata, msg):
+                try:
+                    data = json.loads(msg.payload.decode())
+                    text = data.get("text", "")
+                    if text:
+                        sonic.inject_text(text)
+                        logger.info(f"[Nervous System] Injected: {text[:80]}")
+                except Exception as e:
+                    logger.warning(f"Inject message error: {e}")
+
+            mqtt_client.message_callback_add("nova/inject", _on_inject)
+            mqtt_client.subscribe("nova/inject")
+            logger.info("Subscribed to nova/inject — Nervous System can drive voice")
+
         # --- Inject startup context from memory ---
         def _inject_startup_context():
             time.sleep(2)  # Wait for Sonic to be ready
