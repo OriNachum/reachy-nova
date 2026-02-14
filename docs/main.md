@@ -27,7 +27,7 @@ The main execution loop.
 1.  **Initialization**:
     -   Sets up shared state (`app_state`) and locks.
     -   Initializes `SkillManager` and discovers skills.
-    -   Starts `NovaSonic` (with tools), `NovaVision`, `NovaBrowser`.
+    -   Starts `NovaSonic` (with tools), `NovaVision`, `NovaBrowser`, `NovaSlack`.
     -   Initializes `TrackingManager` with an `on_event` callback.
     -   Starts mic recording and background service threads.
 
@@ -57,6 +57,7 @@ The `app_state` dictionary tracks the system's status:
 | `vision_analyzing`| Is a frame currently being processed?| `True`, `False` |
 | `tracking_mode` | Reason for head movement | `idle`, `speaker`, `face`, `snap` |
 | `antenna_mode` | Specific antenna behavior override | `auto`, `excited`, `calm`, `off` |
+| `slack_state` | Connection status to Slack | `idle`, `connected`, `error` |
 
 ## API Endpoints
 
@@ -69,6 +70,8 @@ The application exposes a local web server (default port `8042`) for control and
 -   **POST /api/antenna/mode**: Manually set antenna behavior.
 -   **POST /api/mood**: Manually set the robot's mood.
 -   **POST /api/tracking/toggle**: Enable/disable active tracking.
+-   **GET /api/slack/state**: Get Slack integration status and stats.
+-   **POST /api/slack/send**: Send a message to Slack (queue task).
 
 ## Audio Pipeline
 
