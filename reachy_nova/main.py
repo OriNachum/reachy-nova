@@ -4,10 +4,12 @@ Integrates Amazon Nova Sonic (voice), Nova 2 Lite (vision), and Nova Act (browse
 to create an interactive AI-powered robot experience.
 """
 
+import json
 import logging
 import os
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -157,6 +159,48 @@ class ReachyNova(ReachyMiniApp):
         def update_state(**kwargs):
             with state_lock:
                 app_state.update(kwargs)
+                if mqtt_available and "mood" in kwargs:
+                    publish_state("mood", {"mood": kwargs["mood"]})
+
+        # --- MQTT client (optional, for Nervous System) ---
+        mqtt_available = False
+        mqtt_client = None
+        try:
+            import paho.mqtt.client as paho_mqtt
+            mqtt_client = paho_mqtt.Client(
+                paho_mqtt.CallbackAPIVersion.VERSION2,
+                client_id="reachy-nova-app",
+            )
+            mqtt_client.connect(
+                os.environ.get("MQTT_BROKER", "localhost"),
+                int(os.environ.get("MQTT_PORT", "1883")),
+                keepalive=5,
+            )
+            mqtt_client.loop_start()
+            mqtt_available = True
+            logger.info("MQTT connected — Nervous System integration active")
+        except Exception as e:
+            logger.warning(f"MQTT not available — direct callbacks only: {e}")
+
+        def publish_event(source: str, event_type: str, payload: dict):
+            """Publish a pure data event to MQTT."""
+            if not mqtt_available:
+                return
+            event = {
+                "event_id": str(uuid.uuid4()),
+                "type": event_type,
+                "source": source,
+                "payload": payload,
+                "timestamp": time.time(),
+            }
+            topic = f"nova/events/{source}/{event_type}"
+            mqtt_client.publish(topic, json.dumps(event))
+
+        def publish_state(key: str, value: dict):
+            """Publish retained state to MQTT."""
+            if not mqtt_available:
+                return
+            mqtt_client.publish(f"nova/state/{key}", json.dumps(value), retain=True)
 
         # --- Audio output buffer ---
         audio_output_buffer = []
@@ -182,6 +226,7 @@ class ReachyNova(ReachyMiniApp):
             sonic.inject_text(
                 f"[Your camera sees: {desc}] React to what you see briefly."
             )
+            publish_event("vision", "vision_description", {"description": desc})
 
         vision = NovaVision(
             on_description=on_vision_description,
@@ -238,6 +283,7 @@ class ReachyNova(ReachyMiniApp):
             """Narrate browser progress through the voice stream."""
             logger.info(f"[Browser progress] {message}")
             sonic.inject_text(f"[Browser status: {message}]")
+            publish_event("browser", "progress", {"message": message})
 
         browser = NovaBrowser(
             on_result=on_browser_result,
@@ -278,6 +324,7 @@ class ReachyNova(ReachyMiniApp):
         def on_memory_progress(message: str):
             logger.info(f"[Memory progress] {message}")
             sonic.inject_text(f"[Memory: {message}]")
+            publish_event("memory", "query_result", {"result": message})
 
         def on_memory_result(result: str):
             update_state(memory_last_context=result)
@@ -327,6 +374,14 @@ class ReachyNova(ReachyMiniApp):
             summary = f"[{event.user}] {event.text[:80]}" if event.text else f"[{event.user}] ({event.type})"
             update_state(slack_last_event=summary, slack_queued_count=len(slack_bot._queued_messages))
             logger.info(f"[Slack event] {summary}")
+            publish_event("slack", f"slack_{event.type}", {
+                "user": event.user,
+                "text": event.text,
+                "channel": event.channel,
+                "ts": event.ts,
+                "is_mention": event.is_mention,
+                "is_dm": event.is_dm,
+            })
 
         def on_slack_state(state: str):
             update_state(slack_state=state)
@@ -419,6 +474,7 @@ class ReachyNova(ReachyMiniApp):
 
         def on_voice_state(state: str):
             update_state(voice_state=state)
+            publish_state("voice", {"state": state})
             if state == "speaking":
                 update_state(mood="excited")
             elif state == "listening":
@@ -558,6 +614,7 @@ class ReachyNova(ReachyMiniApp):
 
         def on_tracking_event(event_type: str, data: dict):
             nonlocal last_vision_event_time
+            publish_event("tracking", event_type, data)
             now = time.time()
             if now - last_vision_event_time < VISION_EVENT_COOLDOWN:
                 return
@@ -585,6 +642,7 @@ class ReachyNova(ReachyMiniApp):
                         f"[Background knowledge about your user and world:\n{ctx}]\n"
                         "Use this knowledge naturally in conversation."
                     )
+                    publish_event("memory", "startup_context", {"context": ctx})
                     logger.info(f"Injected startup context ({len(ctx)} chars)")
             except Exception as e:
                 logger.warning(f"Startup context injection failed: {e}")
@@ -788,6 +846,13 @@ class ReachyNova(ReachyMiniApp):
             time.sleep(0.02)
 
         # Cleanup
+        if mqtt_available and mqtt_client:
+            try:
+                mqtt_client.loop_stop()
+                mqtt_client.disconnect()
+                logger.info("MQTT disconnected")
+            except Exception:
+                pass
         try:
             reachy_mini.media.stop_recording()
         except Exception:
