@@ -156,6 +156,8 @@ class ReachyNova(ReachyMiniApp):
             "slack_last_event": "",
             "head_override": None,        # None or {"yaw": float, "pitch": float}
             "head_override_time": 0.0,    # timestamp for 30s safety timeout
+            "speech_enabled": True,       # False = mute audio output to speaker
+            "movement_enabled": True,     # False = freeze head + body at current position
         }
 
         def update_state(**kwargs):
@@ -657,6 +659,32 @@ class ReachyNova(ReachyMiniApp):
                 update_state(tracking_mode="idle")
             return {"tracking_enabled": body.enabled}
 
+        # --- Action disable controls (presentation mode) ---
+        class ActionToggle(BaseModel):
+            enabled: bool
+
+        @self.settings_app.post("/api/speech/toggle")
+        def toggle_speech(body: ActionToggle):
+            update_state(speech_enabled=body.enabled)
+            return {"speech_enabled": body.enabled}
+
+        @self.settings_app.post("/api/movement/toggle")
+        def toggle_movement(body: ActionToggle):
+            update_state(movement_enabled=body.enabled)
+            return {"movement_enabled": body.enabled}
+
+        class PresentationMode(BaseModel):
+            enabled: bool
+
+        @self.settings_app.post("/api/presentation")
+        def toggle_presentation(body: PresentationMode):
+            """Convenience: disable speech + movement + antennas all at once."""
+            if body.enabled:
+                update_state(speech_enabled=False, movement_enabled=False, antenna_mode="off")
+            else:
+                update_state(speech_enabled=True, movement_enabled=True, antenna_mode="auto")
+            return {"presentation_mode": body.enabled}
+
         # --- Memory API endpoints ---
         class MemoryQuery(BaseModel):
             query: str
@@ -777,6 +805,12 @@ class ReachyNova(ReachyMiniApp):
         prev_mood = "happy"
         mood_change_time = 0.0
 
+        # Frozen position state for movement disable
+        _frozen_head_pose = None
+        _frozen_body_yaw = 0.0
+        _frozen_antennas_rad = np.array([0.0, 0.0])
+        _prev_movement_enabled = True
+
         # --- Main control loop ---
         while not stop_event.is_set():
             t = time.time() - t0
@@ -788,6 +822,8 @@ class ReachyNova(ReachyMiniApp):
                 antenna_mode = app_state["antenna_mode"]
                 vision_enabled = app_state["vision_enabled"]
                 tracking_enabled = app_state["tracking_enabled"]
+                speech_enabled = app_state["speech_enabled"]
+                movement_enabled = app_state["movement_enabled"]
 
             # --- Head override or active tracking ---
             with state_lock:
@@ -883,11 +919,32 @@ class ReachyNova(ReachyMiniApp):
                 prev_antennas = antennas_deg
 
             antennas_rad = np.deg2rad(antennas_deg)
-            reachy_mini.set_target(
-                head=head_pose,
-                antennas=antennas_rad,
-                body_yaw=np.radians(safe_body_yaw),
-            )
+
+            # --- Movement freeze logic ---
+            if not movement_enabled:
+                if _prev_movement_enabled:
+                    # Transition: capture current pose as frozen
+                    _frozen_head_pose = head_pose
+                    _frozen_body_yaw = safe_body_yaw
+                    _frozen_antennas_rad = antennas_rad.copy()
+                    _prev_movement_enabled = False
+                reachy_mini.set_target(
+                    head=_frozen_head_pose,
+                    antennas=_frozen_antennas_rad,
+                    body_yaw=np.radians(_frozen_body_yaw),
+                )
+            else:
+                if not _prev_movement_enabled:
+                    # Re-enabled: sync smoothing state to frozen values for smooth transition
+                    _smooth_yaw = np.degrees(np.arctan2(
+                        _frozen_head_pose[0][1], _frozen_head_pose[0][0]
+                    )) if _frozen_head_pose is not None else _smooth_yaw
+                    _prev_movement_enabled = True
+                reachy_mini.set_target(
+                    head=head_pose,
+                    antennas=antennas_rad,
+                    body_yaw=np.radians(safe_body_yaw),
+                )
 
             # --- Feed mic audio to Nova Sonic ---
             try:
@@ -942,6 +999,9 @@ class ReachyNova(ReachyMiniApp):
             with audio_lock:
                 chunks = list(audio_output_buffer)
                 audio_output_buffer.clear()
+
+            if not speech_enabled:
+                chunks = []  # Discard audio — robot listens but doesn't speak aloud
 
             if chunks:
                 # Resample from 24kHz (Nova Sonic) to output sample rate if needed
