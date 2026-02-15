@@ -23,6 +23,7 @@ from reachy_mini import ReachyMini, ReachyMiniApp
 from reachy_mini.utils import create_head_pose
 
 from .nova_sonic import NovaSonic, OUTPUT_SAMPLE_RATE
+from .safety import SafetyManager
 from .nova_vision import NovaVision
 from .nova_browser import NovaBrowser
 from .nova_memory import NovaMemory
@@ -153,6 +154,8 @@ class ReachyNova(ReachyMiniApp):
             "memory_last_context": "",
             "slack_state": "idle",
             "slack_last_event": "",
+            "head_override": None,        # None or {"yaw": float, "pitch": float}
+            "head_override_time": 0.0,    # timestamp for 30s safety timeout
         }
 
         def update_state(**kwargs):
@@ -460,6 +463,89 @@ class ReachyNova(ReachyMiniApp):
             },
         )
 
+        # --- Control skill (head/body movement) ---
+        # Smoothing state shared between executor and main loop
+        _smooth_yaw = 0.0
+        _smooth_pitch = 0.0
+        _current_body_yaw = 0.0  # tracked in degrees
+
+        def control_executor(params: dict) -> str:
+            nonlocal _smooth_yaw, _smooth_pitch, _current_body_yaw
+            action = params.get("action", "")
+
+            if action == "move_head":
+                yaw = max(-45, min(45, float(params.get("yaw", 0))))
+                pitch = max(-15, min(25, float(params.get("pitch", 0))))
+                update_state(
+                    tracking_enabled=False,
+                    tracking_mode="idle",
+                    head_override={"yaw": yaw, "pitch": pitch},
+                    head_override_time=time.time(),
+                )
+                return f"[Moving head to yaw={yaw:.0f}, pitch={pitch:.0f}. Tracking disabled.]"
+
+            elif action == "move_body":
+                body_yaw = max(-25, min(25, float(params.get("body_yaw", 0))))
+                duration = max(0.5, min(5, float(params.get("duration", 1.5))))
+                start = _current_body_yaw
+                steps = int(duration / 0.02)
+                for i in range(steps + 1):
+                    alpha = 0.5 * (1 - np.cos(np.pi * i / steps))
+                    current = start + alpha * (body_yaw - start)
+                    reachy_mini.set_target(body_yaw=np.radians(current))
+                    time.sleep(0.02)
+                _current_body_yaw = body_yaw
+                return f"[Body rotated to {body_yaw:.0f} over {duration:.1f}s.]"
+
+            elif action == "enable_tracking":
+                tracker.current_yaw = _smooth_yaw
+                tracker.current_pitch = _smooth_pitch
+                update_state(tracking_enabled=True, head_override=None)
+                return "[Tracking re-enabled.]"
+
+            elif action == "disable_tracking":
+                update_state(tracking_enabled=False, tracking_mode="idle")
+                return "[Tracking disabled.]"
+
+            return f"[Unknown control action: {action}]"
+
+        skill_manager.register_executor(
+            "control",
+            control_executor,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "The control action to perform",
+                        "enum": [
+                            "move_head",
+                            "move_body",
+                            "enable_tracking",
+                            "disable_tracking",
+                        ],
+                    },
+                    "yaw": {
+                        "type": "number",
+                        "description": "Head yaw angle in degrees (-45 to 45, negative=right, positive=left). For move_head.",
+                    },
+                    "pitch": {
+                        "type": "number",
+                        "description": "Head pitch angle in degrees (-15 to 25, negative=down, positive=up). For move_head.",
+                    },
+                    "body_yaw": {
+                        "type": "number",
+                        "description": "Body rotation in degrees (-25 to 25). For move_body.",
+                    },
+                    "duration": {
+                        "type": "number",
+                        "description": "Duration in seconds for body rotation (default 1.5). For move_body.",
+                    },
+                },
+                "required": ["action"],
+            },
+        )
+
         # --- Nova Sonic (Voice) ---
         def on_transcript(role: str, text: str):
             if role == "USER":
@@ -493,6 +579,7 @@ class ReachyNova(ReachyMiniApp):
         system_prompt = (
             "You are Nova, the AI brain of a cute robot called Reachy Mini. "
             "You have a camera for eyes and can see the world. "
+            "You can control your head and body to look in specific directions. "
             "You can also browse the web using Nova Act. "
             "You are connected to Slack and can read and send messages there. "
             "You have a memory system that stores knowledge about your user and the world. "
@@ -682,6 +769,9 @@ class ReachyNova(ReachyMiniApp):
         logger.info("Reachy Nova is alive! All systems go.")
         audio_chunk_count = 0
 
+        # Safety manager for head-body collision avoidance + organic movement
+        safety = SafetyManager()
+
         # Antenna blending state for smooth mood transitions
         prev_antennas = np.array([0.0, 0.0])
         prev_mood = "happy"
@@ -699,8 +789,25 @@ class ReachyNova(ReachyMiniApp):
                 vision_enabled = app_state["vision_enabled"]
                 tracking_enabled = app_state["tracking_enabled"]
 
-            # --- Active tracking ---
-            if tracking_enabled:
+            # --- Head override or active tracking ---
+            with state_lock:
+                head_override = app_state["head_override"]
+                head_override_time = app_state["head_override_time"]
+
+            if head_override is not None:
+                # Skill-driven head control with EMA smoothing
+                if time.time() - head_override_time > 30.0:
+                    # Safety timeout: auto-recover tracking
+                    update_state(head_override=None, tracking_enabled=True)
+                    yaw_deg, pitch_deg = tracker.get_head_target(t, voice_state, mood)
+                else:
+                    target_yaw = head_override["yaw"]
+                    target_pitch = head_override["pitch"]
+                    _smooth_yaw += 0.15 * (target_yaw - _smooth_yaw)
+                    _smooth_pitch += 0.15 * (target_pitch - _smooth_pitch)
+                    yaw_deg = _smooth_yaw
+                    pitch_deg = _smooth_pitch
+            elif tracking_enabled:
                 # Update DoA (throttled to ~5Hz to avoid I2C bus contention)
                 if t - last_doa_time > 0.2:
                     last_doa_time = t
@@ -728,7 +835,13 @@ class ReachyNova(ReachyMiniApp):
                     yaw_deg = 25.0 * np.sin(2.0 * np.pi * IDLE_YAW_SPEED * t)
                     pitch_deg = 3.0 * np.sin(2.0 * np.pi * 0.08 * t)
 
-            head_pose = create_head_pose(yaw=yaw_deg, pitch=pitch_deg, degrees=True)
+            # Apply safety validation (clamps + organic body follow)
+            safe_yaw, safe_pitch, safe_body_yaw = safety.validate(
+                yaw_deg, pitch_deg, _current_body_yaw
+            )
+            _current_body_yaw = safe_body_yaw
+
+            head_pose = create_head_pose(yaw=safe_yaw, pitch=safe_pitch, degrees=True)
 
             # --- Antenna animation (eased, mood-driven) ---
             if antenna_mode == "off":
@@ -770,7 +883,11 @@ class ReachyNova(ReachyMiniApp):
                 prev_antennas = antennas_deg
 
             antennas_rad = np.deg2rad(antennas_deg)
-            reachy_mini.set_target(head=head_pose, antennas=antennas_rad)
+            reachy_mini.set_target(
+                head=head_pose,
+                antennas=antennas_rad,
+                body_yaw=np.radians(safe_body_yaw),
+            )
 
             # --- Feed mic audio to Nova Sonic ---
             try:
