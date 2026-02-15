@@ -730,6 +730,21 @@ class ReachyNova(ReachyMiniApp):
         def on_tracking_event(event_type: str, data: dict):
             nonlocal last_vision_event_time
             publish_event("tracking", event_type, data)
+
+            if event_type == "pat_detected":
+                logger.info("[Tracking] Pat detected on head!")
+                update_state(mood="happy")
+                # Only inject voice reaction if not currently speaking —
+                # injecting during active speech can destabilize the Bedrock stream
+                with state_lock:
+                    vs = app_state["voice_state"]
+                if vs != "speaking":
+                    sonic.inject_text(
+                        "[The user just patted you on the head affectionately. "
+                        "React warmly — you love being patted! Keep it brief and sweet.]"
+                    )
+                return
+
             now = time.time()
             if now - last_vision_event_time < VISION_EVENT_COOLDOWN:
                 return
@@ -945,6 +960,14 @@ class ReachyNova(ReachyMiniApp):
                     antennas=antennas_rad,
                     body_yaw=np.radians(safe_body_yaw),
                 )
+
+            # --- Pat detection: compare commanded vs actual head pose ---
+            if movement_enabled and tracking_enabled:
+                try:
+                    actual_pose = reachy_mini.get_current_head_pose()
+                    tracker.detect_pat(head_pose, actual_pose)
+                except Exception:
+                    pass  # No pose feedback yet (startup) or hardware not available
 
             # --- Feed mic audio to Nova Sonic ---
             try:

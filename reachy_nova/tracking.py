@@ -1,8 +1,8 @@
 """Active vision tracking for Reachy Nova.
 
 Fuses multiple signals (DoA speaker direction, YOLO person detection,
-snap/clap transient detection) into head target angles. Falls back to
-idle sinusoidal animation when no active tracking target exists.
+snap/clap transient detection, pat detection) into head target angles.
+Falls back to idle sinusoidal animation when no active tracking target exists.
 
 Priority order: snap > face > speaker > idle
 """
@@ -14,6 +14,7 @@ from collections import deque
 from collections.abc import Callable
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,89 @@ IDLE_YAW_AMP = 25.0
 IDLE_YAW_SPEED = 0.15
 IDLE_PITCH_AMP = 3.0
 IDLE_PITCH_SPEED = 0.08
+
+
+class PatDetector:
+    """Detects patting gestures on the robot head.
+
+    Compares the commanded head pitch with the actual head pitch read back
+    from the servos. When someone pats the head from above, the actual pitch
+    deviates downward from the commanded pitch. Repeated downward impulses
+    within a short time window are classified as a pat.
+
+    This distinguishes pats from accidental bumps (single event) and normal
+    servo noise (below threshold).
+    """
+
+    def __init__(self):
+        # Rolling deviation history (timestamp, deviation_degrees)
+        self.deviation_history: deque[tuple[float, float]] = deque(maxlen=150)
+
+        # Timestamps of detected press impulses
+        self.press_times: deque[float] = deque(maxlen=20)
+        self.last_pat_time: float = 0.0
+
+        # --- Tunable parameters ---
+        self.press_threshold: float = 1.5    # degrees: deviation to count as a "press"
+        self.release_threshold: float = 0.6  # degrees: deviation below this = released
+        self.min_presses: int = 2            # minimum presses for a pat
+        self.pat_window: float = 2.5         # seconds: window to accumulate presses
+        self.pat_cooldown: float = 3.0       # seconds: between pat events
+
+        # Internal state
+        self._in_press: bool = False
+        self._baseline_offset: float = 0.0   # rolling baseline for steady-state offset
+        self._baseline_alpha: float = 0.005   # slow EMA to track servo bias
+
+    def update(self, commanded_pitch: float, actual_pitch: float) -> bool:
+        """Feed one sample of commanded vs actual pitch.
+
+        Args:
+            commanded_pitch: the pitch we commanded (degrees, positive=up)
+            actual_pitch: the pitch read back from the servo (degrees)
+
+        Returns:
+            True if a pat gesture was just detected.
+        """
+        now = time.time()
+
+        # Raw deviation (negative = head pushed downward relative to command)
+        raw_deviation = actual_pitch - commanded_pitch
+
+        # Update slow baseline to compensate for constant servo offset / gravity
+        self._baseline_offset += self._baseline_alpha * (raw_deviation - self._baseline_offset)
+
+        # Corrected deviation: remove baseline drift
+        deviation = raw_deviation - self._baseline_offset
+        self.deviation_history.append((now, deviation))
+
+        # Detect press events: deviation dips below threshold (head pushed down)
+        if deviation < -self.press_threshold and not self._in_press:
+            self._in_press = True
+            self.press_times.append(now)
+            logger.debug(f"Pat press detected: deviation={deviation:.2f}deg")
+        elif deviation > -self.release_threshold:
+            self._in_press = False
+
+        # Count recent presses within the time window
+        cutoff = now - self.pat_window
+        recent_presses = sum(1 for t in self.press_times if t > cutoff)
+
+        # Pat detected?
+        if recent_presses >= self.min_presses and now - self.last_pat_time > self.pat_cooldown:
+            self.last_pat_time = now
+            self.press_times.clear()
+            logger.info(f"Pat detected! ({recent_presses} presses in {self.pat_window}s)")
+            return True
+
+        return False
+
+    def reset(self):
+        """Reset detector state."""
+        self.deviation_history.clear()
+        self.press_times.clear()
+        self._in_press = False
+        self._baseline_offset = 0.0
 
 
 class TrackingManager:
@@ -75,6 +159,13 @@ class TrackingManager:
         self.current_yaw = 0.0
         self.current_pitch = 0.0
         self.smooth_factor = 0.15  # EMA alpha for smooth transitions
+
+        # --- Pat detection ---
+        self.pat_detector = PatDetector()
+        self.pat_reaction_time: float = 0.0   # timestamp when last pat was detected
+        self.pat_reaction_duration: float = 1.5  # seconds of head nuzzle
+        self.pat_nuzzle_freq: float = 2.5     # Hz — gentle side-to-side speed
+        self.pat_nuzzle_amp: float = 8.0      # degrees — nuzzle amplitude
 
         # --- Current mode ---
         self.mode = "idle"
@@ -245,6 +336,30 @@ class TrackingManager:
 
         self.prev_chunk_low = rms < 2.0 * rolling_avg
 
+    def detect_pat(self, commanded_pose: np.ndarray, actual_pose: np.ndarray):
+        """Detect patting gesture by comparing commanded vs actual head pose.
+
+        Args:
+            commanded_pose: 4x4 homogeneous matrix sent to set_target()
+            actual_pose: 4x4 homogeneous matrix read from get_current_head_pose()
+        """
+        try:
+            # Extract pitch from both poses (euler "xyz" convention, index 1 = pitch)
+            cmd_euler = Rotation.from_matrix(commanded_pose[:3, :3]).as_euler("xyz", degrees=True)
+            act_euler = Rotation.from_matrix(actual_pose[:3, :3]).as_euler("xyz", degrees=True)
+            commanded_pitch = cmd_euler[1]
+            actual_pitch = act_euler[1]
+
+            if self.pat_detector.update(commanded_pitch, actual_pitch):
+                self.pat_reaction_time = time.time()
+                self._fire_event("pat_detected", {
+                    "commanded_pitch": float(commanded_pitch),
+                    "actual_pitch": float(actual_pitch),
+                    "deviation": float(actual_pitch - commanded_pitch),
+                })
+        except Exception as e:
+            logger.debug(f"Pat detection error: {e}")
+
     def get_head_target(self, t, voice_state="idle", mood="happy"):
         """Compute head target angles based on priority: snap > face > speaker > idle.
 
@@ -313,6 +428,16 @@ class TrackingManager:
             with self._vision_lock:
                 self.face_yaw_accum *= 0.98
                 self.face_pitch_accum *= 0.98
+
+        # Pat nuzzle overlay: gentle decaying side-to-side after a pat
+        pat_elapsed = now - self.pat_reaction_time
+        if 0 < pat_elapsed < self.pat_reaction_duration:
+            # Decaying envelope: starts full, fades to zero
+            envelope = 1.0 - (pat_elapsed / self.pat_reaction_duration)
+            nuzzle = self.pat_nuzzle_amp * envelope * np.sin(
+                2.0 * np.pi * self.pat_nuzzle_freq * pat_elapsed
+            )
+            self.current_yaw += nuzzle
 
         # Final safety clamp on pitch to prevent head-body collision
         self.current_pitch = float(np.clip(self.current_pitch, MIN_PITCH, MAX_PITCH))

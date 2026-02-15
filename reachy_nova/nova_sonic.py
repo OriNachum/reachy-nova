@@ -429,9 +429,20 @@ class NovaSonic:
         except Exception as e:
             logger.warning(f"feed_audio scheduling failed: {e}")
 
-    def inject_text(self, text: str) -> None:
-        """Inject a text message into the conversation (e.g., vision description)."""
+    def inject_text(self, text: str, force: bool = False) -> None:
+        """Inject a text message into the conversation (e.g., vision description).
+
+        Args:
+            text: the text to inject as a USER message
+            force: if True, skip the speaking guard (use with caution)
+        """
         if not self._active or not self._loop:
+            return
+
+        # Don't inject while the model is actively generating audio — this can
+        # destabilize the Bedrock bidirectional stream and cause it to hang.
+        if self._speaking and not force:
+            logger.debug("inject_text skipped — model is speaking")
             return
 
         # Throttle: skip if too soon after last inject to avoid flooding Bedrock
