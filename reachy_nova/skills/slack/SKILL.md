@@ -11,11 +11,11 @@ metadata:
 
 # Slack Skill
 
-Interact with Slack channels — send messages, read recent or queued messages,
+Interact with Slack channels — send messages, read recent messages,
 reply to threads, and add emoji reactions.
 
 ## Parameters
-- action (string, required): One of "send_message", "read_messages", "read_queued", "reply_to_thread", "add_reaction"
+- action (string, required): One of "send_message", "read_messages", "reply_to_thread", "add_reaction"
 - text (string, optional): Message text (for send_message/reply_to_thread)
 - channel (string, optional): Slack channel ID (defaults to first configured channel)
 - thread_ts (string, optional): Thread timestamp for reply_to_thread
@@ -26,6 +26,5 @@ reply to threads, and add emoji reactions.
 ## Examples
 - "read my Slack messages" → action: read_messages
 - "send hello everyone to Slack" → action: send_message, text: "hello everyone"
-- "any queued Slack messages?" → action: read_queued
 - "reply to that thread saying thanks" → action: reply_to_thread, text: "thanks"
 - "react to that with thumbsup" → action: add_reaction, emoji: "thumbsup"

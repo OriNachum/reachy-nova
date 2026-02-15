@@ -1,0 +1,42 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: nova-mosquitto
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./config/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/#", "-C", "1", "-i", "healthcheck", "-W", "3"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  nervous-system:
+    build:
+      context: .
+      dockerfile: docker/nervous-system/Dockerfile
+    container_name: nova-nervous-system
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    environment:
+      - MQTT_BROKER=mosquitto
+      - MQTT_PORT=1883
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
+      - RULES_CONFIG=/app/config/rules.yaml
+      - HEARTBEAT_INTERVAL=${HEARTBEAT_INTERVAL:-60}
+      - LLM_ENABLED=${LLM_ENABLED:-true}
+    volumes:
+      - ./config/nervous-system/rules.yaml:/app/config/rules.yaml
+    restart: unless-stopped
+
+volumes:
+  mosquitto-data:
+  mosquitto-log:

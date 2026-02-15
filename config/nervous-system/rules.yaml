@@ -1,0 +1,112 @@
+# Nervous System Rules Configuration
+# Maps (source, type) pairs to baseline priority, urgency, and LLM evaluation settings.
+
+# Default rule for unknown (source, type) pairs
+default:
+  priority: NORMAL
+  urgency: DEFERRABLE
+  llm_evaluate: true
+
+# Rules keyed by source/type
+rules:
+  # --- Tracking events ---
+  tracking/snap_detected:
+    priority: HIGH
+    urgency: IMMEDIATE
+    llm_evaluate: false
+    inject_template: "[A sharp sound was detected nearby — look in that direction!]"
+
+  tracking/person_detected:
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: true
+    inject_template: "[A person just appeared in your view.]"
+
+  tracking/person_lost:
+    priority: LOW
+    urgency: DEFERRABLE
+    llm_evaluate: false
+    inject_template: "[The person you were looking at has left.]"
+
+  tracking/mode_changed:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  # --- Vision events ---
+  vision/vision_description:
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: true
+    inject_template: "[Your camera sees: {description}] React to what you see briefly."
+
+  vision/analysis_started:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  # --- Slack events ---
+  slack/slack_mention:
+    priority: HIGH
+    urgency: IMMEDIATE
+    llm_evaluate: false
+    inject_template: "[You were mentioned on Slack by {user}: {text}] Briefly acknowledge this."
+
+  slack/slack_message:
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: true
+    inject_template: "[Slack message from {user}: {text}]"
+
+  slack/slack_dm:
+    priority: HIGH
+    urgency: IMMEDIATE
+    llm_evaluate: false
+    inject_template: "[Slack DM from {user}: {text}] Briefly acknowledge this."
+
+  slack/slack_reaction:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  # --- Browser events ---
+  browser/task_completed:
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "[Browser task result: {result}]"
+
+  browser/progress:
+    priority: LOW
+    urgency: DEFERRABLE
+    llm_evaluate: false
+    inject_template: "[Browser status: {message}]"
+
+  browser/task_started:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  # --- Memory events ---
+  memory/query_result:
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "[Memory recall: {result}]"
+
+  memory/store_result:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  memory/startup_context:
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "[Background knowledge: {context}]"
+
+  # --- Heartbeat ---
+  heartbeat/tick:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
