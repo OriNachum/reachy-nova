@@ -45,7 +45,6 @@ class NovaSlack:
         self.channel_ids = set(channel_ids or [])
 
         self._recent_messages: deque[SlackEvent] = deque(maxlen=50)
-        self._queued_messages: deque[SlackEvent] = deque(maxlen=20)
         self._thread: threading.Thread | None = None
         self._app = None  # Slack Bolt App
         self._client = None  # Slack WebClient
@@ -77,7 +76,7 @@ class NovaSlack:
     def execute(self, params: dict) -> str:
         """Blocking skill executor for Sonic tool_use.
 
-        Actions: send_message, read_messages, read_queued, reply_to_thread, add_reaction
+        Actions: send_message, read_messages, reply_to_thread, add_reaction
         """
         action = params.get("action", "read_messages")
         channel = params.get("channel", "")
@@ -99,14 +98,6 @@ class NovaSlack:
                 return "[No recent Slack messages]"
             lines = [f"[{m.user}] {m.text}" for m in messages]
             return f"[{len(lines)} recent Slack messages]\n" + "\n".join(lines)
-
-        elif action == "read_queued":
-            messages = list(self._queued_messages)
-            self._queued_messages.clear()
-            if not messages:
-                return "[No queued Slack messages]"
-            lines = [f"[{m.user}] {m.text}" for m in messages]
-            return f"[{len(lines)} queued Slack messages]\n" + "\n".join(lines)
 
         elif action == "reply_to_thread":
             text = params.get("text", "")

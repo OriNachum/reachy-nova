@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 # Head motion limits (degrees)
 MAX_YAW = 45.0
-MAX_PITCH = 25.0
+MAX_PITCH = 25.0      # max upward tilt
+MIN_PITCH = -15.0     # max downward tilt (limited to avoid head-body collision)
 
 # Idle animation parameters (match original main.py behavior)
 IDLE_YAW_AMP = 25.0
@@ -68,6 +69,7 @@ class TrackingManager:
         self.snap_target_yaw = 0.0
         self.snap_duration = 1.5  # hold snap look for 1.5s
         self.prev_chunk_low = True  # previous chunk was below threshold
+        self.snap_min_rms = 0.02   # absolute floor — below this is ambient noise, not a snap
 
         # --- Smoothing ---
         self.current_yaw = 0.0
@@ -159,11 +161,13 @@ class TrackingManager:
                     self.face_pitch_accum += self.face_kp * error_y * 0.5
 
                     self.face_yaw_accum = np.clip(self.face_yaw_accum, -MAX_YAW, MAX_YAW)
-                    self.face_pitch_accum = np.clip(self.face_pitch_accum, -MAX_PITCH, MAX_PITCH)
+                    self.face_pitch_accum = np.clip(self.face_pitch_accum, MIN_PITCH, MAX_PITCH)
 
                     # Fire person_detected when transitioning from no person to person
                     if not had_person:
-                        self._fire_event("person_detected", {"bbox": self.person_bbox})
+                        self._fire_event("person_detected", {
+                            "bbox": tuple(float(v) for v in self.person_bbox),
+                        })
                 else:
                     if self.person_bbox is not None and self.person_lost_time == 0.0:
                         self.person_lost_time = time.time()
@@ -226,7 +230,8 @@ class TrackingManager:
             return
 
         # Snap = sudden spike: current > 5x average AND previous was quiet
-        is_spike = rms > 5.0 * rolling_avg
+        # Also require absolute minimum RMS to filter out ambient noise fluctuations
+        is_spike = rms > 5.0 * rolling_avg and rms > self.snap_min_rms
         was_quiet = self.prev_chunk_low
 
         if is_spike and was_quiet:
@@ -308,6 +313,9 @@ class TrackingManager:
             with self._vision_lock:
                 self.face_yaw_accum *= 0.98
                 self.face_pitch_accum *= 0.98
+
+        # Final safety clamp on pitch to prevent head-body collision
+        self.current_pitch = float(np.clip(self.current_pitch, MIN_PITCH, MAX_PITCH))
 
         # Fire mode_changed event on any transition
         if self.mode != prev_mode:

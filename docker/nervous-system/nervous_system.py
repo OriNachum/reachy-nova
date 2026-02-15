@@ -113,12 +113,24 @@ New event to evaluate:
 
 Given everything above, should this event interrupt the current conversation?
 
-Rules:
-- INJECT: Important enough to break into the conversation now
-- QUEUE: Worth mentioning, but wait for a pause or idle moment
-- IGNORE: Not worth mentioning at all
+Decision guidelines:
+- INJECT if the robot is idle/listening and hasn't injected recently (>5s)
+- INJECT if the content is novel or interesting (new person, scene change, direct message)
+- QUEUE if the robot is actively speaking and the content can wait
+- IGNORE only if the content is redundant (same as a recent event) or truly unimportant
+
+Bias toward INJECT when idle. The robot should be lively and reactive.
 
 Reply with exactly one word: INJECT, QUEUE, or IGNORE."""
+
+# Configurable per-event-type debounce cooldowns (seconds)
+EVENT_COOLDOWNS: dict[str, float] = {
+    "tracking/snap_detected": 2.0,
+    "tracking/person_detected": 3.0,
+    "tracking/person_lost": 5.0,
+    "tracking/mode_changed": 2.0,
+    "vision/vision_description": 5.0,
+}
 
 
 class LLMSubAgent:
@@ -282,6 +294,7 @@ class NervousSystem:
         }
         self._recent_events: list[dict] = []
         self._last_inject_time: float = 0.0
+        self._last_event_time: dict[str, float] = {}  # debounce per source/type
         self._stop_event = threading.Event()
 
     def _on_connect(self, client, userdata, flags, rc, properties=None):
@@ -340,6 +353,17 @@ class NervousSystem:
         except Exception as e:
             logger.warning(f"Failed to parse event from {topic}: {e}")
             return
+
+        # Debounce: skip duplicate events within cooldown window
+        event_key = f"{event.source}/{event.type}"
+        cooldown = EVENT_COOLDOWNS.get(event_key, 0.0)
+        if cooldown > 0:
+            now = time.time()
+            last = self._last_event_time.get(event_key, 0.0)
+            if now - last < cooldown:
+                logger.debug(f"Debounced {event_key} ({now - last:.1f}s < {cooldown}s)")
+                return
+            self._last_event_time[event_key] = now
 
         # Track recent events (keep last 20)
         self._recent_events.append({

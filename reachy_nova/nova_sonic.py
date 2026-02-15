@@ -73,6 +73,14 @@ class NovaSonic:
         self._system_content = str(uuid.uuid4())
         self._audio_content = str(uuid.uuid4())
 
+        # Serialize inject/tool-result sends so they don't overlap on the stream
+        self._inject_lock: asyncio.Lock | None = None
+        # Session generation — incremented on restart to discard stale coroutines
+        self._session_gen = 0
+        # Throttle inject_text to prevent flooding the stream
+        self._last_inject_time = 0.0
+        self._inject_min_interval = 3.0  # seconds between inject_text calls
+
         # Tool use tracking
         self._current_tool_use: dict | None = None
 
@@ -121,8 +129,6 @@ class NovaSonic:
             InvokeModelWithBidirectionalStreamOperationInput(model_id=self.model_id)
         )
         logger.info("Stream opened OK")
-        self._active = True
-        self._set_state("listening")
 
         # Session start
         logger.info("Sending sessionStart")
@@ -203,6 +209,9 @@ class NovaSonic:
             }
         })
 
+        # Session fully configured — now accept audio/inject traffic
+        self._active = True
+        self._set_state("listening")
         logger.info("Nova Sonic session started - listening")
 
     async def _process_responses(self) -> None:
@@ -309,28 +318,73 @@ class NovaSonic:
             }
         })
 
-    async def _run_loop(self, stop_event: threading.Event) -> None:
-        await self._start_session()
-        response_task = asyncio.create_task(self._process_responses())
+    async def _close_stream(self) -> None:
+        """Best-effort cleanup of the current stream."""
         try:
-            while not stop_event.is_set():
-                await asyncio.sleep(0.01)
-        finally:
-            self._active = False
+            await self._send({
+                "contentEnd": {
+                    "promptName": self._prompt_name,
+                    "contentName": self._audio_content,
+                }
+            })
+            await self._send({"promptEnd": {"promptName": self._prompt_name}})
+            await self._send({"sessionEnd": {}})
+        except Exception:
+            pass
+        try:
+            await self._stream.input_stream.close()
+        except Exception:
+            pass
+
+    async def _run_loop(self, stop_event: threading.Event) -> None:
+        self._inject_lock = asyncio.Lock()
+
+        while not stop_event.is_set():
+            # (Re)start a fresh session
             try:
-                await self._send({
-                    "contentEnd": {
-                        "promptName": self._prompt_name,
-                        "contentName": self._audio_content,
-                    }
-                })
-                await self._send({"promptEnd": {"promptName": self._prompt_name}})
-                await self._send({"sessionEnd": {}})
-                await self._stream.input_stream.close()
-            except Exception:
-                pass
-            response_task.cancel()
+                await self._start_session()
+            except Exception as e:
+                logger.error(f"Session start failed: {e} — retrying in 3s")
+                await asyncio.sleep(3)
+                continue
+
+            response_task = asyncio.create_task(self._process_responses())
+            try:
+                # Wait until stop requested OR response loop dies
+                while not stop_event.is_set() and not response_task.done():
+                    await asyncio.sleep(0.1)
+            finally:
+                # Mark inactive FIRST to stop all incoming traffic
+                self._active = False
+                self._speaking = False
+                self._current_tool_use = None
+
+                # Clean up CURRENT stream with CURRENT UUIDs (before generating new ones)
+                await self._close_stream()
+                response_task.cancel()
+
+            if stop_event.is_set():
+                break
+
+            # Stream died — prepare for restart
+            self._session_gen += 1  # invalidate any queued coroutines
             self._set_state("idle")
+            logger.warning("Bedrock stream died — restarting session in 3s")
+
+            # Force fresh client — old client may hold stale connection state
+            self._client = None
+            self._stream = None
+
+            # Generate fresh UUIDs for the new session
+            self._prompt_name = str(uuid.uuid4())
+            self._system_content = str(uuid.uuid4())
+            self._audio_content = str(uuid.uuid4())
+
+            await asyncio.sleep(3)
+            # Reset inject throttle so new session gets a quiet start
+            self._last_inject_time = time.time()
+
+        self._set_state("idle")
 
     def start(self, stop_event: threading.Event) -> None:
         """Start the Nova Sonic session in a background thread."""
@@ -372,45 +426,63 @@ class NovaSonic:
             asyncio.run_coroutine_threadsafe(
                 self._send_audio_chunk(pcm), self._loop
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"feed_audio scheduling failed: {e}")
 
     def inject_text(self, text: str) -> None:
         """Inject a text message into the conversation (e.g., vision description)."""
         if not self._active or not self._loop:
             return
 
+        # Throttle: skip if too soon after last inject to avoid flooding Bedrock
+        now = time.time()
+        if now - self._last_inject_time < self._inject_min_interval:
+            logger.debug(f"inject_text throttled (interval={now - self._last_inject_time:.1f}s)")
+            return
+        self._last_inject_time = now
+
         content_name = str(uuid.uuid4())
+        gen = self._session_gen  # capture at scheduling time
 
         async def _inject():
-            await self._send({
-                "contentStart": {
-                    "promptName": self._prompt_name,
-                    "contentName": content_name,
-                    "type": "TEXT",
-                    "interactive": True,
-                    "role": "USER",
-                    "textInputConfiguration": {"mediaType": "text/plain"},
-                }
-            })
-            await self._send({
-                "textInput": {
-                    "promptName": self._prompt_name,
-                    "contentName": content_name,
-                    "content": text,
-                }
-            })
-            await self._send({
-                "contentEnd": {
-                    "promptName": self._prompt_name,
-                    "contentName": content_name,
-                }
-            })
+            async with self._inject_lock:
+                if not self._active or self._session_gen != gen:
+                    return  # session restarted — discard stale inject
+                try:
+                    await self._send({
+                        "contentStart": {
+                            "promptName": self._prompt_name,
+                            "contentName": content_name,
+                            "type": "TEXT",
+                            "interactive": True,
+                            "role": "USER",
+                            "textInputConfiguration": {"mediaType": "text/plain"},
+                        }
+                    })
+                    await self._send({
+                        "textInput": {
+                            "promptName": self._prompt_name,
+                            "contentName": content_name,
+                            "content": text,
+                        }
+                    })
+                except Exception as e:
+                    logger.warning(f"inject_text send failed: {e}")
+                finally:
+                    try:
+                        await self._send({
+                            "contentEnd": {
+                                "promptName": self._prompt_name,
+                                "contentName": content_name,
+                            }
+                        })
+                    except Exception:
+                        pass
 
         try:
             asyncio.run_coroutine_threadsafe(_inject(), self._loop)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"inject_text scheduling failed: {e}")
 
     def send_tool_result(self, tool_use_id: str, result: str) -> None:
         """Send a tool result back to the Nova Sonic conversation."""
@@ -418,38 +490,49 @@ class NovaSonic:
             return
 
         content_name = str(uuid.uuid4())
+        gen = self._session_gen  # capture at scheduling time
 
         async def _send_result():
-            await self._send({
-                "contentStart": {
-                    "promptName": self._prompt_name,
-                    "contentName": content_name,
-                    "interactive": False,
-                    "type": "TOOL",
-                    "role": "TOOL",
-                    "toolResultInputConfiguration": {
-                        "toolUseId": tool_use_id,
-                        "type": "TEXT",
-                        "textInputConfiguration": {"mediaType": "text/plain"},
-                    },
-                }
-            })
-            await self._send({
-                "toolResult": {
-                    "promptName": self._prompt_name,
-                    "contentName": content_name,
-                    "content": json.dumps({"result": result}),
-                }
-            })
-            await self._send({
-                "contentEnd": {
-                    "promptName": self._prompt_name,
-                    "contentName": content_name,
-                }
-            })
-            logger.info(f"Tool result sent for {tool_use_id}: {result[:100]}...")
+            async with self._inject_lock:
+                if not self._active or self._session_gen != gen:
+                    return  # session restarted — discard stale tool result
+                try:
+                    await self._send({
+                        "contentStart": {
+                            "promptName": self._prompt_name,
+                            "contentName": content_name,
+                            "interactive": False,
+                            "type": "TOOL",
+                            "role": "TOOL",
+                            "toolResultInputConfiguration": {
+                                "toolUseId": tool_use_id,
+                                "type": "TEXT",
+                                "textInputConfiguration": {"mediaType": "text/plain"},
+                            },
+                        }
+                    })
+                    await self._send({
+                        "toolResult": {
+                            "promptName": self._prompt_name,
+                            "contentName": content_name,
+                            "content": json.dumps({"result": result}),
+                        }
+                    })
+                    logger.info(f"Tool result sent for {tool_use_id}: {result[:100]}...")
+                except Exception as e:
+                    logger.warning(f"send_tool_result send failed: {e}")
+                finally:
+                    try:
+                        await self._send({
+                            "contentEnd": {
+                                "promptName": self._prompt_name,
+                                "contentName": content_name,
+                            }
+                        })
+                    except Exception:
+                        pass
 
         try:
             asyncio.run_coroutine_threadsafe(_send_result(), self._loop)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"send_tool_result scheduling failed: {e}")

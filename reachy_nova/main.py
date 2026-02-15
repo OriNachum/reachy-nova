@@ -153,32 +153,50 @@ class ReachyNova(ReachyMiniApp):
             "memory_last_context": "",
             "slack_state": "idle",
             "slack_last_event": "",
-            "slack_queued_count": 0,
         }
 
         def update_state(**kwargs):
+            mood_changed = None
             with state_lock:
                 app_state.update(kwargs)
-                if mqtt_available and "mood" in kwargs:
-                    publish_state("mood", {"mood": kwargs["mood"]})
+                if "mood" in kwargs:
+                    mood_changed = kwargs["mood"]
+            # Publish OUTSIDE the lock — never block the main loop on MQTT I/O
+            if mqtt_available and mood_changed is not None:
+                publish_state("mood", {"mood": mood_changed})
 
         # --- MQTT client (optional, for Nervous System) ---
         mqtt_available = False
         mqtt_client = None
         try:
             import paho.mqtt.client as paho_mqtt
+
+            def _on_mqtt_connect(client, userdata, flags, rc, properties=None):
+                nonlocal mqtt_available
+                mqtt_available = True
+                client.subscribe("nova/inject")
+                logger.info(f"MQTT connected (rc={rc}) — subscribed to nova/inject")
+
+            def _on_mqtt_disconnect(client, userdata, flags, rc, properties=None):
+                nonlocal mqtt_available
+                mqtt_available = False
+                logger.warning(f"MQTT disconnected (rc={rc}) — falling back to direct mode")
+
             mqtt_client = paho_mqtt.Client(
                 paho_mqtt.CallbackAPIVersion.VERSION2,
                 client_id="reachy-nova-app",
             )
+            mqtt_client.on_connect = _on_mqtt_connect
+            mqtt_client.on_disconnect = _on_mqtt_disconnect
+            mqtt_client.reconnect_delay_set(min_delay=1, max_delay=30)
             mqtt_client.connect(
                 os.environ.get("MQTT_BROKER", "localhost"),
                 int(os.environ.get("MQTT_PORT", "1883")),
-                keepalive=5,
+                keepalive=60,
             )
             mqtt_client.loop_start()
             mqtt_available = True
-            logger.info("MQTT connected — Nervous System integration active")
+            logger.info("MQTT started — Nervous System integration active")
         except Exception as e:
             logger.warning(f"MQTT not available — direct callbacks only: {e}")
 
@@ -367,7 +385,7 @@ class ReachyNova(ReachyMiniApp):
         # --- Nova Slack ---
         def on_slack_event(event: SlackEvent):
             summary = f"[{event.user}] {event.text[:80]}" if event.text else f"[{event.user}] ({event.type})"
-            update_state(slack_last_event=summary, slack_queued_count=len(slack_bot._queued_messages))
+            update_state(slack_last_event=summary)
             logger.info(f"[Slack event] {summary}")
             publish_event("slack", f"slack_{event.type}", {
                 "user": event.user,
@@ -409,7 +427,6 @@ class ReachyNova(ReachyMiniApp):
                         "enum": [
                             "send_message",
                             "read_messages",
-                            "read_queued",
                             "reply_to_thread",
                             "add_reaction",
                         ],
@@ -578,7 +595,6 @@ class ReachyNova(ReachyMiniApp):
                 return {
                     "slack_state": app_state["slack_state"],
                     "slack_last_event": app_state["slack_last_event"],
-                    "slack_queued_count": app_state["slack_queued_count"],
                     "recent_count": len(slack_bot._recent_messages),
                 }
 
@@ -610,14 +626,8 @@ class ReachyNova(ReachyMiniApp):
         tracker = TrackingManager(on_event=on_tracking_event)
         last_doa_time = 0.0
 
-        # --- Start services ---
-        sonic.start(stop_event)
-        vision.start(stop_event)
-        browser.start(stop_event)
-        slack_bot.start(stop_event)
-
-        # --- Subscribe to Nervous System inject commands ---
-        if mqtt_available:
+        # --- Register MQTT inject handler (needs sonic, so done after sonic creation) ---
+        if mqtt_client is not None:
             def _on_inject(client, userdata, msg):
                 try:
                     data = json.loads(msg.payload.decode())
@@ -629,8 +639,13 @@ class ReachyNova(ReachyMiniApp):
                     logger.warning(f"Inject message error: {e}")
 
             mqtt_client.message_callback_add("nova/inject", _on_inject)
-            mqtt_client.subscribe("nova/inject")
-            logger.info("Subscribed to nova/inject — Nervous System can drive voice")
+            logger.info("Registered nova/inject handler — Nervous System can drive voice")
+
+        # --- Start services ---
+        sonic.start(stop_event)
+        vision.start(stop_event)
+        browser.start(stop_event)
+        slack_bot.start(stop_event)
 
         # --- Inject startup context from memory ---
         def _inject_startup_context():
@@ -781,8 +796,10 @@ class ReachyNova(ReachyMiniApp):
                             audio,
                         ).astype(np.float32)
 
-                    # Feed audio to snap detector
-                    if tracking_enabled:
+                    # Feed audio to snap detector only when idle/listening —
+                    # during speaking/thinking, our own audio or processing
+                    # triggers false snaps creating a feedback loop
+                    if tracking_enabled and voice_state in ("idle", "listening"):
                         tracker.detect_snap(audio)
 
                     sonic.feed_audio(audio)
