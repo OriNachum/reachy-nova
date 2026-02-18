@@ -23,6 +23,7 @@ dependencies = [
     "neo4j>=5.0.0",
     "slack-bolt>=1.18.0",
     "paho-mqtt>=2.0.0",
+    "pyyaml>=6.0",
 ]
 keywords = ["reachy-mini-app"]
 

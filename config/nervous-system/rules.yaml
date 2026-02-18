@@ -105,6 +105,23 @@ rules:
     llm_evaluate: false
     inject_template: "[Background knowledge: {context}]"
 
+  # --- Emotion events ---
+  emotions/wound_created:
+    priority: HIGH
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "[You just experienced something deeply upsetting. You feel wounded.]"
+
+  emotions/wound_healed:
+    priority: NORMAL
+    urgency: DEFERRABLE
+    llm_evaluate: false
+
+  emotions/mood_changed:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
   # --- Heartbeat ---
   heartbeat/tick:
     priority: LOW

@@ -216,13 +216,16 @@ class NovaSonic:
 
     async def _process_responses(self) -> None:
         assistant_text_parts = []
+        consecutive_errors = 0
         try:
             while self._active:
                 try:
                     output = await self._stream.await_output()
                     result = await output[1].receive()
                     if not result.value or not result.value.bytes_:
+                        consecutive_errors = 0
                         continue
+                    consecutive_errors = 0
 
                     data = json.loads(result.value.bytes_.decode("utf-8"))
                     event = data.get("event", {})
@@ -301,6 +304,15 @@ class NovaSonic:
                     break
                 except Exception as e:
                     if self._active:
+                        consecutive_errors += 1
+                        err_str = str(e)
+                        # "Invalid event bytes" is a transient SDK framing error —
+                        # log a warning and keep the session alive rather than
+                        # restarting and cutting audio output.
+                        if "Invalid event bytes" in err_str and consecutive_errors <= 5:
+                            logger.warning(f"Transient stream error (#{consecutive_errors}): {e}")
+                            await asyncio.sleep(0.05)
+                            continue
                         logger.error(f"Response processing error: {e}")
                     break
         except Exception as e:

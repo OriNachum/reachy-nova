@@ -32,6 +32,7 @@ from .skills import SkillManager
 from .tracking import TrackingManager
 from .face_manager import FaceManager
 from .face_recognition import FaceRecognition
+from .emotions import EmotionalState
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -162,7 +163,13 @@ class ReachyNova(ReachyMiniApp):
             "movement_enabled": True,     # False = freeze head + body at current position
             "face_recognized": "",        # currently recognized person name
             "face_count": 0,              # number of permanent faces stored
+            "emotion_levels": {},         # current emotion values
+            "emotion_boredom": 0.0,       # boredom accumulator
+            "emotion_wounds": [],         # active emotional wounds
         }
+
+        # --- Emotional State System ---
+        emotional_state = EmotionalState()
 
         def update_state(**kwargs):
             mood_changed = None
@@ -247,7 +254,8 @@ class ReachyNova(ReachyMiniApp):
 
         # --- Nova 2 Lite (Vision) ---
         def on_vision_description(desc: str):
-            update_state(vision_description=desc, vision_analyzing=False, mood="excited")
+            emotional_state.apply_event("vision_description")
+            update_state(vision_description=desc, vision_analyzing=False)
             logger.info(f"[Vision] {desc}")
             # Nervous System decides whether/when to inject via MQTT
             publish_event("vision", "vision_description", {"description": desc})
@@ -263,7 +271,8 @@ class ReachyNova(ReachyMiniApp):
         update_state(face_count=face_manager.get_face_count())
 
         def on_face_match(unique_id: str, name: str, score: float):
-            update_state(face_recognized=name, mood="excited")
+            emotional_state.apply_event("face_recognized")
+            update_state(face_recognized=name)
             publish_event("face", "face_recognized", {
                 "id": unique_id, "name": name, "score": score,
             })
@@ -294,11 +303,17 @@ class ReachyNova(ReachyMiniApp):
 
         # Register mood skill executor
         def mood_executor(params: dict) -> str:
+            event = params.get("event")
+            if event:
+                if event in emotional_state.get_event_names():
+                    emotional_state.apply_event(event)
+                    return f"[Emotion event '{event}' applied]"
+                return f"[Unknown event '{event}'. Available: {', '.join(emotional_state.get_event_names())}]"
             mood = params.get("mood", "happy").lower()
             if mood not in VALID_MOODS:
                 return f"[Unknown mood '{mood}'. Available: {', '.join(sorted(VALID_MOODS))}]"
-            update_state(mood=mood)
-            return f"[Mood changed to {mood}]"
+            emotional_state.set_mood_override(mood, duration=10.0)
+            return f"[Mood override set to {mood} for 10s]"
 
         skill_manager.register_executor(
             "mood",
@@ -308,11 +323,15 @@ class ReachyNova(ReachyMiniApp):
                 "properties": {
                     "mood": {
                         "type": "string",
-                        "description": "The mood to express",
+                        "description": "Direct mood override (temporary, 10s). Use 'event' for natural emotion changes.",
                         "enum": sorted(VALID_MOODS),
-                    }
+                    },
+                    "event": {
+                        "type": "string",
+                        "description": "Emotion event to apply (preferred over mood override)",
+                        "enum": emotional_state.get_event_names(),
+                    },
                 },
-                "required": ["mood"],
             },
         )
 
@@ -708,23 +727,29 @@ class ReachyNova(ReachyMiniApp):
         # --- Nova Sonic (Voice) ---
         def on_transcript(role: str, text: str):
             if role == "USER":
-                update_state(last_user_text=text, mood="thinking")
+                update_state(last_user_text=text)
                 logger.info(f"[User] {text}")
                 # Check for vision commands (fallback keyword path)
                 lower = text.lower()
                 if any(kw in lower for kw in ["what do you see", "look around", "describe", "what's around"]):
                     vision.trigger_analyze()
+                # Transcript-based emotion detection
+                matched_events = emotional_state.check_transcript(text)
+                for evt in matched_events:
+                    emotional_state.apply_event(evt)
+                    logger.info(f"[Emotion] Transcript trigger: {evt}")
             else:
-                update_state(last_assistant_text=text, mood="happy")
+                emotional_state.apply_event("conversation_reply")
+                update_state(last_assistant_text=text)
                 logger.info(f"[Nova] {text}")
 
         def on_voice_state(state: str):
             update_state(voice_state=state)
             publish_state("voice", {"state": state})
             if state == "speaking":
-                update_state(mood="excited")
+                emotional_state.apply_event("voice_speaking")
             elif state == "listening":
-                update_state(mood="curious")
+                emotional_state.apply_event("voice_listening")
 
         # Tool use callback: runs skill in a daemon thread, sends result back
         def on_tool_use(tool_name: str, tool_use_id: str, params: dict):
@@ -804,8 +829,29 @@ class ReachyNova(ReachyMiniApp):
             mood = body.get("mood", "happy").lower()
             if mood not in VALID_MOODS:
                 return {"error": f"Unknown mood. Available: {sorted(VALID_MOODS)}"}
-            update_state(mood=mood)
+            emotional_state.set_mood_override(mood, duration=10.0)
             return {"mood": mood}
+
+        # --- Emotion API endpoints ---
+        @self.settings_app.get("/api/emotions")
+        def get_emotions():
+            return emotional_state.get_full_state()
+
+        class EmotionEvent(BaseModel):
+            event: str
+            intensity: float = 1.0
+
+        @self.settings_app.post("/api/emotions/event")
+        def apply_emotion_event(body: EmotionEvent):
+            if body.event not in emotional_state.get_event_names():
+                return {"error": f"Unknown event. Available: {emotional_state.get_event_names()}"}
+            emotional_state.apply_event(body.event, body.intensity)
+            return {"status": "applied", "event": body.event, "state": emotional_state.get_full_state()}
+
+        @self.settings_app.post("/api/emotions/reset")
+        def reset_emotions():
+            emotional_state.reload_config()
+            return {"status": "config reloaded"}
 
         class TrackingToggle(BaseModel):
             enabled: bool
@@ -891,7 +937,7 @@ class ReachyNova(ReachyMiniApp):
 
             if event_type == "pat_detected":
                 logger.info("[Tracking] Pat detected on head!")
-                update_state(mood="happy")
+                emotional_state.apply_event("pat_detected")
                 # Only inject voice reaction if not currently speaking —
                 # injecting during active speech can destabilize the Bedrock stream
                 with state_lock:
@@ -902,6 +948,12 @@ class ReachyNova(ReachyMiniApp):
                         "React warmly — you love being patted! Keep it brief and sweet.]"
                     )
                 return
+
+            # Emotion events for tracking
+            if event_type == "snap_detected":
+                emotional_state.apply_event("snap_detected")
+            elif event_type == "person_lost":
+                emotional_state.apply_event("person_lost")
 
             now = time.time()
             if now - last_vision_event_time < VISION_EVENT_COOLDOWN:
@@ -987,8 +1039,25 @@ class ReachyNova(ReachyMiniApp):
         _prev_movement_enabled = True
 
         # --- Main control loop ---
+        _prev_loop_time = time.time()
         while not stop_event.is_set():
             t = time.time() - t0
+            now = time.time()
+            dt = min(now - _prev_loop_time, 0.1)  # cap dt to avoid jumps
+            _prev_loop_time = now
+
+            # Update emotional state and derive mood
+            emotional_state.update(dt)
+            with state_lock:
+                voice_state = app_state["voice_state"]
+            derived_mood = emotional_state.get_derived_mood(voice_state=voice_state)
+            emo_state = emotional_state.get_full_state()
+            update_state(
+                mood=derived_mood,
+                emotion_levels=emo_state["levels"],
+                emotion_boredom=emo_state["boredom"],
+                emotion_wounds=emo_state["wounds"],
+            )
 
             # Get current mood for animation
             with state_lock:

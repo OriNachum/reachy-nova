@@ -111,6 +111,39 @@ function updateUI(state) {
     if (els.trackingToggle && state.tracking_enabled !== undefined) {
         els.trackingToggle.checked = state.tracking_enabled;
     }
+
+    // Emotions
+    const emotions = ['joy', 'sadness', 'anger', 'fear', 'disgust'];
+    const levels = state.emotion_levels || {};
+    emotions.forEach(emo => {
+        const val = levels[emo] || 0;
+        const fill = document.getElementById(`emo-${emo}-fill`);
+        const valEl = document.getElementById(`emo-${emo}-val`);
+        if (fill) fill.style.width = (val * 100) + '%';
+        if (valEl) valEl.textContent = val.toFixed(2);
+    });
+
+    // Boredom
+    const boredom = state.emotion_boredom || 0;
+    const bFill = document.getElementById('emo-boredom-fill');
+    const bVal = document.getElementById('emo-boredom-val');
+    if (bFill) bFill.style.width = (boredom * 100) + '%';
+    if (bVal) bVal.textContent = boredom.toFixed(2);
+
+    // Wounds
+    const woundList = document.getElementById('wound-list');
+    const wounds = state.emotion_wounds || [];
+    if (woundList) {
+        if (wounds.length === 0) {
+            woundList.innerHTML = '';
+        } else {
+            woundList.innerHTML = wounds.map(w => {
+                const cls = w.healing ? 'wound-tag healing' : 'wound-tag active';
+                const label = w.healing ? 'healing' : 'active';
+                return `<span class="${cls}">${w.event} (${label})</span>`;
+            }).join('');
+        }
+    }
 }
 
 // --- API helpers ---

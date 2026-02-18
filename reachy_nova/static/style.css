@@ -599,6 +599,100 @@ main {
 .tracking-mode-label.speaker { background: var(--green-glow); color: var(--green); }
 .tracking-mode-label.snap { background: var(--orange-glow); color: var(--orange); }
 
+/* Emotion Panel */
+.emotion-panel {
+    grid-column: 1 / -1;
+    grid-row: 3;
+}
+
+.emotion-content {
+    padding: 1rem;
+}
+
+.emotion-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.emotion-bar-group {
+    display: grid;
+    grid-template-columns: 70px 1fr 40px;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.emotion-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+}
+
+.emotion-track {
+    height: 12px;
+    background: var(--surface2);
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+}
+
+.emotion-fill {
+    height: 100%;
+    border-radius: 6px;
+    transition: width 0.3s ease;
+    width: 0%;
+}
+
+.emotion-fill.joy { background: var(--green); box-shadow: inset 0 0 6px var(--green-glow); }
+.emotion-fill.sadness { background: var(--blue); box-shadow: inset 0 0 6px rgba(59, 130, 246, 0.3); }
+.emotion-fill.anger { background: var(--red); box-shadow: inset 0 0 6px rgba(239, 68, 68, 0.3); }
+.emotion-fill.fear { background: var(--orange); box-shadow: inset 0 0 6px var(--orange-glow); }
+.emotion-fill.disgust { background: var(--pink); box-shadow: inset 0 0 6px rgba(236, 72, 153, 0.3); }
+.emotion-fill.boredom { background: var(--text-dim); box-shadow: inset 0 0 6px rgba(122, 133, 158, 0.3); }
+
+.emotion-value {
+    font-family: 'SF Mono', 'Consolas', monospace;
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    text-align: right;
+}
+
+.boredom-group {
+    margin-top: 0.5rem;
+    padding-top: 0.5rem;
+    border-top: 1px solid var(--border);
+}
+
+.wound-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-top: 0.75rem;
+}
+
+.wound-tag {
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.wound-tag.active {
+    background: rgba(239, 68, 68, 0.2);
+    color: var(--red);
+    border: 1px solid var(--red);
+}
+
+.wound-tag.healing {
+    background: var(--green-glow);
+    color: var(--green);
+    border: 1px solid var(--green);
+}
+
 /* Responsive */
 @media (max-width: 900px) {
     main {

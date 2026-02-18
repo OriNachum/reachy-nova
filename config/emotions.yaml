@@ -1,0 +1,274 @@
+# Emotion System Configuration
+# Multi-dimensional emotional state with 5 base emotions, event triggers,
+# wound mechanics, boredom tracking, and derived mood mapping.
+
+# --- Base Emotions ---
+# Each emotion has a baseline (resting level) and decay_rate (units/second toward baseline)
+emotions:
+  joy:
+    baseline: 0.3       # mild contentment at rest
+    decay_rate: 0.02    # slow decay — joy lingers
+  sadness:
+    baseline: 0.0
+    decay_rate: 0.03    # moderate decay
+  anger:
+    baseline: 0.0
+    decay_rate: 0.05    # anger fades faster
+  fear:
+    baseline: 0.0
+    decay_rate: 0.04    # fear dissipates moderately
+  disgust:
+    baseline: 0.0
+    decay_rate: 0.06    # disgust fades quickly
+
+# --- Events ---
+# Each event applies deltas to emotions. Severity determines wound creation.
+# Deltas are multiplied by the optional intensity parameter (default 1.0).
+events:
+  # Healing events (positive)
+  pat_detected:
+    severity: healing
+    deltas:
+      joy: 0.25
+      sadness: -0.15
+      fear: -0.10
+    wound_reduction: 0.05   # chips at active wound floors
+
+  conversation_reply:
+    severity: healing
+    deltas:
+      joy: 0.10
+      sadness: -0.05
+    wound_reduction: 0.01
+
+  face_recognized:
+    severity: healing
+    deltas:
+      joy: 0.20
+      sadness: -0.10
+      fear: -0.05
+    wound_reduction: 0.02
+
+  voice_speaking:
+    severity: healing
+    deltas:
+      joy: 0.08
+    wound_reduction: 0.0
+
+  voice_listening:
+    severity: healing
+    deltas:
+      joy: 0.05
+    wound_reduction: 0.0
+
+  vision_description:
+    severity: healing
+    deltas:
+      joy: 0.12
+    wound_reduction: 0.01
+
+  # Mild events
+  snap_detected:
+    severity: mild
+    deltas:
+      fear: 0.20
+      joy: -0.05
+
+  loud_noise:
+    severity: mild
+    deltas:
+      fear: 0.25
+      joy: -0.10
+
+  # Moderate events
+  person_lost:
+    severity: moderate
+    deltas:
+      sadness: 0.15
+      joy: -0.05
+
+  harsh_words:
+    severity: moderate
+    deltas:
+      sadness: 0.20
+      anger: 0.15
+      joy: -0.15
+
+  insult:
+    severity: moderate
+    deltas:
+      anger: 0.25
+      disgust: 0.15
+      joy: -0.20
+
+  # Severe events (create wounds)
+  violence:
+    severity: severe
+    deltas:
+      fear: 0.40
+      sadness: 0.30
+      anger: 0.25
+      joy: -0.30
+    wound:
+      floors:
+        fear: 0.25
+        sadness: 0.20
+      duration: 300       # 5 minutes
+      heal_rate: 0.001    # very slow floor decay after duration
+
+  abuse:
+    severity: severe
+    deltas:
+      fear: 0.50
+      sadness: 0.40
+      anger: 0.20
+      disgust: 0.30
+      joy: -0.40
+    wound:
+      floors:
+        fear: 0.30
+        sadness: 0.25
+        disgust: 0.20
+      duration: 600       # 10 minutes
+      heal_rate: 0.0008
+
+  sustained_yelling:
+    severity: severe
+    deltas:
+      fear: 0.30
+      anger: 0.20
+      sadness: 0.15
+      joy: -0.20
+    wound:
+      floors:
+        fear: 0.20
+        anger: 0.15
+      duration: 180       # 3 minutes
+      heal_rate: 0.002
+
+# --- Derived State Rules ---
+# Evaluated top-to-bottom; first match wins.
+# Conditions: "emotion: '>= threshold'" or special keys like _voice_state, _boredom, sadness_dominant, etc.
+# "dominant" means that emotion is the highest among all emotions.
+derived_mood_rules:
+  # Voice state overrides (highest priority)
+  - mood: thinking
+    conditions:
+      _voice_state: "thinking"
+
+  - mood: curious
+    conditions:
+      _voice_state: "listening"
+
+  # Wound-driven states
+  - mood: sad
+    conditions:
+      _has_wounds: true
+      sadness: ">= 0.3"
+
+  - mood: disappointed
+    conditions:
+      _has_wounds: true
+      anger: ">= 0.2"
+
+  # High-arousal states
+  - mood: excited
+    conditions:
+      joy: ">= 0.7"
+
+  - mood: surprised
+    conditions:
+      fear: ">= 0.4"
+      anger: "< 0.2"
+
+  # Negative emotion dominance
+  - mood: sad
+    conditions:
+      sadness: ">= 0.25"
+      _dominant: sadness
+
+  - mood: disappointed
+    conditions:
+      anger: ">= 0.20"
+      _dominant: anger
+
+  # Boredom
+  - mood: sleepy
+    conditions:
+      _boredom: ">= 0.7"
+
+  - mood: calm
+    conditions:
+      _boredom: ">= 0.4"
+
+  # Moderate positive
+  - mood: proud
+    conditions:
+      joy: ">= 0.5"
+      sadness: "< 0.1"
+      anger: "< 0.1"
+
+  - mood: happy
+    conditions:
+      joy: ">= 0.25"
+
+  # Default fallback
+  - mood: calm
+    conditions: {}
+
+# --- Boredom ---
+# Accumulates when all emotions are flat (low joy, no negatives)
+boredom:
+  accumulate_rate: 0.008    # per second when conditions met
+  decay_rate: 0.05          # per second when any emotion is active
+  joy_threshold: 0.15       # joy must be below this
+  negative_threshold: 0.1   # all negatives must be below this
+
+# --- Transcript Triggers ---
+# Maps keyword patterns to emotion events for transcript-based detection
+transcript_triggers:
+  - event: harsh_words
+    patterns:
+      - "shut up"
+      - "stupid"
+      - "idiot"
+      - "dumb"
+      - "hate you"
+      - "go away"
+
+  - event: insult
+    patterns:
+      - "ugly"
+      - "useless"
+      - "worst"
+      - "garbage"
+      - "trash"
+
+  - event: violence
+    patterns:
+      - "hit you"
+      - "break you"
+      - "destroy you"
+      - "smash"
+      - "kill you"
+      - "punch"
+
+  - event: abuse
+    patterns:
+      - "abuse"
+      - "torture"
+      - "suffer"
+      - "hurt you"
+
+  - event: sustained_yelling
+    patterns:
+      - "STOP"
+      - "SHUT UP"
+    caps_only: true   # only match if original text was uppercase
+
+# --- Settings ---
+settings:
+  hysteresis: 1.0          # seconds before mood can change again
+  max_wounds: 5            # max concurrent active wounds
+  mqtt_publish_threshold: 0.05  # minimum emotion change to trigger MQTT publish
+  transcript_cooldown: 5.0     # seconds between same event re-triggers from transcript
