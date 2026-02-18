@@ -166,6 +166,8 @@ class ReachyNova(ReachyMiniApp):
             "emotion_levels": {},         # current emotion values
             "emotion_boredom": 0.0,       # boredom accumulator
             "emotion_wounds": [],         # active emotional wounds
+            "gesture_active": False,      # True while gesture animation owns the head
+            "gesture_name": "",           # current gesture being played
         }
 
         # --- Emotional State System ---
@@ -605,6 +607,191 @@ class ReachyNova(ReachyMiniApp):
                     },
                 },
                 "required": ["action"],
+            },
+        )
+
+        # --- Gesture skill executor ---
+        gesture_cancel_event = threading.Event()
+
+        def gesture_executor(params: dict) -> str:
+            nonlocal _smooth_yaw, _smooth_pitch
+
+            gesture = params.get("gesture", "").lower()
+            if gesture not in ("yes", "no", "curious", "pondering"):
+                return f"[Unknown gesture '{gesture}'. Available: yes, no, curious, pondering]"
+
+            with state_lock:
+                if not app_state["movement_enabled"]:
+                    return "[Movement disabled (presentation mode). Cannot perform gesture.]"
+
+            # Cancel any running gesture
+            gesture_cancel_event.set()
+            time.sleep(0.05)
+            gesture_cancel_event.clear()
+
+            # Capture current head position as animation center
+            center_yaw = _smooth_yaw
+            center_pitch = _smooth_pitch
+
+            # Take head ownership — tracking stays enabled so the tracker
+            # keeps updating its target (face/speaker) in the background.
+            # The gesture_active flag prevents the main loop from sending
+            # head commands, so there's no conflict.
+            update_state(
+                gesture_active=True,
+                gesture_name=gesture,
+                head_override=None,
+            )
+
+            RAMP_TIME = 0.2  # seconds to ease into full amplitude
+
+            try:
+                dt = 0.02  # 50Hz animation loop
+
+                if gesture == "yes":
+                    # Nodding: pitch oscillation, 1.2s, 2.5Hz, 12deg amplitude
+                    # Smooth ramp-up + decay envelope for organic feel
+                    duration = 1.2
+                    freq = 2.5
+                    amp = 12.0
+                    elapsed = 0.0
+                    while elapsed < duration and not gesture_cancel_event.is_set():
+                        ramp = 0.5 * (1.0 - np.cos(np.pi * min(elapsed / RAMP_TIME, 1.0)))
+                        decay = 1.0 - 0.7 * (elapsed / duration)
+                        envelope = ramp * decay
+                        pitch = center_pitch + amp * envelope * np.sin(2.0 * np.pi * freq * elapsed)
+                        pitch = max(-15.0, min(25.0, pitch))
+                        yaw = max(-45.0, min(45.0, center_yaw))
+                        pose = create_head_pose(yaw=yaw, pitch=pitch, degrees=True)
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
+                elif gesture == "no":
+                    # Head shake: yaw oscillation, 1.5s, 2.0Hz, 15deg amplitude
+                    # Smooth ramp-up + decay envelope for organic feel
+                    duration = 1.5
+                    freq = 2.0
+                    amp = 15.0
+                    elapsed = 0.0
+                    while elapsed < duration and not gesture_cancel_event.is_set():
+                        ramp = 0.5 * (1.0 - np.cos(np.pi * min(elapsed / RAMP_TIME, 1.0)))
+                        decay = 1.0 - 0.65 * (elapsed / duration)
+                        envelope = ramp * decay
+                        yaw = center_yaw + amp * envelope * np.sin(2.0 * np.pi * freq * elapsed)
+                        yaw = max(-45.0, min(45.0, yaw))
+                        pitch = max(-15.0, min(25.0, center_pitch))
+                        pose = create_head_pose(yaw=yaw, pitch=pitch, degrees=True)
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
+                elif gesture == "curious":
+                    # Head tilt (roll) to the side — like a curious dog
+                    # Also trigger curious mood for antenna sync
+                    emotional_state.set_mood_override("curious", duration=10.0)
+                    target_roll = 15.0  # degrees, tilt right
+
+                    # Phase 1: cosine ease into tilted pose (0-0.4s)
+                    elapsed = 0.0
+                    while elapsed < 0.4 and not gesture_cancel_event.is_set():
+                        alpha = 0.5 * (1.0 - np.cos(np.pi * elapsed / 0.4))
+                        roll = alpha * target_roll
+                        pose = create_head_pose(
+                            yaw=center_yaw, pitch=center_pitch, roll=roll, degrees=True,
+                        )
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
+                    # Phase 2: hold tilted with subtle roll oscillation (0.4-1.4s)
+                    elapsed = 0.0
+                    while elapsed < 1.0 and not gesture_cancel_event.is_set():
+                        osc = 2.0 * np.sin(2.0 * np.pi * 0.5 * elapsed)
+                        roll = target_roll + osc
+                        pose = create_head_pose(
+                            yaw=center_yaw, pitch=center_pitch, roll=roll, degrees=True,
+                        )
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
+                    # Phase 3: cosine ease back to neutral (1.4-1.8s)
+                    elapsed = 0.0
+                    while elapsed < 0.4 and not gesture_cancel_event.is_set():
+                        alpha = 0.5 * (1.0 - np.cos(np.pi * elapsed / 0.4))
+                        roll = target_roll * (1.0 - alpha)
+                        pose = create_head_pose(
+                            yaw=center_yaw, pitch=center_pitch, roll=roll, degrees=True,
+                        )
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
+                elif gesture == "pondering":
+                    # Look up and to the side diagonally — thinking pose
+                    emotional_state.set_mood_override("thinking", duration=10.0)
+                    target_yaw = max(-45.0, min(45.0, center_yaw - 20.0))
+                    target_pitch = max(-15.0, min(25.0, center_pitch + 12.0))
+
+                    # Phase 1: cosine ease into pondering pose (0-0.5s)
+                    elapsed = 0.0
+                    while elapsed < 0.5 and not gesture_cancel_event.is_set():
+                        alpha = 0.5 * (1.0 - np.cos(np.pi * elapsed / 0.5))
+                        yaw = center_yaw + alpha * (target_yaw - center_yaw)
+                        pitch = center_pitch + alpha * (target_pitch - center_pitch)
+                        pose = create_head_pose(yaw=yaw, pitch=pitch, degrees=True)
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
+                    # Phase 2: hold with subtle drift (0.5-1.8s)
+                    elapsed = 0.0
+                    while elapsed < 1.3 and not gesture_cancel_event.is_set():
+                        drift_yaw = 3.0 * np.sin(2.0 * np.pi * 0.3 * elapsed)
+                        drift_pitch = 2.0 * np.sin(2.0 * np.pi * 0.2 * elapsed)
+                        yaw = max(-45.0, min(45.0, target_yaw + drift_yaw))
+                        pitch = max(-15.0, min(25.0, target_pitch + drift_pitch))
+                        pose = create_head_pose(yaw=yaw, pitch=pitch, degrees=True)
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
+                    # Phase 3: cosine ease back to center (1.8-2.3s)
+                    elapsed = 0.0
+                    while elapsed < 0.5 and not gesture_cancel_event.is_set():
+                        alpha = 0.5 * (1.0 - np.cos(np.pi * elapsed / 0.5))
+                        yaw = target_yaw + alpha * (center_yaw - target_yaw)
+                        pitch = target_pitch + alpha * (center_pitch - target_pitch)
+                        pose = create_head_pose(yaw=yaw, pitch=pitch, degrees=True)
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
+                return f"[Gesture '{gesture}' completed.]"
+
+            finally:
+                # Sync smoothing state to pre-gesture position so there's
+                # no jump if head_override kicks in right after.  The tracker
+                # kept running during the gesture, so it already knows where
+                # to point — no need to reset tracker.current_yaw/pitch.
+                _smooth_yaw = center_yaw
+                _smooth_pitch = center_pitch
+                update_state(gesture_active=False, gesture_name="")
+
+        skill_manager.register_executor(
+            "gesture",
+            gesture_executor,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "gesture": {
+                        "type": "string",
+                        "description": "The gesture to perform",
+                        "enum": ["yes", "no", "curious", "pondering"],
+                    },
+                },
+                "required": ["gesture"],
             },
         )
 
@@ -1082,13 +1269,18 @@ class ReachyNova(ReachyMiniApp):
                 tracking_enabled = app_state["tracking_enabled"]
                 speech_enabled = app_state["speech_enabled"]
                 movement_enabled = app_state["movement_enabled"]
+                gesture_active = app_state["gesture_active"]
 
-            # --- Head override or active tracking ---
-            with state_lock:
+            # --- Gesture active: skip head — gesture thread owns it ---
+            if gesture_active:
+                yaw_deg, pitch_deg = _smooth_yaw, _smooth_pitch
+            else:
+              # --- Head override or active tracking ---
+              with state_lock:
                 head_override = app_state["head_override"]
                 head_override_time = app_state["head_override_time"]
 
-            if head_override is not None:
+              if head_override is not None:
                 # Skill-driven head control with EMA smoothing
                 if time.time() - head_override_time > 30.0:
                     # Safety timeout: auto-recover tracking
@@ -1101,7 +1293,7 @@ class ReachyNova(ReachyMiniApp):
                     _smooth_pitch += 0.15 * (target_pitch - _smooth_pitch)
                     yaw_deg = _smooth_yaw
                     pitch_deg = _smooth_pitch
-            elif tracking_enabled:
+              elif tracking_enabled:
                 # Update DoA (throttled to ~5Hz to avoid I2C bus contention)
                 if t - last_doa_time > 0.2:
                     last_doa_time = t
@@ -1114,7 +1306,7 @@ class ReachyNova(ReachyMiniApp):
                 # Get tracked head target (falls back to idle animation)
                 yaw_deg, pitch_deg = tracker.get_head_target(t, voice_state, mood)
                 update_state(tracking_mode=tracker.mode)
-            else:
+              else:
                 # Original sinusoidal head animation
                 if voice_state == "listening":
                     yaw_deg = 5.0 * np.sin(2.0 * np.pi * 0.1 * t)
@@ -1128,6 +1320,19 @@ class ReachyNova(ReachyMiniApp):
                 else:
                     yaw_deg = 25.0 * np.sin(2.0 * np.pi * IDLE_YAW_SPEED * t)
                     pitch_deg = 3.0 * np.sin(2.0 * np.pi * 0.08 * t)
+
+            # Keep smooth state in sync so gestures capture the right center
+            if not gesture_active:
+                _smooth_yaw = yaw_deg
+                _smooth_pitch = pitch_deg
+
+            # --- Boredom body sway: slow body rotation when bored ---
+            boredom = emotional_state.get_boredom()
+            if boredom > 0.3 and movement_enabled and not gesture_active:
+                # Scale: boredom 0.3→1.0 maps to amplitude 0→15 degrees
+                bored_amp = 15.0 * min(1.0, (boredom - 0.3) / 0.7)
+                bored_yaw = bored_amp * np.sin(2.0 * np.pi * 0.06 * t)
+                _current_body_yaw = bored_yaw
 
             # Apply safety validation (clamps + organic body follow)
             safe_yaw, safe_pitch, safe_body_yaw = safety.validate(
@@ -1198,11 +1403,18 @@ class ReachyNova(ReachyMiniApp):
                         _frozen_head_pose[0][1], _frozen_head_pose[0][0]
                     )) if _frozen_head_pose is not None else _smooth_yaw
                     _prev_movement_enabled = True
-                reachy_mini.set_target(
-                    head=head_pose,
-                    antennas=antennas_rad,
-                    body_yaw=np.radians(safe_body_yaw),
-                )
+                if gesture_active:
+                    # Gesture thread owns head — only send antennas + body
+                    reachy_mini.set_target(
+                        antennas=antennas_rad,
+                        body_yaw=np.radians(safe_body_yaw),
+                    )
+                else:
+                    reachy_mini.set_target(
+                        head=head_pose,
+                        antennas=antennas_rad,
+                        body_yaw=np.radians(safe_body_yaw),
+                    )
 
             # --- Pat detection: compare commanded vs actual head pose ---
             if movement_enabled and tracking_enabled:
