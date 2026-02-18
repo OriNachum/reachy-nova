@@ -252,6 +252,19 @@ class ReachyNova(ReachyMiniApp):
                     except Exception:
                         pass
 
+        def handle_interruption():
+            nonlocal audio_playing
+            logger.info("[Barge-in] Clearing audio buffers")
+            with audio_lock:
+                audio_output_buffer.clear()
+                audio_playing = False
+            try:
+                backend = reachy_mini.media.audio
+                if hasattr(backend, 'clear_output_buffer'):
+                    backend.clear_output_buffer()
+            except Exception as e:
+                logger.warning(f"[Barge-in] Hardware buffer clear failed: {e}")
+
         # --- Nova 2 Lite (Vision) ---
         def on_vision_description(desc: str):
             emotional_state.apply_event("vision_description")
@@ -784,6 +797,7 @@ class ReachyNova(ReachyMiniApp):
             on_state_change=on_voice_state,
             tools=skill_manager.get_tool_specs(),
             on_tool_use=on_tool_use,
+            on_interruption=handle_interruption,
         )
 
         # --- API Endpoints ---

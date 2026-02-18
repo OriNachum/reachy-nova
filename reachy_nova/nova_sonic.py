@@ -51,6 +51,7 @@ class NovaSonic:
         on_state_change: Callable[[str], None] | None = None,
         tools: list[dict] | None = None,
         on_tool_use: Callable[[str, str, dict], None] | None = None,
+        on_interruption: Callable[[], None] | None = None,
     ):
         self.region = region
         self.model_id = model_id
@@ -61,6 +62,8 @@ class NovaSonic:
         self.on_state_change = on_state_change
         self.tools = tools
         self.on_tool_use = on_tool_use
+        self.on_interruption = on_interruption
+        self._decision_client = None  # lazy boto3 client for barge-in decisions
 
         self._client: BedrockRuntimeClient | None = None
         self._stream = None
@@ -95,6 +98,51 @@ class NovaSonic:
                 self.on_state_change(state)
             except Exception:
                 pass
+
+    def _should_interrupt(self, user_text: str, assistant_text: str) -> bool:
+        """Ask Nova 2 Lite whether the user's speech warrants interrupting the robot."""
+        if not self._decision_client:
+            import boto3
+            self._decision_client = boto3.client("bedrock-runtime", region_name=self.region)
+
+        prompt = (
+            f"The robot assistant was saying: \"{assistant_text[-200:]}\"\n"
+            f"The user just said: \"{user_text}\"\n\n"
+            "Is the user trying to interrupt, ask a question, change topic, or stop the robot? "
+            "Or is it just a filler sound, acknowledgment, or background noise?\n"
+            "Answer only: INTERRUPT or CONTINUE"
+        )
+        body = {
+            "messages": [{"role": "user", "content": [{"text": prompt}]}],
+            "inferenceConfig": {"maxTokens": 10, "temperature": 0.1, "topP": 0.9},
+        }
+        response = self._decision_client.invoke_model(
+            modelId="us.amazon.nova-2-lite-v1:0",
+            body=json.dumps(body),
+        )
+        result = json.loads(response["body"].read())
+        answer = result["output"]["message"]["content"][0]["text"].strip().upper()
+        return "INTERRUPT" in answer
+
+    async def _handle_barge_in(self, user_text: str, assistant_text: str):
+        """Decide whether to interrupt playback when user speaks during robot speech."""
+        try:
+            should_interrupt = await asyncio.to_thread(
+                self._should_interrupt, user_text, assistant_text
+            )
+            if should_interrupt:
+                logger.info(f"Barge-in: interrupting (user said: {user_text!r})")
+                self._speaking = False
+                if self.on_interruption:
+                    self.on_interruption()
+            else:
+                logger.info(f"Barge-in: continuing playback (user said: {user_text!r})")
+        except Exception as e:
+            logger.error(f"Barge-in decision failed: {e}")
+            # On failure, default to interrupting (safer UX)
+            self._speaking = False
+            if self.on_interruption:
+                self.on_interruption()
 
     def _init_client(self) -> None:
         import os
@@ -257,6 +305,9 @@ class NovaSonic:
                             assistant_text_parts.append(text)
                             self.last_assistant_text = "".join(assistant_text_parts)
                         elif role == "USER":
+                            if self._speaking:
+                                assistant_context = "".join(assistant_text_parts)
+                                asyncio.create_task(self._handle_barge_in(text, assistant_context))
                             self.last_user_text = text
                             self._set_state("thinking")
                         if self.on_transcript:
