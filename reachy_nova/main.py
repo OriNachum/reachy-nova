@@ -30,6 +30,8 @@ from .nova_memory import NovaMemory
 from .nova_slack import NovaSlack, SlackEvent
 from .skills import SkillManager
 from .tracking import TrackingManager
+from .face_manager import FaceManager
+from .face_recognition import FaceRecognition
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -158,6 +160,8 @@ class ReachyNova(ReachyMiniApp):
             "head_override_time": 0.0,    # timestamp for 30s safety timeout
             "speech_enabled": True,       # False = mute audio output to speaker
             "movement_enabled": True,     # False = freeze head + body at current position
+            "face_recognized": "",        # currently recognized person name
+            "face_count": 0,              # number of permanent faces stored
         }
 
         def update_state(**kwargs):
@@ -251,6 +255,30 @@ class ReachyNova(ReachyMiniApp):
         vision = NovaVision(
             on_description=on_vision_description,
             analyze_interval=30.0,
+        )
+
+        # --- Face Recognition ---
+        face_manager = FaceManager()
+        face_manager.load()
+        update_state(face_count=face_manager.get_face_count())
+
+        def on_face_match(unique_id: str, name: str, score: float):
+            update_state(face_recognized=name, mood="excited")
+            publish_event("face", "face_recognized", {
+                "id": unique_id, "name": name, "score": score,
+            })
+            # Greet only if not currently speaking
+            with state_lock:
+                vs = app_state["voice_state"]
+            if vs != "speaking":
+                sonic.inject_text(
+                    f"[You just recognized {name} in front of you! "
+                    f"Greet them warmly by name. Keep it brief.]"
+                )
+
+        face_recognition = FaceRecognition(
+            face_manager=face_manager,
+            on_match=on_face_match,
         )
 
         # --- Skills system ---
@@ -548,6 +576,135 @@ class ReachyNova(ReachyMiniApp):
             },
         )
 
+        # --- Face skill executor ---
+        def face_executor(params: dict) -> str:
+            op = params.get("operation", "")
+            name = params.get("name", "")
+            uid = params.get("unique_id", "")
+            target_id = params.get("target_id", "")
+            target_name = params.get("target_name", "")
+
+            # Admin-only operations
+            admin_ops = {"list", "count", "images", "whois"}
+            if op in admin_ops:
+                if not face_recognition.is_admin_authenticated():
+                    return "[Admin operation only. Admin must be visible to the camera.]"
+
+            if op == "remember":
+                embedding = face_recognition.get_current_embedding()
+                if embedding is None:
+                    return "[No face detected in camera. Please look at me.]"
+                temp_id = face_manager.remember_temporary(embedding)
+                return f"[Face remembered temporarily (15 min). Temp ID: {temp_id}]"
+
+            elif op == "consent":
+                # Find the most recent temp_id
+                temp_id = uid  # uid field reused for temp_id
+                if not temp_id and face_manager.temp_faces:
+                    temp_id = list(face_manager.temp_faces.keys())[-1]
+                if not temp_id:
+                    return "[No temporary face to save. Use 'remember' first.]"
+                if not name:
+                    return "[Full name required for permanent storage.]"
+                result = face_manager.consent(temp_id, name)
+                if result:
+                    update_state(face_count=face_manager.get_face_count())
+                    return f"[Face saved permanently as {name}. ID: {result}]"
+                return "[Failed to save face. Temp ID may be expired or invalid.]"
+
+            elif op == "forget":
+                if not uid or not name:
+                    return "[Both unique_id and name required to forget a face.]"
+                if face_manager.forget(uid, name):
+                    update_state(face_count=face_manager.get_face_count())
+                    return f"[Face {uid} ({name}) deleted.]"
+                return "[Failed to delete. Check ID/name or admin protection.]"
+
+            elif op == "add_angles":
+                if not uid or not name:
+                    return "[Both unique_id and name required.]"
+                embedding = face_recognition.get_current_embedding()
+                if embedding is None:
+                    return "[No face detected in camera. Please look at me.]"
+                if face_manager.add_angles(uid, name, embedding):
+                    return f"[Added new angle for {name}. Recognition should improve.]"
+                return "[Failed to add angle. Check ID and name.]"
+
+            elif op == "merge":
+                if not uid or not name or not target_id or not target_name:
+                    return "[Need unique_id, name, target_id, and target_name to merge.]"
+                if face_manager.merge(uid, name, target_id, target_name):
+                    update_state(face_count=face_manager.get_face_count())
+                    return f"[Merged {target_id} into {uid}. {target_name} merged with {name}.]"
+                return "[Merge failed. Check IDs and names.]"
+
+            elif op == "list":
+                faces = face_manager.list_faces()
+                if not faces:
+                    return "[No faces stored.]"
+                lines = [f"- {f['id']}: {f['name']} ({f['num_embeddings']} embeddings)"
+                         + (" [ADMIN]" if f['is_admin'] else "")
+                         for f in faces]
+                return "[Known faces:\n" + "\n".join(lines) + "]"
+
+            elif op == "count":
+                count = face_manager.get_face_count()
+                return f"[{count} permanent face(s) stored.]"
+
+            elif op == "images":
+                if not uid or not name:
+                    return "[Both unique_id and name required.]"
+                paths = face_manager.get_person_images(uid, name)
+                if not paths:
+                    return "[No images found for that person.]"
+                return f"[{len(paths)} embedding file(s) for {name}.]"
+
+            elif op == "whois":
+                if not name:
+                    return "[Name required for whois lookup.]"
+                found_id = face_manager.get_unique_id(name)
+                if found_id:
+                    return f"[{name} has ID: {found_id}]"
+                return f"[No face found for '{name}'.]"
+
+            return f"[Unknown face operation: {op}]"
+
+        skill_manager.register_executor(
+            "face",
+            face_executor,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "operation": {
+                        "type": "string",
+                        "description": "The face operation to perform",
+                        "enum": [
+                            "remember", "consent", "forget",
+                            "add_angles", "merge",
+                            "list", "count", "images", "whois",
+                        ],
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Full name of the person",
+                    },
+                    "unique_id": {
+                        "type": "string",
+                        "description": "Face ID (or temp_id for consent)",
+                    },
+                    "target_id": {
+                        "type": "string",
+                        "description": "Second face ID for merge",
+                    },
+                    "target_name": {
+                        "type": "string",
+                        "description": "Second face name for merge",
+                    },
+                },
+                "required": ["operation"],
+            },
+        )
+
         # --- Nova Sonic (Voice) ---
         def on_transcript(role: str, text: str):
             if role == "USER":
@@ -584,6 +741,7 @@ class ReachyNova(ReachyMiniApp):
             "You can control your head and body to look in specific directions. "
             "You can also browse the web using Nova Act. "
             "You are connected to Slack and can read and send messages there. "
+            "You can recognize faces and remember people you meet. "
             "You have a memory system that stores knowledge about your user and the world. "
             "When you learn something new about the user, use memory to store it. "
             "When asked about something you might know, use memory to recall it. "
@@ -776,6 +934,7 @@ class ReachyNova(ReachyMiniApp):
         vision.start(stop_event)
         browser.start(stop_event)
         slack_bot.start(stop_event)
+        face_recognition.start(stop_event)
 
         # --- Inject startup context from memory ---
         def _inject_startup_context():
@@ -811,6 +970,7 @@ class ReachyNova(ReachyMiniApp):
         logger.info(f"Media backend: {reachy_mini.media.backend}, audio={reachy_mini.media.audio}")
         logger.info("Reachy Nova is alive! All systems go.")
         audio_chunk_count = 0
+        last_face_cleanup_time = 0.0
 
         # Safety manager for head-body collision avoidance + organic movement
         safety = SafetyManager()
@@ -1015,8 +1175,14 @@ class ReachyNova(ReachyMiniApp):
                         vision.update_frame(frame)
                         if tracking_enabled:
                             tracker.update_vision(frame, t)
+                        face_recognition.update_frame(frame, t)
                 except Exception:
                     pass
+
+            # --- Face cleanup (every 60s) ---
+            if t - last_face_cleanup_time > 60.0:
+                last_face_cleanup_time = t
+                face_manager.cleanup_expired()
 
             # --- Push buffered audio output to speaker ---
             with audio_lock:

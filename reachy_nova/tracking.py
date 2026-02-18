@@ -167,6 +167,10 @@ class TrackingManager:
         self.pat_nuzzle_freq: float = 2.5     # Hz — gentle side-to-side speed
         self.pat_nuzzle_amp: float = 8.0      # degrees — nuzzle amplitude
 
+        # --- Face recognition state ---
+        self.recognized_person: str | None = None  # name of recognized person
+        self.face_recognized_time: float = 0.0
+
         # --- Current mode ---
         self.mode = "idle"
 
@@ -447,6 +451,24 @@ class TrackingManager:
             self._fire_event("mode_changed", {"from": prev_mode, "to": self.mode})
 
         return self.current_yaw, self.current_pitch
+
+    def update_face_recognition(self, match_data: tuple[str, str, float] | None):
+        """Update face recognition state from FaceRecognition engine.
+
+        Args:
+            match_data: (unique_id, name, score) or None if no match
+        """
+        if match_data:
+            _, name, _ = match_data
+            self.recognized_person = name
+            self.face_recognized_time = time.time()
+            self._fire_event("face_recognized", {
+                "id": match_data[0],
+                "name": name,
+                "score": match_data[2],
+            })
+        else:
+            self.recognized_person = None
 
     def _has_person(self) -> bool:
         """Check if a person is currently being tracked (thread-safe)."""

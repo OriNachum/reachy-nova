@@ -8,7 +8,12 @@ The `TrackingManager` is responsible for fusing multiple sensor inputs to contro
 -   **Looking at a speaking person** using sound direction (DoA).
 -   **Tracking a face** using computer vision.
 -   **Reacting to sudden sounds** like snaps or claps.
+-   **Responding to physical pats** on the head.
 -   **Idle animation** when no active target is present.
+
+See also:
+-   [Face Recognition](face_recognition.md): Background identification of specific people.
+-   [Pat Detection](patting.md): Detailed mechanics of the physical interaction sensing.
 
 **File:** `reachy_nova/tracking.py`
 
@@ -66,7 +71,13 @@ The core logic uses a priority system to determine where to look:
     -   Maintains target for `3.0s` after speech stops.
     -   Uses moderate smoothing (`alpha=0.2`).
 
-4.  **Idle Animation (Lowest Priority)**:
+4.  **Pat Reaction**:
+    -   Triggered by physical pats on the head (detected via servo load).
+    -   Adds a "nuzzle" overlay (side-to-side motion) to the current movement.
+    -   Decaying amplitude over `1.5s`.
+    -   See [Pat Detection](patting.md) for algorithm details.
+
+5.  **Idle Animation (Lowest Priority)**:
     -   Triggered when no active target exists.
     -   Uses sinusoidal motion patterns based on the robot's state:
         -   `listening`: Small, attentive movements.
