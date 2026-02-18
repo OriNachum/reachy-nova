@@ -732,7 +732,7 @@ class ReachyNova(ReachyMiniApp):
                     # Look up and to the side diagonally — thinking pose
                     emotional_state.set_mood_override("thinking", duration=10.0)
                     target_yaw = max(-45.0, min(45.0, center_yaw - 20.0))
-                    target_pitch = max(-15.0, min(25.0, center_pitch + 12.0))
+                    target_pitch = max(-15.0, min(25.0, center_pitch - 12.0))
 
                     # Phase 1: cosine ease into pondering pose (0-0.5s)
                     elapsed = 0.0
