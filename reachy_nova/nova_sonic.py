@@ -258,6 +258,15 @@ class NovaSonic:
             }
         })
 
+        # Brief pause to let Bedrock fully process the session setup events
+        # before we start sending audio/inject traffic.  Without this, audio
+        # chunks hit the stream before the server is ready, causing
+        # "Invalid input request" on sessions created after sleep/wake.
+        await asyncio.sleep(0.5)
+
+        # Throttle injects — new session needs a quiet-start period.
+        self._last_inject_time = time.time()
+
         # Session fully configured — now accept audio/inject traffic
         self._active = True
         self._set_state("listening")
@@ -383,22 +392,24 @@ class NovaSonic:
         })
 
     async def _close_stream(self) -> None:
-        """Best-effort cleanup of the current stream."""
+        """Best-effort cleanup of the current stream (bounded to 3s)."""
         try:
-            await self._send({
-                "contentEnd": {
-                    "promptName": self._prompt_name,
-                    "contentName": self._audio_content,
-                }
-            })
-            await self._send({"promptEnd": {"promptName": self._prompt_name}})
-            await self._send({"sessionEnd": {}})
+            async with asyncio.timeout(3.0):
+                await self._send({
+                    "contentEnd": {
+                        "promptName": self._prompt_name,
+                        "contentName": self._audio_content,
+                    }
+                })
+                await self._send({"promptEnd": {"promptName": self._prompt_name}})
+                await self._send({"sessionEnd": {}})
         except Exception:
-            pass
+            logger.debug("Stream close: send phase timed out or failed")
         try:
-            await self._stream.input_stream.close()
+            async with asyncio.timeout(2.0):
+                await self._stream.input_stream.close()
         except Exception:
-            pass
+            logger.debug("Stream close: input_stream.close timed out or failed")
 
     def _should_stop(self, stop_event: threading.Event) -> bool:
         """Check if either the global or sonic-local stop has been requested."""
@@ -459,15 +470,16 @@ class NovaSonic:
         import traceback
 
         def _run():
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
+            loop = asyncio.new_event_loop()
+            self._loop = loop
+            asyncio.set_event_loop(loop)
             try:
-                self._loop.run_until_complete(self._run_loop(stop_event))
+                loop.run_until_complete(self._run_loop(stop_event))
             except Exception as e:
                 logger.error(f"Nova Sonic loop error: {e}")
                 logger.error(traceback.format_exc())
             finally:
-                self._loop.close()
+                loop.close()
 
         self._thread = threading.Thread(target=_run, name="nova-sonic", daemon=True)
         self._thread.start()
@@ -481,15 +493,21 @@ class NovaSonic:
 
     def restart(self, stop_event: threading.Event) -> None:
         """Restart Sonic after an independent stop (for wake from sleep)."""
+        old_thread = self._thread
+        if old_thread is not None and old_thread.is_alive():
+            logger.info("Waiting for old sonic thread to exit...")
+            old_thread.join(timeout=8.0)
+            if old_thread.is_alive():
+                logger.warning("Old sonic thread still alive after 8s — proceeding anyway")
+
         self._sonic_stop.clear()
-        # Force fresh client state
         self._client = None
         self._stream = None
         self._prompt_name = str(uuid.uuid4())
         self._system_content = str(uuid.uuid4())
         self._audio_content = str(uuid.uuid4())
         self._session_gen += 1
-        self._last_inject_time = 0.0
+        self._last_inject_time = time.time()
         self.start(stop_event)
         logger.info("Nova Sonic restarted")
 
