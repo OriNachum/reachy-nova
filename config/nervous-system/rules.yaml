@@ -14,19 +14,19 @@ rules:
     priority: HIGH
     urgency: IMMEDIATE
     llm_evaluate: false
-    inject_template: "[A sharp sound was detected nearby — look in that direction!]"
+    inject_template: "You heard a sharp snap nearby."
 
   tracking/person_detected:
     priority: NORMAL
     urgency: NOW
     llm_evaluate: true
-    inject_template: "[A person just appeared in your view.]"
+    inject_template: "Someone just came into view."
 
   tracking/person_lost:
     priority: LOW
     urgency: DEFERRABLE
     llm_evaluate: false
-    inject_template: "[The person you were looking at has left.]"
+    inject_template: "The person you were looking at walked away."
 
   tracking/mode_changed:
     priority: LOW
@@ -38,7 +38,7 @@ rules:
     priority: NORMAL
     urgency: NOW
     llm_evaluate: true
-    inject_template: "[Your camera sees: {description}] React to what you see briefly."
+    inject_template: "Right now you see: {description}"
 
   vision/analysis_started:
     priority: LOW
@@ -50,19 +50,19 @@ rules:
     priority: HIGH
     urgency: IMMEDIATE
     llm_evaluate: false
-    inject_template: "[You were mentioned on Slack by {user}: {text}] Briefly acknowledge this."
+    inject_template: "{user} just mentioned you on Slack: {text}"
 
   slack/slack_message:
     priority: NORMAL
     urgency: NOW
     llm_evaluate: true
-    inject_template: "[Slack message from {user}: {text}]"
+    inject_template: "New Slack message from {user}: {text}"
 
   slack/slack_dm:
     priority: HIGH
     urgency: IMMEDIATE
     llm_evaluate: false
-    inject_template: "[Slack DM from {user}: {text}] Briefly acknowledge this."
+    inject_template: "{user} sent you a direct message on Slack: {text}"
 
   slack/slack_reaction:
     priority: LOW
@@ -74,13 +74,13 @@ rules:
     priority: NORMAL
     urgency: NOW
     llm_evaluate: false
-    inject_template: "[Browser task result: {result}]"
+    inject_template: "You found this: {result}"
 
   browser/progress:
     priority: LOW
     urgency: DEFERRABLE
     llm_evaluate: false
-    inject_template: "[Browser status: {message}]"
+    inject_template: "Still looking... {message}"
 
   browser/task_started:
     priority: LOW
@@ -92,7 +92,7 @@ rules:
     priority: NORMAL
     urgency: NOW
     llm_evaluate: false
-    inject_template: "[Memory recall: {result}]"
+    inject_template: "You remember: {result}"
 
   memory/store_result:
     priority: LOW
@@ -103,14 +103,14 @@ rules:
     priority: NORMAL
     urgency: NOW
     llm_evaluate: false
-    inject_template: "[Background knowledge: {context}]"
+    inject_template: "Things you know: {context}"
 
   # --- Emotion events ---
   emotions/wound_created:
     priority: HIGH
     urgency: NOW
     llm_evaluate: false
-    inject_template: "[You just experienced something deeply upsetting. You feel wounded.]"
+    inject_template: "That really hurt."
 
   emotions/wound_healed:
     priority: NORMAL

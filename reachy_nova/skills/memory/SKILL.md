@@ -1,10 +1,8 @@
 ---
 name: memory
 description: >
-  Access your memory and knowledge. Use this to recall things you know about
-  the user, remember new facts, or retrieve context from your knowledge base.
-  For queries, returns an immediate answer from local notes and continues
-  searching deeper knowledge in the background.
+  Think back and recall what you know — about people, facts, or things you've
+  been told. You can also commit new things to memory.
 metadata:
   author: reachy-nova
   version: "1.0"

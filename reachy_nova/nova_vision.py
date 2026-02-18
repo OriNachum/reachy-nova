@@ -15,10 +15,10 @@ import boto3
 logger = logging.getLogger(__name__)
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are the vision system for a cute robot called Reachy Mini. "
-    "You see through the robot's camera. Describe what you see in 1-2 short sentences. "
-    "Be fun and expressive. If you see a person, greet them! "
-    "If something interesting is happening, get excited about it."
+    "Describe what is visible in this image in 1-2 short, plain sentences. "
+    "Be specific about people, objects, and what's happening. "
+    "Do not greet anyone or add emotional commentary. "
+    "Do not say 'I see' — just state what is there."
 )
 
 
@@ -170,7 +170,7 @@ class NovaVision:
                     continue
                 frame = frame.copy()
 
-            prompt = "What do you see? Be brief and fun."
+            prompt = "Describe what is visible. Be brief and specific."
             self.analyze_frame(frame, prompt)
             self.reset_timer()
 

@@ -1,9 +1,8 @@
 ---
 name: mood
 description: >
-  Express emotions through the multi-dimensional emotion system or set a direct
-  mood override. Prefer using 'event' to trigger natural emotion changes that
-  decay over time. Use 'mood' for direct overrides that expire after 10 seconds.
+  Shift how you're feeling — react to something emotionally or settle into
+  a particular mood for a moment.
 metadata:
   author: reachy-nova
   version: "2.0"

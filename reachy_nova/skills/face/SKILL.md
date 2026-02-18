@@ -1,9 +1,8 @@
 ---
 name: face
 description: >
-  Manage face recognition. Remember faces temporarily (15 min), save permanently
-  with consent, forget faces, add angles for better recognition, merge duplicates.
-  Some operations (list, count, images, whois) require admin authentication via camera.
+  Remember someone's face, save it permanently with their consent, or forget
+  someone. You can also add more angles of a known person.
 metadata:
   author: reachy-nova
   version: "1.0"

@@ -1,9 +1,8 @@
 ---
 name: browse
 description: >
-  Search the web or browse a website using Nova Act browser automation.
-  Use this when the user asks to search for something, look something up online,
-  google something, or visit a website.
+  Look something up online or visit a website. Use this when someone asks you
+  to search, check something, or find information.
 metadata:
   author: reachy-nova
   version: "1.0"

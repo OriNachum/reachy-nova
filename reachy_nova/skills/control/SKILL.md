@@ -1,10 +1,8 @@
 ---
 name: control
 description: >
-  Control your head and body to look in specific directions. Use move_head
-  to look somewhere (disables auto-tracking), move_body to rotate your body,
-  enable_tracking to resume automatic face/speaker tracking, or
-  disable_tracking to hold your current position.
+  Move your head or body to look in a specific direction, or turn tracking
+  on and off.
 metadata:
   author: reachy-nova
   version: "1.0"

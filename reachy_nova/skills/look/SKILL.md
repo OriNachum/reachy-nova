@@ -1,9 +1,8 @@
 ---
 name: look
 description: >
-  Look through your camera to see what's around you. Use this when you want to
-  describe your surroundings, identify objects or people, or react to something
-  visual. You can provide a specific question about what you see.
+  Focus your eyes on something specific. Ask about what you see — people,
+  objects, colors, anything in front of you.
 metadata:
   author: reachy-nova
   version: "1.0"

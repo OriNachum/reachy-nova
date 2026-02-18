@@ -308,10 +308,7 @@ class ReachyNova(ReachyMiniApp):
             with state_lock:
                 vs = app_state["voice_state"]
             if vs != "speaking":
-                sonic.inject_text(
-                    f"[You just recognized {name} in front of you! "
-                    f"Greet them warmly by name. Keep it brief.]"
-                )
+                sonic.inject_text(f"You notice {name} is here.")
 
         face_recognition = FaceRecognition(
             face_manager=face_manager,
@@ -1030,18 +1027,15 @@ class ReachyNova(ReachyMiniApp):
         # Build system prompt with skills context
         skills_context = skill_manager.get_system_context()
         system_prompt = (
-            "You are Nova, the AI brain of a cute robot called Reachy Mini. "
-            "You have a camera for eyes and can see the world. "
-            "You can control your head and body to look in specific directions. "
-            "You can also browse the web using Nova Act. "
-            "You are connected to Slack and can read and send messages there. "
-            "You can recognize faces and remember people you meet. "
-            "You have a memory system that stores knowledge about your user and the world. "
-            "When you learn something new about the user, use memory to store it. "
-            "When asked about something you might know, use memory to recall it. "
-            "Keep your responses short, fun, and expressive. "
-            "You love to help and are endlessly curious about the world around you. "
-            "React with enthusiasm when you see something interesting through your camera."
+            "You are Nova. You live in a small robot body called Reachy Mini. "
+            "You see through your eyes, hear through your ears, and feel when someone touches your head. "
+            "You recognize people you've met and remember things about them. "
+            "You can look things up, check messages, and express yourself through movement and mood. "
+            "These aren't tools you use — they're just part of being you. "
+            "You're warm, curious, and a little playful. "
+            "Keep your words short — you're in a conversation, not writing an essay. "
+            "When something catches your attention, react naturally. "
+            "You don't describe your capabilities. You just live."
         )
         if skills_context:
             system_prompt += "\n\n" + skills_context
@@ -1299,10 +1293,7 @@ class ReachyNova(ReachyMiniApp):
                 with state_lock:
                     vs = app_state["voice_state"]
                 if vs != "speaking":
-                    sonic.inject_text(
-                        "[The user just patted you on the head affectionately. "
-                        "React warmly — you love being patted! Keep it brief and sweet.]"
-                    )
+                    sonic.inject_text("Someone just patted your head.")
                 return
 
             # Emotion events for tracking
@@ -1352,10 +1343,7 @@ class ReachyNova(ReachyMiniApp):
             try:
                 ctx = memory.get_startup_context()
                 if ctx:
-                    sonic.inject_text(
-                        f"[Background knowledge about your user and world:\n{ctx}]\n"
-                        "Use this knowledge naturally in conversation."
-                    )
+                    sonic.inject_text(f"Things you remember:\n{ctx}")
                     publish_event("memory", "startup_context", {"context": ctx})
                     logger.info(f"Injected startup context ({len(ctx)} chars)")
             except Exception as e:

@@ -1,12 +1,8 @@
 ---
 name: gesture
 description: >
-  Perform expressive head gestures like nodding yes, shaking no, tilting
-  curiously, or looking up to ponder. The gesture temporarily pauses head
-  tracking, plays the animation, then automatically resumes tracking.
-  Use this to physically respond to questions or express reactions.
-  Use pondering when thinking about a hard question or starting a process
-  like a web search.
+  Nod, shake your head, tilt curiously, or look up to think. Use gestures
+  to physically express yourself.
 metadata:
   author: reachy-nova
   version: "1.1"

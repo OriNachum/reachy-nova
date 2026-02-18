@@ -167,7 +167,7 @@ class SkillManager:
         if not self.skills:
             return ""
 
-        lines = ["You have the following skills available as tools:"]
+        lines = ["You can also do these things:"]
         for skill in self.skills.values():
             if skill.executor:
                 lines.append(f"- {skill.name}: {skill.description}")

@@ -1,9 +1,8 @@
 ---
 name: slack
 description: >
-  Send and read Slack messages. Use this when the user asks about Slack,
-  wants to send a message to Slack, read their Slack messages, reply to
-  a Slack thread, or react to a Slack message with an emoji.
+  Check your Slack messages, send a message, reply to a thread, or react
+  with an emoji.
 metadata:
   author: reachy-nova
   version: "1.0"
