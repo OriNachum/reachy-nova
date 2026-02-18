@@ -130,6 +130,17 @@ function updateUI(state) {
     if (bFill) bFill.style.width = (boredom * 100) + '%';
     if (bVal) bVal.textContent = boredom.toFixed(2);
 
+    // Sleep mode
+    const sleepBtn = document.getElementById('cmd-sleep');
+    const wakeBtn = document.getElementById('cmd-wake');
+    const sleepMode = state.sleep_mode || 'awake';
+    if (sleepBtn && wakeBtn) {
+        const isSleeping = sleepMode !== 'awake';
+        sleepBtn.disabled = isSleeping;
+        wakeBtn.disabled = sleepMode !== 'sleeping';
+        document.body.classList.toggle('sleeping', isSleeping);
+    }
+
     // Wounds
     const woundList = document.getElementById('wound-list');
     const wounds = state.emotion_wounds || [];
@@ -227,6 +238,15 @@ document.getElementById('cmd-joke')?.addEventListener('click', () => {
         instruction: 'Search for a random joke and read it aloud',
         url: 'https://www.google.com',
     });
+});
+
+// Sleep/Wake controls
+document.getElementById('cmd-sleep')?.addEventListener('click', () => {
+    postJSON('/api/sleep', { action: 'sleep' });
+});
+
+document.getElementById('cmd-wake')?.addEventListener('click', () => {
+    postJSON('/api/sleep', { action: 'wake' });
 });
 
 // Start polling

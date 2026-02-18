@@ -71,6 +71,7 @@ class NovaSonic:
         self._thread: threading.Thread | None = None
         self._active = False
         self._speaking = False
+        self._sonic_stop = threading.Event()  # Independent stop for sleep mode
 
         self._prompt_name = str(uuid.uuid4())
         self._system_content = str(uuid.uuid4())
@@ -399,10 +400,14 @@ class NovaSonic:
         except Exception:
             pass
 
+    def _should_stop(self, stop_event: threading.Event) -> bool:
+        """Check if either the global or sonic-local stop has been requested."""
+        return stop_event.is_set() or self._sonic_stop.is_set()
+
     async def _run_loop(self, stop_event: threading.Event) -> None:
         self._inject_lock = asyncio.Lock()
 
-        while not stop_event.is_set():
+        while not self._should_stop(stop_event):
             # (Re)start a fresh session
             try:
                 await self._start_session()
@@ -414,7 +419,7 @@ class NovaSonic:
             response_task = asyncio.create_task(self._process_responses())
             try:
                 # Wait until stop requested OR response loop dies
-                while not stop_event.is_set() and not response_task.done():
+                while not self._should_stop(stop_event) and not response_task.done():
                     await asyncio.sleep(0.1)
             finally:
                 # Mark inactive FIRST to stop all incoming traffic
@@ -426,7 +431,7 @@ class NovaSonic:
                 await self._close_stream()
                 response_task.cancel()
 
-            if stop_event.is_set():
+            if self._should_stop(stop_event):
                 break
 
             # Stream died — prepare for restart
@@ -467,6 +472,26 @@ class NovaSonic:
         self._thread = threading.Thread(target=_run, name="nova-sonic", daemon=True)
         self._thread.start()
         logger.info("Nova Sonic thread started")
+
+    def stop(self) -> None:
+        """Stop Sonic independently (for sleep mode). Does not affect the global stop_event."""
+        self._sonic_stop.set()
+        self._active = False
+        logger.info("Nova Sonic stopped (sleep mode)")
+
+    def restart(self, stop_event: threading.Event) -> None:
+        """Restart Sonic after an independent stop (for wake from sleep)."""
+        self._sonic_stop.clear()
+        # Force fresh client state
+        self._client = None
+        self._stream = None
+        self._prompt_name = str(uuid.uuid4())
+        self._system_content = str(uuid.uuid4())
+        self._audio_content = str(uuid.uuid4())
+        self._session_gen += 1
+        self._last_inject_time = 0.0
+        self.start(stop_event)
+        logger.info("Nova Sonic restarted")
 
     def feed_audio(self, samples: np.ndarray) -> None:
         """Feed audio samples from the robot's microphone.

@@ -693,6 +693,23 @@ main {
     border: 1px solid var(--green);
 }
 
+/* Sleep mode overlay */
+body.sleeping main {
+    opacity: 0.4;
+    transition: opacity 1s ease;
+}
+
+body.sleeping .robot-face {
+    border-color: var(--text-dim);
+    box-shadow: none;
+}
+
+body.sleeping .robot-face .eye {
+    transform: scaleY(0.15);
+    background: var(--text-dim);
+    box-shadow: none;
+}
+
 /* Responsive */
 @media (max-width: 900px) {
     main {

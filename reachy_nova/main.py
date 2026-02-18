@@ -20,6 +20,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 import numpy as np
 from pydantic import BaseModel
 from reachy_mini import ReachyMini, ReachyMiniApp
+from reachy_mini.reachy_mini import SLEEP_ANTENNAS_JOINT_POSITIONS
 from reachy_mini.utils import create_head_pose
 
 from .nova_sonic import NovaSonic, OUTPUT_SAMPLE_RATE
@@ -33,6 +34,7 @@ from .tracking import TrackingManager
 from .face_manager import FaceManager
 from .face_recognition import FaceRecognition
 from .emotions import EmotionalState
+from .sleep_mode import SleepManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -168,10 +170,17 @@ class ReachyNova(ReachyMiniApp):
             "emotion_wounds": [],         # active emotional wounds
             "gesture_active": False,      # True while gesture animation owns the head
             "gesture_name": "",           # current gesture being played
+            "sleep_mode": "awake",        # awake, falling_asleep, sleeping, waking_up
         }
 
         # --- Emotional State System ---
         emotional_state = EmotionalState()
+
+        # --- Sleep Mode ---
+        sleep_manager = SleepManager(
+            on_state_change=lambda state: update_state(sleep_mode=state),
+        )
+        _high_boredom_start = 0.0  # timestamp for auto-sleep
 
         def update_state(**kwargs):
             mood_changed = None
@@ -269,6 +278,10 @@ class ReachyNova(ReachyMiniApp):
 
         # --- Nova 2 Lite (Vision) ---
         def on_vision_description(desc: str):
+            # Discard stale vision callbacks during sleep
+            if sleep_manager.state != "awake":
+                logger.debug("[Vision] Discarding description during sleep mode")
+                return
             emotional_state.apply_event("vision_description")
             update_state(vision_description=desc, vision_analyzing=False)
             logger.info(f"[Vision] {desc}")
@@ -617,8 +630,8 @@ class ReachyNova(ReachyMiniApp):
             nonlocal _smooth_yaw, _smooth_pitch
 
             gesture = params.get("gesture", "").lower()
-            if gesture not in ("yes", "no", "curious", "pondering"):
-                return f"[Unknown gesture '{gesture}'. Available: yes, no, curious, pondering]"
+            if gesture not in ("yes", "no", "curious", "pondering", "boredom"):
+                return f"[Unknown gesture '{gesture}'. Available: yes, no, curious, pondering, boredom]"
 
             with state_lock:
                 if not app_state["movement_enabled"]:
@@ -768,6 +781,57 @@ class ReachyNova(ReachyMiniApp):
                         time.sleep(dt)
                         elapsed += dt
 
+                elif gesture == "boredom":
+                    # Slow, disengaged look away and down
+                    emotional_state.set_mood_override("sleepy", duration=10.0)
+                    # Look away from common center (if left, look right, etc)
+                    direction = -1.0 if center_yaw > 0 else 1.0
+                    target_yaw = max(-45.0, min(45.0, center_yaw + direction * 30.0))
+                    target_pitch = -25.0
+
+                    # Phase 1: Very slow slide into bored pose (0-2.0s)
+                    elapsed = 0.0
+                    while elapsed < 2.0 and not gesture_cancel_event.is_set():
+                        alpha = 0.5 * (1.0 - np.cos(np.pi * elapsed / 2.0))
+                        yaw = center_yaw + alpha * (target_yaw - center_yaw)
+                        pitch = center_pitch + alpha * (target_pitch - center_pitch)
+                        pose = create_head_pose(yaw=yaw, pitch=pitch, degrees=True)
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
+                    # Phase 2: Sigh/Sag (2.0-2.5s)
+                    elapsed = 0.0
+                    while elapsed < 0.5 and not gesture_cancel_event.is_set():
+                        dip = 5.0 * np.sin(np.pi * elapsed / 0.5)
+                        pitch_dip = target_pitch - dip
+                        pose = create_head_pose(yaw=target_yaw, pitch=pitch_dip, degrees=True)
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
+                    # Phase 3: Hold while drifting (2.5-4.0s)
+                    elapsed = 0.0
+                    while elapsed < 1.5 and not gesture_cancel_event.is_set():
+                        drift = 2.0 * np.sin(2.0 * np.pi * 0.2 * elapsed)
+                        pose = create_head_pose(
+                            yaw=target_yaw + drift, pitch=target_pitch, degrees=True
+                        )
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
+                    # Phase 4: Slow recovery (4.0-5.5s)
+                    elapsed = 0.0
+                    while elapsed < 1.5 and not gesture_cancel_event.is_set():
+                        alpha = 0.5 * (1.0 - np.cos(np.pi * elapsed / 1.5))
+                        yaw = target_yaw + alpha * (center_yaw - target_yaw)
+                        pitch = target_pitch + alpha * (center_pitch - target_pitch)
+                        pose = create_head_pose(yaw=yaw, pitch=pitch, degrees=True)
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
                 return f"[Gesture '{gesture}' completed.]"
 
             finally:
@@ -788,7 +852,7 @@ class ReachyNova(ReachyMiniApp):
                     "gesture": {
                         "type": "string",
                         "description": "The gesture to perform",
-                        "enum": ["yes", "no", "curious", "pondering"],
+                        "enum": ["yes", "no", "curious", "pondering", "boredom"],
                     },
                 },
                 "required": ["gesture"],
@@ -929,8 +993,13 @@ class ReachyNova(ReachyMiniApp):
             if role == "USER":
                 update_state(last_user_text=text)
                 logger.info(f"[User] {text}")
-                # Check for vision commands (fallback keyword path)
+                # Check for sleep commands
                 lower = text.lower()
+                if any(kw in lower for kw in ["go to sleep", "time to sleep", "sleep mode", "good night", "nap time"]):
+                    if sleep_manager.state == "awake":
+                        _initiate_sleep()
+                        return
+                # Check for vision commands (fallback keyword path)
                 if any(kw in lower for kw in ["what do you see", "look around", "describe", "what's around"]):
                     vision.trigger_analyze()
                 # Transcript-based emotion detection
@@ -986,6 +1055,63 @@ class ReachyNova(ReachyMiniApp):
             on_tool_use=on_tool_use,
             on_interruption=handle_interruption,
         )
+
+        # --- Sleep mode helpers (need sonic + sleep_manager in scope) ---
+        def _initiate_sleep():
+            """Stop LLM subsystems, run SDK sleep animation, then enter breathing loop."""
+            nonlocal _high_boredom_start
+            if sleep_manager.state != "awake":
+                return
+            logger.info("[Sleep] Initiating sleep — cancelling movements, stopping subsystems")
+            # 1. Cancel any running gesture so it releases head ownership
+            gesture_cancel_event.set()
+            # 2. Clear head override and disable tracking
+            update_state(
+                vision_enabled=False,
+                tracking_enabled=False,
+                tracking_mode="idle",
+                head_override=None,
+                gesture_active=False,
+                gesture_name="",
+            )
+            # Brief pause for gesture thread to see the cancel and exit
+            time.sleep(0.05)
+            gesture_cancel_event.clear()
+            # 3. Stop Sonic
+            sonic.stop()
+            # 4. Clear any pending vision analysis to prevent stale-frame callbacks
+            vision._force_analyze.clear()
+            _high_boredom_start = 0.0
+            # 5. Mark as falling_asleep — main loop short-circuits but sends NO poses
+            #    (the SDK's goto_sleep owns the hardware during this phase)
+            sleep_manager.trigger_sleep()
+            # 6. Run SDK sleep animation in background; when done, hand off to breathing
+            def _sdk_sleep():
+                try:
+                    reachy_mini.goto_sleep()
+                except Exception as e:
+                    logger.warning(f"[Sleep] SDK goto_sleep failed: {e}")
+                # SDK finished — transition to breathing loop
+                sleep_manager.enter_sleeping()
+            threading.Thread(target=_sdk_sleep, daemon=True, name="sdk-sleep").start()
+
+        def _initiate_wake():
+            """Run SDK wake animation and restart LLM subsystems."""
+            if sleep_manager.state != "sleeping":
+                return
+            logger.info("[Sleep] Initiating wake — restarting Sonic, re-enabling vision/tracking")
+            sleep_manager.trigger_wake()
+            # Run SDK wake animation in background; re-enable subsystems when done
+            def _sdk_wake():
+                try:
+                    reachy_mini.wake_up()
+                except Exception as e:
+                    logger.warning(f"[Sleep] SDK wake_up failed: {e}")
+                # SDK finished — hand control back to main loop
+                sleep_manager.enter_awake()
+                sonic.restart(stop_event)
+                update_state(vision_enabled=True, tracking_enabled=True)
+            threading.Thread(target=_sdk_wake, daemon=True, name="sdk-wake").start()
 
         # --- API Endpoints ---
         class VisionToggle(BaseModel):
@@ -1090,6 +1216,24 @@ class ReachyNova(ReachyMiniApp):
                 update_state(speech_enabled=True, movement_enabled=True, antenna_mode="auto")
             return {"presentation_mode": body.enabled}
 
+        # --- Sleep API endpoints ---
+        class SleepAction(BaseModel):
+            action: str  # "sleep" or "wake"
+
+        @self.settings_app.post("/api/sleep")
+        def sleep_control(body: SleepAction):
+            if body.action == "sleep":
+                _initiate_sleep()
+                return {"status": "sleeping", "sleep_mode": sleep_manager.state}
+            elif body.action == "wake":
+                _initiate_wake()
+                return {"status": "waking", "sleep_mode": sleep_manager.state}
+            return {"error": f"Unknown action: {body.action}"}
+
+        @self.settings_app.get("/api/sleep/state")
+        def get_sleep_state():
+            return {"sleep_mode": sleep_manager.state}
+
         # --- Memory API endpoints ---
         class MemoryQuery(BaseModel):
             query: str
@@ -1134,6 +1278,16 @@ class ReachyNova(ReachyMiniApp):
 
         def on_tracking_event(event_type: str, data: dict):
             nonlocal last_vision_event_time
+
+            # --- Sleep guard: only process snap-wake when sleeping,
+            #     discard all other events when not awake ---
+            sleep_state = sleep_manager.state
+            if sleep_state != "awake":
+                if event_type == "snap_detected" and sleep_state == "sleeping":
+                    logger.info("[Sleep] Snap detected — waking up!")
+                    _initiate_wake()
+                return
+
             publish_event("tracking", event_type, data)
 
             if event_type == "pat_detected":
@@ -1171,6 +1325,8 @@ class ReachyNova(ReachyMiniApp):
         if mqtt_client is not None:
             def _on_inject(client, userdata, msg):
                 try:
+                    if sleep_manager.state != "awake":
+                        return  # Discard injections during sleep
                     data = json.loads(msg.payload.decode())
                     text = data.get("text", "")
                     if text:
@@ -1260,6 +1416,17 @@ class ReachyNova(ReachyMiniApp):
                 emotion_wounds=emo_state["wounds"],
             )
 
+            # --- Auto-sleep on sustained boredom ---
+            boredom_now = emotional_state.get_boredom()
+            if boredom_now >= 0.8 and sleep_manager.state == "awake":
+                if _high_boredom_start == 0.0:
+                    _high_boredom_start = now
+                elif now - _high_boredom_start >= 60.0:
+                    logger.info("[Sleep] Auto-sleep triggered by sustained boredom")
+                    _initiate_sleep()
+            elif boredom_now < 0.8:
+                _high_boredom_start = 0.0
+
             # Get current mood for animation
             with state_lock:
                 mood = app_state["mood"]
@@ -1270,6 +1437,51 @@ class ReachyNova(ReachyMiniApp):
                 speech_enabled = app_state["speech_enabled"]
                 movement_enabled = app_state["movement_enabled"]
                 gesture_active = app_state["gesture_active"]
+
+            # --- Sleep mode: short-circuit the main loop ---
+            _sleep_state = sleep_manager.state
+            if _sleep_state != "awake":
+                if _sleep_state == "sleeping":
+                    # Breathing: gentle antennas + body sway only.
+                    # Head stays at SDK's sleep pose — no set_target(head=...).
+                    t_sleep = time.time() - sleep_manager._sleep_start_time
+                    ant_breath = np.deg2rad(1.5) * np.sin(2.0 * np.pi * 0.05 * t_sleep)
+                    antennas_rad = np.array([
+                        SLEEP_ANTENNAS_JOINT_POSITIONS[0] + ant_breath,
+                        SLEEP_ANTENNAS_JOINT_POSITIONS[1] - ant_breath,
+                    ])
+                    body_sway = np.radians(5.0 * np.sin(2.0 * np.pi * 0.04 * t_sleep))
+                    reachy_mini.set_target(
+                        antennas=antennas_rad,
+                        body_yaw=body_sway,
+                    )
+                # else: falling_asleep / waking_up — SDK owns the robot, don't send poses
+
+                # Keep reading audio for snap detection only (no Sonic feed, no vision)
+                try:
+                    audio = reachy_mini.media.get_audio_sample()
+                    if audio is not None:
+                        if isinstance(audio, bytes):
+                            audio = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
+                        elif audio.dtype != np.float32:
+                            audio = audio.astype(np.float32)
+                        if audio.ndim == 2:
+                            audio = audio.mean(axis=1)
+                        if mic_sr != 16000:
+                            ratio = 16000 / mic_sr
+                            n_out = int(len(audio) * ratio)
+                            audio = np.interp(
+                                np.linspace(0, len(audio) - 1, n_out),
+                                np.arange(len(audio)),
+                                audio,
+                            ).astype(np.float32)
+                        # Only detect snaps during sleeping (not during transitions)
+                        if _sleep_state == "sleeping":
+                            tracker.detect_snap(audio)
+                except Exception:
+                    pass
+                time.sleep(0.02)
+                continue
 
             # --- Gesture active: skip head — gesture thread owns it ---
             if gesture_active:
