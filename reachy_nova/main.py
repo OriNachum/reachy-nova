@@ -1054,6 +1054,7 @@ class ReachyNova(ReachyMiniApp):
             tools=skill_manager.get_tool_specs(),
             on_tool_use=on_tool_use,
             on_interruption=handle_interruption,
+            voice_id="tiffany",
         )
 
         # --- Sleep mode helpers (need sonic + sleep_manager in scope) ---
@@ -1706,13 +1707,19 @@ class ReachyNova(ReachyMiniApp):
                 except Exception:
                     output_sr = 24000
 
+                VOLUME_GAIN = 1.5    # 50% louder
+                SPEED_FACTOR = 1.05  # 5% faster playback
+
                 for chunk in chunks:
-                    if output_sr != OUTPUT_SAMPLE_RATE:
-                        # Simple linear resample
-                        ratio = output_sr / OUTPUT_SAMPLE_RATE
-                        n_out = int(len(chunk) * ratio)
-                        indices = np.linspace(0, len(chunk) - 1, n_out)
-                        chunk = np.interp(indices, np.arange(len(chunk)), chunk).astype(np.float32)
+                    # Always resample: adjust for speed + match output sample rate
+                    effective_source_rate = OUTPUT_SAMPLE_RATE * SPEED_FACTOR
+                    ratio = output_sr / effective_source_rate
+                    n_out = int(len(chunk) * ratio)
+                    indices = np.linspace(0, len(chunk) - 1, n_out)
+                    chunk = np.interp(indices, np.arange(len(chunk)), chunk).astype(np.float32)
+
+                    # Apply volume gain
+                    chunk = np.clip(chunk * VOLUME_GAIN, -1.0, 1.0).astype(np.float32)
                     try:
                         reachy_mini.media.push_audio_sample(chunk)
                     except Exception as e:
