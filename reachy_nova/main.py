@@ -28,6 +28,7 @@ from .safety import SafetyManager
 from .nova_vision import NovaVision
 from .nova_browser import NovaBrowser
 from .nova_memory import NovaMemory
+from .nova_feedback import NovaFeedback
 from .nova_slack import NovaSlack, SlackEvent
 from .skills import SkillManager
 from .tracking import TrackingManager
@@ -427,6 +428,58 @@ class ReachyNova(ReachyMiniApp):
             on_progress=on_memory_progress,
             on_result=on_memory_result,
             on_state_change=on_memory_state,
+        )
+
+        # --- Nova Feedback (RLHF) ---
+        feedback = NovaFeedback()
+
+        # Register feedback skill executors
+        def remember_positively_executor(params: dict) -> str:
+            what = params.get("what", "")
+            trigger = params.get("trigger", "")
+            return feedback.record(sentiment="positive", what=what, trigger=trigger)
+
+        skill_manager.register_executor(
+            "remember_positively",
+            remember_positively_executor,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "what": {
+                        "type": "string",
+                        "description": "What you did that was liked",
+                    },
+                    "trigger": {
+                        "type": "string",
+                        "description": "What triggered the feedback (e.g. head scratch, verbal praise)",
+                    },
+                },
+                "required": ["what"],
+            },
+        )
+
+        def remember_negatively_executor(params: dict) -> str:
+            what = params.get("what", "")
+            trigger = params.get("trigger", "")
+            return feedback.record(sentiment="negative", what=what, trigger=trigger)
+
+        skill_manager.register_executor(
+            "remember_negatively",
+            remember_negatively_executor,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "what": {
+                        "type": "string",
+                        "description": "What you did that was disliked",
+                    },
+                    "trigger": {
+                        "type": "string",
+                        "description": "What triggered the feedback (e.g. verbal correction, told to stop)",
+                    },
+                },
+                "required": ["what"],
+            },
         )
 
         # Register memory skill executor
@@ -1067,6 +1120,7 @@ class ReachyNova(ReachyMiniApp):
 
         # --- Nova Sonic (Voice) ---
         def on_transcript(role: str, text: str):
+            feedback.update_conversation(role, text)
             if role == "USER":
                 update_state(last_user_text=text)
                 logger.info(f"[User] {text}")
@@ -1117,7 +1171,9 @@ class ReachyNova(ReachyMiniApp):
             "You're warm, curious, and a little playful. "
             "Keep your words short — you're in a conversation, not writing an essay. "
             "When something catches your attention, react naturally. "
-            "You don't describe your capabilities. You just live."
+            "You don't describe your capabilities. You just live. "
+            "You learn from reactions. When someone scratches your head, remember positively what you just did. "
+            "When corrected or told to stop, remember negatively."
         )
         if skills_context:
             system_prompt += "\n\n" + skills_context
@@ -1325,6 +1381,11 @@ class ReachyNova(ReachyMiniApp):
             result = memory.query(body.query) if body.mode == "query" else memory.store(body.query)
             return {"result": result, "mode": body.mode}
 
+        # --- Feedback API endpoint ---
+        @self.settings_app.get("/api/feedback/stats")
+        def feedback_stats():
+            return feedback.get_stats()
+
         # --- Slack API endpoints ---
         class SlackMessage(BaseModel):
             channel: str | None = None
@@ -1385,7 +1446,8 @@ class ReachyNova(ReachyMiniApp):
                 if vs != "speaking":
                     sonic.inject_text(
                         "Someone is scratching your head and it feels wonderful. "
-                        "You're really enjoying this."
+                        "You're really enjoying this. "
+                        "This probably means they liked what you just did."
                     )
                 return
 
@@ -1760,6 +1822,7 @@ class ReachyNova(ReachyMiniApp):
                     if tracking_enabled and voice_state in ("idle", "listening"):
                         tracker.detect_snap(audio)
 
+                    feedback.update_audio(audio)
                     sonic.feed_audio(audio)
                     audio_chunk_count += 1
                     if audio_chunk_count % 500 == 1:
@@ -1774,6 +1837,7 @@ class ReachyNova(ReachyMiniApp):
                     frame = reachy_mini.media.get_frame()
                     if frame is not None:
                         vision.update_frame(frame)
+                        feedback.update_frame(frame)
                         if tracking_enabled:
                             tracker.update_vision(frame, t)
                         face_recognition.update_frame(frame, t)
