@@ -205,10 +205,6 @@ class TrackingManager:
         # --- Pat detection ---
         self.pat_detector = PatDetector()
         self.pat_level1_time: float = 0.0     # timestamp when level 1 pat fired
-        self.pat_reaction_time: float = 0.0   # timestamp when level 2 pat fires (triggers nuzzle)
-        self.pat_reaction_duration: float = 1.5  # seconds of head nuzzle
-        self.pat_nuzzle_freq: float = 2.5     # Hz — gentle side-to-side speed
-        self.pat_nuzzle_amp: float = 8.0      # degrees — nuzzle amplitude
 
         # --- Face recognition state ---
         self.recognized_person: str | None = None  # name of recognized person
@@ -407,7 +403,6 @@ class TrackingManager:
                 self.pat_level1_time = time.time()
                 self._fire_event("pat_level1", event_data)
             elif result == "level2":
-                self.pat_reaction_time = time.time()  # triggers nuzzle overlay
                 self._fire_event("pat_level2", event_data)
         except Exception as e:
             logger.debug(f"Pat detection error: {e}")
@@ -480,16 +475,6 @@ class TrackingManager:
             with self._vision_lock:
                 self.face_yaw_accum *= 0.98
                 self.face_pitch_accum *= 0.98
-
-        # Pat nuzzle overlay: gentle decaying side-to-side after a pat
-        pat_elapsed = now - self.pat_reaction_time
-        if 0 < pat_elapsed < self.pat_reaction_duration:
-            # Decaying envelope: starts full, fades to zero
-            envelope = 1.0 - (pat_elapsed / self.pat_reaction_duration)
-            nuzzle = self.pat_nuzzle_amp * envelope * np.sin(
-                2.0 * np.pi * self.pat_nuzzle_freq * pat_elapsed
-            )
-            self.current_yaw += nuzzle
 
         # Final safety clamp on pitch to prevent head-body collision
         self.current_pitch = float(np.clip(self.current_pitch, MIN_PITCH, MAX_PITCH))

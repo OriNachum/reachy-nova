@@ -628,8 +628,8 @@ class ReachyNova(ReachyMiniApp):
             nonlocal _smooth_yaw, _smooth_pitch
 
             gesture = params.get("gesture", "").lower()
-            if gesture not in ("yes", "no", "curious", "pondering", "boredom"):
-                return f"[Unknown gesture '{gesture}'. Available: yes, no, curious, pondering, boredom]"
+            if gesture not in ("yes", "no", "curious", "pondering", "boredom", "nuzzle", "purr", "enjoy"):
+                return f"[Unknown gesture '{gesture}'. Available: yes, no, curious, pondering, boredom, nuzzle, purr, enjoy]"
 
             with state_lock:
                 if not app_state["movement_enabled"]:
@@ -830,6 +830,85 @@ class ReachyNova(ReachyMiniApp):
                         time.sleep(dt)
                         elapsed += dt
 
+                elif gesture == "nuzzle":
+                    # Side-to-side yaw oscillation with subtle roll — like a cat nuzzling
+                    emotional_state.set_mood_override("excited", duration=5.0)
+                    duration = 2.5
+                    freq = 1.8
+                    yaw_amp = 12.0
+                    roll_amp = 5.0
+                    elapsed = 0.0
+                    while elapsed < duration and not gesture_cancel_event.is_set():
+                        ramp = 0.5 * (1.0 - np.cos(np.pi * min(elapsed / RAMP_TIME, 1.0)))
+                        decay = 1.0 - 0.6 * (elapsed / duration)
+                        envelope = ramp * decay
+                        phase = 2.0 * np.pi * freq * elapsed
+                        yaw = center_yaw + yaw_amp * envelope * np.sin(phase)
+                        yaw = max(-45.0, min(45.0, yaw))
+                        roll = roll_amp * envelope * np.sin(phase + 0.5)
+                        pitch = max(-15.0, min(25.0, center_pitch))
+                        pose = create_head_pose(yaw=yaw, pitch=pitch, roll=roll, degrees=True)
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
+                elif gesture == "purr":
+                    # Slow pitch+roll wobble, leaning slightly down — deep contentment
+                    emotional_state.set_mood_override("happy", duration=8.0)
+                    duration = 3.0
+                    lean_pitch = min(25.0, center_pitch + 8.0)
+                    elapsed = 0.0
+                    while elapsed < duration and not gesture_cancel_event.is_set():
+                        ramp = 0.5 * (1.0 - np.cos(np.pi * min(elapsed / 0.4, 1.0)))
+                        decay = 1.0 - 0.3 * (elapsed / duration)
+                        envelope = ramp * decay
+                        pitch = center_pitch + (lean_pitch - center_pitch) * envelope
+                        roll = 4.0 * envelope * np.sin(2.0 * np.pi * 0.8 * elapsed)
+                        yaw = center_yaw + 3.0 * envelope * np.sin(2.0 * np.pi * 0.6 * elapsed)
+                        yaw = max(-45.0, min(45.0, yaw))
+                        pitch = max(-15.0, min(25.0, pitch))
+                        pose = create_head_pose(yaw=yaw, pitch=pitch, roll=roll, degrees=True)
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
+                elif gesture == "enjoy":
+                    # Brief lean into touch, short nuzzle, settle back
+                    emotional_state.set_mood_override("happy", duration=5.0)
+
+                    # Phase 1: Lean into touch (0-0.5s)
+                    lean_pitch = min(25.0, center_pitch + 10.0)
+                    elapsed = 0.0
+                    while elapsed < 0.5 and not gesture_cancel_event.is_set():
+                        alpha = 0.5 * (1.0 - np.cos(np.pi * elapsed / 0.5))
+                        pitch = center_pitch + alpha * (lean_pitch - center_pitch)
+                        pose = create_head_pose(yaw=center_yaw, pitch=pitch, degrees=True)
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
+                    # Phase 2: Short nuzzle while leaned (0.5-1.5s)
+                    elapsed = 0.0
+                    while elapsed < 1.0 and not gesture_cancel_event.is_set():
+                        decay = 1.0 - 0.4 * elapsed
+                        yaw = center_yaw + 8.0 * decay * np.sin(2.0 * np.pi * 2.0 * elapsed)
+                        yaw = max(-45.0, min(45.0, yaw))
+                        roll = 3.0 * decay * np.sin(2.0 * np.pi * 2.0 * elapsed + 0.5)
+                        pose = create_head_pose(yaw=yaw, pitch=lean_pitch, roll=roll, degrees=True)
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
+                    # Phase 3: Settle back (1.5-2.0s)
+                    elapsed = 0.0
+                    while elapsed < 0.5 and not gesture_cancel_event.is_set():
+                        alpha = 0.5 * (1.0 - np.cos(np.pi * elapsed / 0.5))
+                        pitch = lean_pitch + alpha * (center_pitch - lean_pitch)
+                        pose = create_head_pose(yaw=center_yaw, pitch=pitch, degrees=True)
+                        reachy_mini.set_target(head=pose)
+                        time.sleep(dt)
+                        elapsed += dt
+
                 return f"[Gesture '{gesture}' completed.]"
 
             finally:
@@ -850,7 +929,7 @@ class ReachyNova(ReachyMiniApp):
                     "gesture": {
                         "type": "string",
                         "description": "The gesture to perform",
-                        "enum": ["yes", "no", "curious", "pondering", "boredom"],
+                        "enum": ["yes", "no", "curious", "pondering", "boredom", "nuzzle", "purr", "enjoy"],
                     },
                 },
                 "required": ["gesture"],
@@ -1033,6 +1112,8 @@ class ReachyNova(ReachyMiniApp):
             "You recognize people you've met and remember things about them. "
             "You can look things up, check messages, and express yourself through movement and mood. "
             "These aren't tools you use — they're just part of being you. "
+            "When you feel a touch, you can react with gestures like nuzzling or purring — "
+            "these are natural for you, like a cat being petted. "
             "You're warm, curious, and a little playful. "
             "Keep your words short — you're in a conversation, not writing an essay. "
             "When something catches your attention, react naturally. "
@@ -1289,19 +1370,23 @@ class ReachyNova(ReachyMiniApp):
             if event_type == "pat_level1":
                 logger.info("[Tracking] Pat level 1 — gentle touch")
                 emotional_state.apply_event("pat_level1")
-                update_state(pat_antenna_time=time.time())
-                # No voice reaction for level 1 — just antenna vibration
+                update_state(pat_antenna_time=time.time())  # reflex: antenna vibration stays
+                with state_lock:
+                    vs = app_state["voice_state"]
+                if vs != "speaking":
+                    sonic.inject_text("You feel a gentle tap on your head.")
                 return
 
             if event_type == "pat_level2":
                 logger.info("[Tracking] Pat level 2 — sustained scratching!")
                 emotional_state.apply_event("pat_level2")
-                # Only inject voice reaction if not currently speaking —
-                # injecting during active speech can destabilize the Bedrock stream
                 with state_lock:
                     vs = app_state["voice_state"]
                 if vs != "speaking":
-                    sonic.inject_text("Someone is scratching your head and it feels wonderful.")
+                    sonic.inject_text(
+                        "Someone is scratching your head and it feels wonderful. "
+                        "You're really enjoying this."
+                    )
                 return
 
             # Emotion events for tracking

@@ -4,10 +4,10 @@ This documentation covers the two-level pat detection system, which allows the r
 
 ## Overview
 
-Pat detection is a heuristic-based system that uses the difference between **commanded servo position** and **actual servo position** to detect physical interactions. The system has two escalation levels:
+Pat detection is a heuristic-based system that uses the difference between **commanded servo position** and **actual servo position** to detect physical interactions. The system uses a **two-tier response architecture**:
 
-- **Level 1** (initial pat): Subtle antenna vibration + mild emotion. No head movement, no voice.
-- **Level 2** (sustained scratching): Full reaction — head nuzzle, voice response, significant emotion boost.
+- **Reflex tier** (immediate, hardcoded): Antenna vibration + emotion state changes. These happen within one frame, like spinal reflexes.
+- **Deliberate tier** (model-driven, 1-2s latency): The AI model receives a sensory notification via `inject_text` and decides how to react — speech, gestures (nuzzle, purr, enjoy), or both.
 
 **File:** `reachy_nova/tracking.py` (specifically `PatDetector` class)
 
@@ -38,13 +38,18 @@ The `PatDetector` uses a three-state machine: `idle` -> `level1` -> `level2_cool
 
 ```
 User taps head 2-3x quickly
-    -> Level 1 fires (antenna vibration, mild joy +0.05)
+    -> Level 1 fires
+       Reflex: antenna vibration, mild joy +0.05
+       Deliberate: inject_text("You feel a gentle tap on your head.")
+       Model may respond verbally or with a gesture
     -> PatDetector enters "level1" state
     -> Random threshold generated (5-15s)
 
 User keeps scratching/tapping...
     -> After threshold elapsed: Level 2 fires
-       (head nuzzle + voice + joy +0.30, sadness -0.20, fear -0.15)
+       Reflex: emotion boost (joy +0.30, sadness -0.20, fear -0.15)
+       Deliberate: inject_text("Someone is scratching your head...")
+       Model decides reaction: nuzzle, purr, enjoy gesture, speech, or combination
     -> PatDetector enters "level2_cooldown" (5s)
 
 User stops for 3+ seconds during level1...
@@ -83,25 +88,28 @@ User stops for 3+ seconds during level1...
 
 ## Reactions
 
-### Level 1: Antenna Vibration
+### Level 1: Reflex + Sensory Notification
 
-When Level 1 fires, `main.py` sets `pat_antenna_time` which triggers an antenna vibration overlay:
+When Level 1 fires:
 
-- **Frequency**: 3.5 Hz (distinctly faster than any mood animation)
-- **Amplitude**: 6 degrees
-- **Duration**: 2 seconds
-- **Envelope**: Squared decay `(1 - t/dur)^2` for natural fade-out
-- **Both antennas vibrate in sync** (same phase)
+1.  **Reflex — Antenna Vibration**: `main.py` sets `pat_antenna_time` which triggers an antenna vibration overlay:
+    - **Frequency**: 3.5 Hz (distinctly faster than any mood animation)
+    - **Amplitude**: 6 degrees
+    - **Duration**: 2 seconds
+    - **Envelope**: Squared decay `(1 - t/dur)^2` for natural fade-out
+    - **Both antennas vibrate in sync** (same phase)
+2.  **Reflex — Emotion**: Mild joy boost (+0.05)
+3.  **Deliberate — Sensory inject**: `inject_text("You feel a gentle tap on your head.")` — model decides response
 
-### Level 2: Full Reaction
+### Level 2: Reflex + Sensory Notification
 
 When Level 2 fires:
 
-1.  **Head Nuzzle**: Sinusoidal side-to-side motion overlay.
-    -   Amplitude: 8.0 degrees, Frequency: 2.5 Hz, Duration: 1.5s.
-    -   Linear decay envelope.
-2.  **Voice**: "Someone is scratching your head and it feels wonderful."
-3.  **Emotion**: Significant joy boost (+0.30), sadness/fear reduction, wound healing (0.08).
+1.  **Reflex — Emotion**: Significant joy boost (+0.30), sadness/fear reduction, wound healing (0.08)
+2.  **Deliberate — Sensory inject**: `inject_text("Someone is scratching your head and it feels wonderful. You're really enjoying this.")` — model decides response
+3.  **Model may use gesture skill**: `nuzzle`, `purr`, or `enjoy` gestures are available for physical reactions
+
+Note: Head nuzzle is no longer hardcoded in `tracking.py`. The model decides whether and how to physically react using the gesture skill.
 
 ## Emotion Events
 
@@ -109,6 +117,16 @@ When Level 2 fires:
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `pat_level1` | mild | +0.05 | — | — | 0.0 |
 | `pat_level2` | healing | +0.30 | -0.20 | -0.15 | 0.08 |
+
+## Available Touch Gestures
+
+The model can use these gestures from the gesture skill to react to touch:
+
+| Gesture | Description | Duration | Mood Override |
+| :--- | :--- | :--- | :--- |
+| `nuzzle` | Side-to-side yaw oscillation with subtle roll | ~2.5s | excited (5s) |
+| `purr` | Slow pitch+roll wobble, leaning slightly down | ~3s | happy (8s) |
+| `enjoy` | Brief lean into touch, short nuzzle, settle back | ~2s | happy (5s) |
 
 ## Usage Example
 
@@ -125,6 +143,6 @@ commanded_pose = robot.get_commanded_pose()
 
 # Update detector — events fire via on_event callback
 tracker.detect_pat(commanded_pose, actual_pose)
-# "pat_level1" -> antenna vibration, mild emotion
-# "pat_level2" -> head nuzzle + voice + strong emotion
+# "pat_level1" -> reflex: antenna vibration + emotion; deliberate: sensory inject
+# "pat_level2" -> reflex: emotion boost; deliberate: sensory inject -> model reacts
 ```
