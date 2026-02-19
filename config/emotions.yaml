@@ -26,13 +26,19 @@ emotions:
 # Deltas are multiplied by the optional intensity parameter (default 1.0).
 events:
   # Healing events (positive)
-  pat_detected:
+  pat_level1:
+    severity: mild
+    deltas:
+      joy: 0.05
+    wound_reduction: 0.0
+
+  pat_level2:
     severity: healing
     deltas:
-      joy: 0.25
-      sadness: -0.15
-      fear: -0.10
-    wound_reduction: 0.05   # chips at active wound floors
+      joy: 0.30
+      sadness: -0.20
+      fear: -0.15
+    wound_reduction: 0.08   # chips at active wound floors
 
   conversation_reply:
     severity: healing

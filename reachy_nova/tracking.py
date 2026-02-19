@@ -8,6 +8,7 @@ Priority order: snap > face > speaker > idle
 """
 
 import logging
+import random
 import threading
 import time
 from collections import deque
@@ -62,7 +63,15 @@ class PatDetector:
         self._baseline_offset: float = 0.0   # rolling baseline for steady-state offset
         self._baseline_alpha: float = 0.005   # slow EMA to track servo bias
 
-    def update(self, commanded_pitch: float, actual_pitch: float) -> bool:
+        # --- Two-level state machine ---
+        self._state: str = "idle"                   # "idle" | "level1" | "level2_cooldown"
+        self._level1_time: float = 0.0              # when level 1 fired
+        self._level2_threshold: float = 0.0         # random 5-15s for level 2
+        self._last_press_time: float = 0.0          # most recent press (for gap detection)
+        self._interaction_gap_timeout: float = 3.0  # no presses for 3s -> reset
+        self._level2_cooldown: float = 5.0          # cooldown after level 2
+
+    def update(self, commanded_pitch: float, actual_pitch: float) -> str | None:
         """Feed one sample of commanded vs actual pitch.
 
         Args:
@@ -70,7 +79,8 @@ class PatDetector:
             actual_pitch: the pitch read back from the servo (degrees)
 
         Returns:
-            True if a pat gesture was just detected.
+            "level1" on initial pat detection, "level2" on sustained scratching,
+            or None if no event.
         """
         now = time.time()
 
@@ -88,22 +98,50 @@ class PatDetector:
         if deviation < -self.press_threshold and not self._in_press:
             self._in_press = True
             self.press_times.append(now)
+            self._last_press_time = now
             logger.debug(f"Pat press detected: deviation={deviation:.2f}deg")
         elif deviation > -self.release_threshold:
             self._in_press = False
 
-        # Count recent presses within the time window
-        cutoff = now - self.pat_window
-        recent_presses = sum(1 for t in self.press_times if t > cutoff)
+        # --- State machine ---
+        if self._state == "idle":
+            # Count recent presses within the time window
+            cutoff = now - self.pat_window
+            recent_presses = sum(1 for t in self.press_times if t > cutoff)
 
-        # Pat detected?
-        if recent_presses >= self.min_presses and now - self.last_pat_time > self.pat_cooldown:
-            self.last_pat_time = now
-            self.press_times.clear()
-            logger.info(f"Pat detected! ({recent_presses} presses in {self.pat_window}s)")
-            return True
+            if recent_presses >= self.min_presses and now - self.last_pat_time > self.pat_cooldown:
+                self.last_pat_time = now
+                self.press_times.clear()
+                self._state = "level1"
+                self._level1_time = now
+                self._level2_threshold = random.uniform(5.0, 15.0)
+                logger.info(f"Pat level 1! ({recent_presses} presses, level2 threshold={self._level2_threshold:.1f}s)")
+                return "level1"
 
-        return False
+        elif self._state == "level1":
+            # Check for interaction gap: no presses for 3s -> reset
+            if self._last_press_time > 0 and now - self._last_press_time > self._interaction_gap_timeout:
+                logger.info("Pat interaction gap — resetting to idle")
+                self._state = "idle"
+                return None
+
+            # Check if sustained scratching exceeds random threshold
+            elapsed = now - self._level1_time
+            if elapsed > self._level2_threshold:
+                self.last_pat_time = now
+                self.press_times.clear()
+                self._state = "level2_cooldown"
+                logger.info(f"Pat level 2! (sustained {elapsed:.1f}s)")
+                return "level2"
+
+        elif self._state == "level2_cooldown":
+            # Suppress all detection for cooldown period, then reset
+            if now - self.last_pat_time > self._level2_cooldown:
+                logger.info("Pat cooldown expired — ready for new detection")
+                self._state = "idle"
+                self.press_times.clear()
+
+        return None
 
     def reset(self):
         """Reset detector state."""
@@ -111,6 +149,10 @@ class PatDetector:
         self.press_times.clear()
         self._in_press = False
         self._baseline_offset = 0.0
+        self._state = "idle"
+        self._level1_time = 0.0
+        self._level2_threshold = 0.0
+        self._last_press_time = 0.0
 
 
 class TrackingManager:
@@ -162,7 +204,8 @@ class TrackingManager:
 
         # --- Pat detection ---
         self.pat_detector = PatDetector()
-        self.pat_reaction_time: float = 0.0   # timestamp when last pat was detected
+        self.pat_level1_time: float = 0.0     # timestamp when level 1 pat fired
+        self.pat_reaction_time: float = 0.0   # timestamp when level 2 pat fires (triggers nuzzle)
         self.pat_reaction_duration: float = 1.5  # seconds of head nuzzle
         self.pat_nuzzle_freq: float = 2.5     # Hz — gentle side-to-side speed
         self.pat_nuzzle_amp: float = 8.0      # degrees — nuzzle amplitude
@@ -354,13 +397,18 @@ class TrackingManager:
             commanded_pitch = cmd_euler[1]
             actual_pitch = act_euler[1]
 
-            if self.pat_detector.update(commanded_pitch, actual_pitch):
-                self.pat_reaction_time = time.time()
-                self._fire_event("pat_detected", {
-                    "commanded_pitch": float(commanded_pitch),
-                    "actual_pitch": float(actual_pitch),
-                    "deviation": float(actual_pitch - commanded_pitch),
-                })
+            result = self.pat_detector.update(commanded_pitch, actual_pitch)
+            event_data = {
+                "commanded_pitch": float(commanded_pitch),
+                "actual_pitch": float(actual_pitch),
+                "deviation": float(actual_pitch - commanded_pitch),
+            }
+            if result == "level1":
+                self.pat_level1_time = time.time()
+                self._fire_event("pat_level1", event_data)
+            elif result == "level2":
+                self.pat_reaction_time = time.time()  # triggers nuzzle overlay
+                self._fire_event("pat_level2", event_data)
         except Exception as e:
             logger.debug(f"Pat detection error: {e}")
 

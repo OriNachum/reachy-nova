@@ -171,6 +171,7 @@ class ReachyNova(ReachyMiniApp):
             "gesture_active": False,      # True while gesture animation owns the head
             "gesture_name": "",           # current gesture being played
             "sleep_mode": "awake",        # awake, falling_asleep, sleeping, waking_up
+            "pat_antenna_time": 0.0,      # timestamp for level 1 antenna vibration
         }
 
         # --- Emotional State System ---
@@ -1285,15 +1286,22 @@ class ReachyNova(ReachyMiniApp):
 
             publish_event("tracking", event_type, data)
 
-            if event_type == "pat_detected":
-                logger.info("[Tracking] Pat detected on head!")
-                emotional_state.apply_event("pat_detected")
+            if event_type == "pat_level1":
+                logger.info("[Tracking] Pat level 1 — gentle touch")
+                emotional_state.apply_event("pat_level1")
+                update_state(pat_antenna_time=time.time())
+                # No voice reaction for level 1 — just antenna vibration
+                return
+
+            if event_type == "pat_level2":
+                logger.info("[Tracking] Pat level 2 — sustained scratching!")
+                emotional_state.apply_event("pat_level2")
                 # Only inject voice reaction if not currently speaking —
                 # injecting during active speech can destabilize the Bedrock stream
                 with state_lock:
                     vs = app_state["voice_state"]
                 if vs != "speaking":
-                    sonic.inject_text("Someone just patted your head.")
+                    sonic.inject_text("Someone is scratching your head and it feels wonderful.")
                 return
 
             # Emotion events for tracking
@@ -1581,6 +1589,18 @@ class ReachyNova(ReachyMiniApp):
                     antennas_deg = target_antennas
 
                 prev_antennas = antennas_deg
+
+            # Pat Level 1 antenna vibration overlay
+            with state_lock:
+                _pat_ant_time = app_state["pat_antenna_time"]
+            _pat_ant_elapsed = now - _pat_ant_time
+            _PAT_ANT_DUR = 2.0   # seconds
+            _PAT_ANT_FREQ = 3.5  # Hz
+            _PAT_ANT_AMP = 6.0   # degrees
+            if 0 < _pat_ant_elapsed < _PAT_ANT_DUR:
+                _env = (1.0 - _pat_ant_elapsed / _PAT_ANT_DUR) ** 2  # squared decay
+                _vib = _PAT_ANT_AMP * _env * np.sin(2 * np.pi * _PAT_ANT_FREQ * _pat_ant_elapsed)
+                antennas_deg = antennas_deg + np.array([_vib, _vib])
 
             antennas_rad = np.deg2rad(antennas_deg)
 
