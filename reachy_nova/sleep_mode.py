@@ -50,6 +50,11 @@ class SleepManager:
         self._sleep_start_time = time.time()
         self._set_state("sleeping")
 
+    def enter_sleeping_direct(self) -> None:
+        """Enter sleeping directly — for startup when already in sleep position."""
+        self._sleep_start_time = time.time()
+        self._set_state("sleeping")
+
     def trigger_wake(self) -> None:
         """Enter waking_up — the SDK's wake_up() will own the robot."""
         if self.state != "sleeping":

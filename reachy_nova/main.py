@@ -20,7 +20,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 import numpy as np
 from pydantic import BaseModel
 from reachy_mini import ReachyMini, ReachyMiniApp
-from reachy_mini.reachy_mini import SLEEP_ANTENNAS_JOINT_POSITIONS
+from reachy_mini.reachy_mini import SLEEP_ANTENNAS_JOINT_POSITIONS, SLEEP_HEAD_JOINT_POSITIONS
 from reachy_mini.utils import create_head_pose
 
 from .nova_sonic import NovaSonic, OUTPUT_SAMPLE_RATE
@@ -35,6 +35,7 @@ from .tracking import TrackingManager
 from .face_manager import FaceManager
 from .face_recognition import FaceRecognition
 from .emotions import EmotionalState
+from .session_state import SessionState
 from .sleep_mode import SleepManager
 
 logging.basicConfig(level=logging.INFO)
@@ -178,11 +179,20 @@ class ReachyNova(ReachyMiniApp):
         # --- Emotional State System ---
         emotional_state = EmotionalState()
 
+        # --- Session Persistence ---
+        session = SessionState()
+        previous_session = session.load()
+        restart_type, restart_elapsed = session.classify_restart(previous_session)
+        if previous_session and previous_session.get("emotions"):
+            emotional_state.restore_state(previous_session["emotions"], restart_elapsed)
+        session.mark_started()
+
         # --- Sleep Mode ---
         sleep_manager = SleepManager(
             on_state_change=lambda state: update_state(sleep_mode=state),
         )
         _high_boredom_start = 0.0  # timestamp for auto-sleep
+        _startup_context_injected = False
 
         def update_state(**kwargs):
             mood_changed = None
@@ -431,7 +441,7 @@ class ReachyNova(ReachyMiniApp):
         )
 
         # --- Nova Feedback (RLHF) ---
-        feedback = NovaFeedback()
+        feedback = NovaFeedback(session_id=session.session_id)
 
         # Register feedback skill executors
         def remember_positively_executor(params: dict) -> str:
@@ -1230,12 +1240,14 @@ class ReachyNova(ReachyMiniApp):
 
         def _initiate_wake():
             """Run SDK wake animation and restart LLM subsystems."""
+            nonlocal _startup_context_injected
             if sleep_manager.state != "sleeping":
                 return
             logger.info("[Sleep] Initiating wake — restarting Sonic, re-enabling vision/tracking")
             sleep_manager.trigger_wake()
             # Run SDK wake animation in background; re-enable subsystems when done
             def _sdk_wake():
+                nonlocal _startup_context_injected
                 try:
                     reachy_mini.wake_up()
                 except Exception as e:
@@ -1244,7 +1256,53 @@ class ReachyNova(ReachyMiniApp):
                 sleep_manager.enter_awake()
                 sonic.restart(stop_event)
                 update_state(vision_enabled=True, tracking_enabled=True)
+                # Deferred startup context injection on first wake
+                if not _startup_context_injected:
+                    _startup_context_injected = True
+                    threading.Thread(
+                        target=_inject_startup_context, daemon=True,
+                        name="memory-startup",
+                    ).start()
             threading.Thread(target=_sdk_wake, daemon=True, name="sdk-wake").start()
+
+        def _is_in_sleep_position() -> bool:
+            """Check if robot is already physically in the sleep position."""
+            try:
+                head_pos, ant_pos = reachy_mini.get_current_joint_positions()
+                head_dist = np.linalg.norm(
+                    np.array(head_pos) - np.array(SLEEP_HEAD_JOINT_POSITIONS)
+                )
+                ant_diff = np.max(np.abs(
+                    np.array(ant_pos) - np.array(SLEEP_ANTENNAS_JOINT_POSITIONS)
+                ))
+                return head_dist < 0.3 and ant_diff < 0.5
+            except Exception as e:
+                logger.warning(f"[Sleep] Could not read joint positions: {e}")
+                return False
+
+        def _startup_sleep():
+            """Enter sleep mode at startup — skip Sonic, check if already in position."""
+            update_state(
+                vision_enabled=False,
+                tracking_enabled=False,
+                tracking_mode="idle",
+                head_override=None,
+            )
+            if _is_in_sleep_position():
+                logger.info("[Sleep] Already in sleep position — entering sleeping directly")
+                sleep_manager.enter_sleeping_direct()
+            else:
+                logger.info("[Sleep] Not in sleep position — running goto_sleep transition")
+                sleep_manager.trigger_sleep()
+                def _sdk_startup_sleep():
+                    try:
+                        reachy_mini.goto_sleep()
+                    except Exception as e:
+                        logger.warning(f"[Sleep] SDK goto_sleep failed: {e}")
+                    sleep_manager.enter_sleeping()
+                threading.Thread(
+                    target=_sdk_startup_sleep, daemon=True, name="sdk-startup-sleep",
+                ).start()
 
         # --- API Endpoints ---
         class VisionToggle(BaseModel):
@@ -1386,6 +1444,11 @@ class ReachyNova(ReachyMiniApp):
         def feedback_stats():
             return feedback.get_stats()
 
+        # --- Session API endpoint ---
+        @self.settings_app.get("/api/session")
+        def get_session():
+            return session.get_session_info()
+
         # --- Slack API endpoints ---
         class SlackMessage(BaseModel):
             channel: str | None = None
@@ -1485,28 +1548,45 @@ class ReachyNova(ReachyMiniApp):
             mqtt_client.message_callback_add("nova/inject", _on_inject)
             logger.info("Registered nova/inject handler — Nervous System can drive voice")
 
+        # --- Inject startup context (session + memory combined) ---
+        # Defined here but only called on first wake (deferred from _initiate_wake)
+        def _inject_startup_context():
+            time.sleep(2)  # Wait for Sonic to be ready
+            try:
+                parts = []
+
+                # Session context (restart awareness)
+                session_ctx = session.get_restart_context(
+                    restart_type, restart_elapsed, previous_session,
+                )
+                if session_ctx:
+                    parts.append(session_ctx)
+
+                # Memory context
+                memory_ctx = memory.get_startup_context()
+                if memory_ctx:
+                    parts.append(f"Things you remember:\n{memory_ctx}")
+
+                if parts:
+                    combined = "\n\n".join(parts)
+                    sonic.inject_text(combined)
+                    publish_event("memory", "startup_context", {"context": combined})
+                    logger.info(
+                        f"Injected startup context ({len(combined)} chars, "
+                        f"restart={restart_type})"
+                    )
+            except Exception as e:
+                logger.warning(f"Startup context injection failed: {e}")
+
         # --- Start services ---
-        sonic.start(stop_event)
+        # Sonic is NOT started here — it will be started on first wake via sonic.restart()
         vision.start(stop_event)
         browser.start(stop_event)
         slack_bot.start(stop_event)
         face_recognition.start(stop_event)
 
-        # --- Inject startup context from memory ---
-        def _inject_startup_context():
-            time.sleep(2)  # Wait for Sonic to be ready
-            try:
-                ctx = memory.get_startup_context()
-                if ctx:
-                    sonic.inject_text(f"Things you remember:\n{ctx}")
-                    publish_event("memory", "startup_context", {"context": ctx})
-                    logger.info(f"Injected startup context ({len(ctx)} chars)")
-            except Exception as e:
-                logger.warning(f"Startup context injection failed: {e}")
-
-        threading.Thread(
-            target=_inject_startup_context, daemon=True, name="memory-startup"
-        ).start()
+        # Enter sleep mode at startup
+        _startup_sleep()
 
         # Start audio recording from robot mic
         mic_sr = 16000
@@ -1558,6 +1638,17 @@ class ReachyNova(ReachyMiniApp):
                 emotion_levels=emo_state["levels"],
                 emotion_boredom=emo_state["boredom"],
                 emotion_wounds=emo_state["wounds"],
+            )
+
+            # --- Session persistence (heartbeat + periodic save) ---
+            session.update_heartbeat()
+            with state_lock:
+                _face_name = app_state.get("face_recognized", "")
+            session.save(
+                emotions=emotional_state.get_serializable_state(),
+                conversation=feedback.get_recent_messages(50),
+                sleep_state=sleep_manager.state,
+                face_info={"name": _face_name, "time": now} if _face_name else None,
             )
 
             # --- Auto-sleep on sustained boredom ---
@@ -1888,6 +1979,19 @@ class ReachyNova(ReachyMiniApp):
                                 pass
 
             time.sleep(0.02)
+
+        # Save session state on clean shutdown
+        try:
+            with state_lock:
+                _face_name = app_state.get("face_recognized", "")
+            session.save_shutdown(
+                emotions=emotional_state.get_serializable_state(),
+                conversation=feedback.get_recent_messages(50),
+                sleep_state=sleep_manager.state,
+                face_info={"name": _face_name, "time": time.time()} if _face_name else None,
+            )
+        except Exception as e:
+            logger.error(f"Session shutdown save failed: {e}")
 
         # Cleanup
         if mqtt_available and mqtt_client:

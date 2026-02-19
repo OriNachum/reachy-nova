@@ -381,5 +381,107 @@ class EmotionalState:
                 "mood_override": self._mood_override,
             }
 
+    def get_serializable_state(self) -> dict:
+        """Full state including wound reconstruction data for session persistence."""
+        with self._lock:
+            wounds = []
+            for w in self._wounds:
+                remaining_fixed = max(0.0, w.duration - w.age)
+                wounds.append({
+                    "id": w.id,
+                    "event": w.event,
+                    "floors": dict(w.floors),
+                    "duration": w.duration,
+                    "heal_rate": w.heal_rate,
+                    "created_at": w.created_at,
+                    "remaining_fixed_seconds": round(remaining_fixed, 1),
+                })
+            return {
+                "levels": {k: round(v, 4) for k, v in self._levels.items()},
+                "boredom": round(self._boredom, 4),
+                "current_mood": self._current_mood,
+                "wounds": wounds,
+            }
+
+    def restore_state(self, data: dict, elapsed_seconds: float):
+        """Restore emotional state from saved data with time-adjusted decay.
+
+        Applies natural decay for elapsed_seconds toward baselines.
+        Reconstructs wounds with time-adjusted healing.
+        """
+        if not data:
+            return
+
+        with self._lock:
+            # Restore levels and apply decay for elapsed time
+            saved_levels = data.get("levels", {})
+            for name in EMOTION_NAMES:
+                if name in saved_levels:
+                    level = saved_levels[name]
+                    baseline = self._baselines.get(name, 0.0)
+                    rate = self._decay_rates.get(name, 0.03)
+                    # Apply natural decay toward baseline
+                    if level > baseline:
+                        level = max(baseline, level - rate * elapsed_seconds)
+                    elif level < baseline:
+                        level = min(baseline, level + rate * elapsed_seconds)
+                    self._levels[name] = max(0.0, min(1.0, level))
+
+            # Reset boredom if person is coming back after 60s+
+            if elapsed_seconds > 60.0:
+                self._boredom = 0.0
+            else:
+                self._boredom = data.get("boredom", 0.0)
+
+            # Restore mood
+            saved_mood = data.get("current_mood", "")
+            if saved_mood:
+                self._current_mood = saved_mood
+
+            # Reconstruct wounds with time-adjusted healing
+            self._wounds.clear()
+            for wd in data.get("wounds", []):
+                floors = wd.get("floors", {})
+                duration = wd.get("duration", 300)
+                heal_rate = wd.get("heal_rate", 0.001)
+                remaining_fixed = wd.get("remaining_fixed_seconds", 0.0)
+
+                if remaining_fixed > elapsed_seconds:
+                    # Still in fixed phase: adjust created_at so remaining time is correct
+                    new_remaining = remaining_fixed - elapsed_seconds
+                    created_at = time.time() - (duration - new_remaining)
+                    wound = ActiveWound(
+                        id=wd.get("id", str(uuid.uuid4())[:8]),
+                        event=wd.get("event", "unknown"),
+                        floors=floors,
+                        duration=duration,
+                        heal_rate=heal_rate,
+                        created_at=created_at,
+                    )
+                else:
+                    # Fixed phase expired offline: apply healing
+                    healing_time = elapsed_seconds - remaining_fixed
+                    for emo in list(floors):
+                        floors[emo] = max(0.0, floors[emo] - heal_rate * healing_time)
+                    # Check if fully healed
+                    if all(v <= 0 for v in floors.values()):
+                        continue  # Discard fully healed wound
+                    # Set created_at so it appears past the fixed duration
+                    created_at = time.time() - duration - 1.0
+                    wound = ActiveWound(
+                        id=wd.get("id", str(uuid.uuid4())[:8]),
+                        event=wd.get("event", "unknown"),
+                        floors=floors,
+                        duration=duration,
+                        heal_rate=heal_rate,
+                        created_at=created_at,
+                    )
+                self._wounds.append(wound)
+
+        logger.info(
+            f"Emotional state restored (elapsed={elapsed_seconds:.0f}s, "
+            f"wounds={len(self._wounds)})"
+        )
+
     def get_event_names(self) -> list[str]:
         return list(self._config.get("events", {}).keys())
