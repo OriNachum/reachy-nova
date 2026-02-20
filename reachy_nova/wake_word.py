@@ -114,7 +114,7 @@ class WakeWordDetector:
 
     def _transcribe(self, audio: np.ndarray) -> bool:
         """Run inference on a float32 audio snapshot (called from thread pool)."""
-        results = self._model.transcribe([audio])
+        results = self._model.transcribe([audio], verbose=False)
         r = results[0]
         text = r.text if hasattr(r, "text") else str(r)
         transcript = _normalize(text)
