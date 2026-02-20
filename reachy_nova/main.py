@@ -216,12 +216,17 @@ class ReachyNova(ReachyMiniApp):
         gesture_cancel_event = threading.Event()
         gesture_engine = GestureEngine(reachy_mini, state, emotional_state, gesture_cancel_event)
 
+        # --- Feedback auto-recording ---
+        last_feedback_record_time = 0.0
+        FEEDBACK_RECORD_COOLDOWN = 30.0  # seconds between auto-recordings
+        NEGATIVE_FEEDBACK_EVENTS = {"harsh_words", "insult", "violence", "abuse", "sustained_yelling"}
+
         # --- Tracking ---
         last_vision_event_time = 0.0
         VISION_EVENT_COOLDOWN = 3.0
 
         def on_tracking_event(event_type: str, data: dict):
-            nonlocal last_vision_event_time
+            nonlocal last_vision_event_time, last_feedback_record_time
 
             sleep_state = sleep_orch.state
             if sleep_state != "awake":
@@ -260,6 +265,16 @@ class ReachyNova(ReachyMiniApp):
                             "This probably means they liked what you just did.",
                             t0,
                         ))
+                # Auto-record positive feedback
+                now_fb = time.time()
+                if now_fb - last_feedback_record_time >= FEEDBACK_RECORD_COOLDOWN:
+                    last_feedback_record_time = now_fb
+                    trigger = "side_caress" if touch_type == "side_pat" else "head_scratch"
+                    what = state.get("last_assistant_text") or ""
+                    feedback.record(sentiment="positive", what=what, trigger=trigger)
+                    logger.info(f"[Feedback] Auto-recorded positive (trigger={trigger})")
+                else:
+                    logger.debug("[Feedback] Positive recording skipped (cooldown)")
                 return
 
             if event_type == "snap_detected":
@@ -308,6 +323,7 @@ class ReachyNova(ReachyMiniApp):
 
         # --- Voice callbacks ---
         def on_transcript(role: str, text: str):
+            nonlocal last_feedback_record_time
             feedback.update_conversation(role, text)
             if role == "USER":
                 state.update(last_user_text=text)
@@ -323,6 +339,18 @@ class ReachyNova(ReachyMiniApp):
                 for evt in matched_events:
                     emotional_state.apply_event(evt)
                     logger.info(f"[Emotion] Transcript trigger: {evt}")
+                # Auto-record negative feedback for scolding events
+                negative_matches = NEGATIVE_FEEDBACK_EVENTS & set(matched_events)
+                if negative_matches:
+                    now_fb = time.time()
+                    if now_fb - last_feedback_record_time >= FEEDBACK_RECORD_COOLDOWN:
+                        last_feedback_record_time = now_fb
+                        trigger = next(iter(negative_matches))
+                        what = state.get("last_assistant_text") or ""
+                        feedback.record(sentiment="negative", what=what, trigger=trigger)
+                        logger.info(f"[Feedback] Auto-recorded negative (trigger={trigger})")
+                    else:
+                        logger.debug("[Feedback] Negative recording skipped (cooldown)")
             else:
                 emotional_state.apply_event("conversation_reply")
                 state.update(last_assistant_text=text)
