@@ -2,7 +2,7 @@
 
 Guide to tuning antenna animation parameters for Reachy Mini running Reachy Nova.
 
-**File:** `reachy_nova/main.py`
+**File:** `reachy_nova/antenna_animator.py`
 
 ## How Antenna Animation Works
 
@@ -138,7 +138,7 @@ This runs in the sleep short-circuit branch of the main loop and bypasses all po
 
 ## Debug Logging
 
-Set `ANTENNA_DEBUG = True` in `main.py` to enable diagnostic logging to `/tmp/antenna_diag.log`. Events logged:
+Set `ANTENNA_DEBUG = True` in `antenna_animator.py` to enable diagnostic logging to `/tmp/antenna_diag.log`. Events logged:
 
 - `DT_SPIKE` — frames where `dt > 40ms` (loop stall detected)
 - `CLAMP` — frames where the velocity clamp is active
@@ -147,14 +147,14 @@ Set `ANTENNA_DEBUG = True` in `main.py` to enable diagnostic logging to `/tmp/an
 
 | Constant | Default | Location |
 | :--- | :--- | :--- |
-| `MOOD_ANTENNAS` | (table above) | `main.py` top-level dict |
-| `MOOD_BLEND_TIME` | 1.5 s | `main.py` line ~130 |
-| `ANTENNA_SMOOTH_TAU` | 0.10 s | `main.py` line ~131 |
-| `ANTENNA_MAX_SLEW` | 80.0 deg/s | `main.py` line ~132 |
-| `ANTENNA_DEBUG` | False | `main.py` line ~133 |
-| `_PAT_ANT_DUR` | 2.0 s | `main.py` main loop |
-| `_PAT_ANT_FREQ` | 3.5 Hz | `main.py` main loop |
-| `_PAT_ANT_AMP` | 10.0 deg | `main.py` main loop |
+| `MOOD_ANTENNAS` | (table above) | `antenna_animator.py` module-level dict |
+| `MOOD_BLEND_TIME` | 1.5 s | `antenna_animator.py` |
+| `ANTENNA_SMOOTH_TAU` | 0.10 s | `antenna_animator.py` |
+| `ANTENNA_MAX_SLEW` | 80.0 deg/s | `antenna_animator.py` |
+| `ANTENNA_DEBUG` | False | `antenna_animator.py` |
+| `_PAT_ANT_DUR` | 2.0 s | `antenna_animator.py` |
+| `_PAT_ANT_FREQ` | 3.5 Hz | `antenna_animator.py` |
+| `_PAT_ANT_AMP` | 10.0 deg | `antenna_animator.py` |
 
 ## Calibration Procedure
 
@@ -163,7 +163,7 @@ Set `ANTENNA_DEBUG = True` in `main.py` to enable diagnostic logging to `/tmp/an
 3. Watch the antennas. If movement is jerky, increase `ANTENNA_SMOOTH_TAU` by 0.02 increments.
 4. Switch to `excited` mood. If the oscillation looks sluggish or damped, decrease `ANTENNA_SMOOTH_TAU` or increase `ANTENNA_MAX_SLEW`.
 5. Pat the robot's head. If the vibration is too faint, increase `_PAT_ANT_AMP` or decrease `ANTENNA_SMOOTH_TAU`.
-6. If stuttering persists despite tuning, enable `ANTENNA_DEBUG = True` and check `/tmp/antenna_diag.log` to distinguish software-side issues from driver/SDK-side issues.
+6. If stuttering persists despite tuning, enable `ANTENNA_DEBUG = True` in `antenna_animator.py` and check `/tmp/antenna_diag.log` to distinguish software-side issues from driver/SDK-side issues.
 7. Toggle antenna modes via API to verify transitions:
    - `curl -X POST http://localhost:8042/api/antenna/mode -H 'Content-Type: application/json' -d '{"mode":"off"}'`
    - `curl -X POST http://localhost:8042/api/antenna/mode -H 'Content-Type: application/json' -d '{"mode":"auto"}'`
