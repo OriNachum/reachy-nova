@@ -52,6 +52,8 @@ class WakeWordDetector:
         logger.info(f"[WakeWord] Loading model {model_name!r} …")
         self._model = nemo_asr.models.ASRModel.from_pretrained(model_name)
         self._model.eval()
+        # Suppress NeMo's per-call "Transcribing..." INFO messages
+        logging.getLogger("nemo").setLevel(logging.WARNING)
         logger.info(f"[WakeWord] Ready — phrase: {self._phrase!r}, interval: {transcribe_interval}s")
 
     # ------------------------------------------------------------------
