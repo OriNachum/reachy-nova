@@ -2,14 +2,15 @@
 
 Integrates Amazon Nova Sonic (voice), Nova 2 Lite (vision), and Nova Act (browser)
 to create an interactive AI-powered robot experience.
+
+This file is the thin orchestrator: subsystem instantiation, callback wiring,
+and the 50Hz main loop. All logic is delegated to focused modules.
 """
 
-import json
 import logging
 import os
 import threading
 import time
-import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -18,9 +19,8 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 import numpy as np
-from pydantic import BaseModel
 from reachy_mini import ReachyMini, ReachyMiniApp
-from reachy_mini.reachy_mini import SLEEP_ANTENNAS_JOINT_POSITIONS, SLEEP_HEAD_JOINT_POSITIONS
+from reachy_mini.reachy_mini import SLEEP_ANTENNAS_JOINT_POSITIONS
 from reachy_mini.utils import create_head_pose
 
 from .nova_sonic import NovaSonic, OUTPUT_SAMPLE_RATE
@@ -36,15 +36,22 @@ from .face_manager import FaceManager
 from .face_recognition import FaceRecognition
 from .emotions import EmotionalState
 from .session_state import SessionState
-from .sleep_mode import SleepManager
-from .temporal import utc_now_precise, utc_now_vague, format_event
+from .temporal import utc_now_vague, format_event
+
+from .state import State
+from .nova_mqtt import NovaMQTT
+from .gestures import GestureEngine
+from .nova_context import NovaContext
+from .skill_executors import register_all as register_skill_executors
+from .api_routes import register_routes
+from .sleep_orchestrator import SleepOrchestrator
+from .audio_pipeline import preprocess_mic_audio, resample_output
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Robot animation parameters
 IDLE_YAW_SPEED = 0.15      # Slow idle head sweep
-LISTEN_YAW_SPEED = 0.0     # Stay still when listening
 SPEAK_YAW_SPEED = 0.3      # Animated when speaking
 
 # All moods available to the system
@@ -60,77 +67,60 @@ def ease_sin(t: float, freq: float) -> float:
 
 
 def ease_sin_soft(t: float, freq: float) -> float:
-    """Sine-of-sine — extra dwell time at the extremes for organic feel.
-
-    sin(π/2 · sin(θ)) spends more time near ±1 and moves faster
-    through the center, giving a softer, more deliberate motion.
-    """
+    """Sine-of-sine — extra dwell time at the extremes for organic feel."""
     return float(np.sin(0.5 * np.pi * np.sin(2.0 * np.pi * freq * t)))
 
 
 # --- Mood antenna profiles ---
-# Each mood defines: (frequency, amplitude, phase_pattern, easing_fn)
-# phase_pattern: "oppose" = [a, -a], "sync" = [a, a], or a custom callable
 MOOD_ANTENNAS = {
-    # Cheerful default - gentle opposing sway
     "happy": {
         "freq": 0.25, "amp": 18.0, "phase": "oppose",
         "ease": ease_sin,
     },
-    # High energy - faster, bigger wiggles
     "excited": {
         "freq": 0.7, "amp": 30.0, "phase": "oppose",
         "ease": ease_sin,
     },
-    # Attentive - antennas tilt forward together
     "curious": {
         "freq": 0.35, "amp": 18.0, "phase": "sync",
         "ease": ease_sin,
-        "offset": 10.0,  # bias forward
+        "offset": 10.0,
     },
-    # Processing - asymmetric, one up one tilted
     "thinking": {
         "freq": 0.12, "amp": 15.0, "phase": "custom",
         "ease": ease_sin_soft,
     },
-    # Droopy, slow backward lean
     "sad": {
         "freq": 0.08, "amp": 8.0, "phase": "sync",
         "ease": ease_sin_soft,
-        "offset": -25.0,  # antennas pulled back
+        "offset": -25.0,
     },
-    # Low sag, barely moving
     "disappointed": {
         "freq": 0.06, "amp": 5.0, "phase": "sync",
         "ease": ease_sin_soft,
         "offset": -20.0,
     },
-    # Quick perk then settle
     "surprised": {
         "freq": 0.5, "amp": 25.0, "phase": "oppose",
         "ease": ease_sin,
-        "offset": 15.0,  # antennas perked up
+        "offset": 15.0,
     },
-    # Very slow, drooping
     "sleepy": {
         "freq": 0.04, "amp": 4.0, "phase": "sync",
         "ease": ease_sin_soft,
         "offset": -18.0,
     },
-    # Held high with subtle movement
     "proud": {
         "freq": 0.15, "amp": 6.0, "phase": "oppose",
         "ease": ease_sin_soft,
-        "offset": 20.0,  # antennas up high
+        "offset": 20.0,
     },
-    # Relaxed gentle movement
     "calm": {
         "freq": 0.12, "amp": 10.0, "phase": "oppose",
         "ease": ease_sin_soft,
     },
 }
 
-# Transition smoothing for mood changes (seconds to blend)
 MOOD_BLEND_TIME = 1.5
 
 
@@ -141,46 +131,15 @@ class ReachyNova(ReachyMiniApp):
     def run(self, reachy_mini: ReachyMini, stop_event: threading.Event):
         t0 = time.time()
 
-        # --- Shared state ---
-        state_lock = threading.Lock()
-        app_state = {
-            "voice_state": "idle",
-            "vision_enabled": True,
-            "vision_description": "",
-            "vision_analyzing": False,
-            "browser_state": "idle",
-            "browser_task": "",
-            "browser_result": "",
-            "browser_screenshot": "",
-            "last_user_text": "",
-            "last_assistant_text": "",
-            "antenna_mode": "auto",  # auto, off
-            "mood": "happy",  # see VALID_MOODS
-            "tracking_enabled": True,
-            "tracking_mode": "idle",  # idle, speaker, face, snap
-            "memory_state": "idle",
-            "memory_last_context": "",
-            "slack_state": "idle",
-            "slack_last_event": "",
-            "head_override": None,        # None or {"yaw": float, "pitch": float}
-            "head_override_time": 0.0,    # timestamp for 30s safety timeout
-            "speech_enabled": True,       # False = mute audio output to speaker
-            "movement_enabled": True,     # False = freeze head + body at current position
-            "face_recognized": "",        # currently recognized person name
-            "face_count": 0,              # number of permanent faces stored
-            "emotion_levels": {},         # current emotion values
-            "emotion_boredom": 0.0,       # boredom accumulator
-            "emotion_wounds": [],         # active emotional wounds
-            "gesture_active": False,      # True while gesture animation owns the head
-            "gesture_name": "",           # current gesture being played
-            "sleep_mode": "awake",        # awake, falling_asleep, sleeping, waking_up
-            "pat_antenna_time": 0.0,      # timestamp for level 1 antenna vibration
-        }
+        # --- Core state ---
+        mqtt = NovaMQTT()
+        mqtt.start()
 
-        # --- Emotional State System ---
+        state = State(on_change=mqtt.on_state_change)
+
         emotional_state = EmotionalState()
 
-        # --- Session Persistence ---
+        # --- Session persistence ---
         session = SessionState()
         previous_session = session.load()
         restart_type, restart_elapsed = session.classify_restart(previous_session)
@@ -188,79 +147,7 @@ class ReachyNova(ReachyMiniApp):
             emotional_state.restore_state(previous_session["emotions"], restart_elapsed)
         session.mark_started()
 
-        # --- Sleep Mode ---
-        sleep_manager = SleepManager(
-            on_state_change=lambda state: update_state(sleep_mode=state),
-        )
-        _high_boredom_start = 0.0  # timestamp for auto-sleep
-        _startup_context_injected = False
-
-        def update_state(**kwargs):
-            mood_changed = None
-            with state_lock:
-                app_state.update(kwargs)
-                if "mood" in kwargs:
-                    mood_changed = kwargs["mood"]
-            # Publish OUTSIDE the lock — never block the main loop on MQTT I/O
-            if mqtt_available and mood_changed is not None:
-                publish_state("mood", {"mood": mood_changed})
-
-        # --- MQTT client (optional, for Nervous System) ---
-        mqtt_available = False
-        mqtt_client = None
-        try:
-            import paho.mqtt.client as paho_mqtt
-
-            def _on_mqtt_connect(client, userdata, flags, rc, properties=None):
-                nonlocal mqtt_available
-                mqtt_available = True
-                client.subscribe("nova/inject")
-                logger.info(f"MQTT connected (rc={rc}) — subscribed to nova/inject")
-
-            def _on_mqtt_disconnect(client, userdata, flags, rc, properties=None):
-                nonlocal mqtt_available
-                mqtt_available = False
-                logger.warning(f"MQTT disconnected (rc={rc}) — falling back to direct mode")
-
-            mqtt_client = paho_mqtt.Client(
-                paho_mqtt.CallbackAPIVersion.VERSION2,
-                client_id="reachy-nova-app",
-            )
-            mqtt_client.on_connect = _on_mqtt_connect
-            mqtt_client.on_disconnect = _on_mqtt_disconnect
-            mqtt_client.reconnect_delay_set(min_delay=1, max_delay=30)
-            mqtt_client.connect(
-                os.environ.get("MQTT_BROKER", "localhost"),
-                int(os.environ.get("MQTT_PORT", "1883")),
-                keepalive=60,
-            )
-            mqtt_client.loop_start()
-            mqtt_available = True
-            logger.info("MQTT started — Nervous System integration active")
-        except Exception as e:
-            logger.warning(f"MQTT not available — direct callbacks only: {e}")
-
-        def publish_event(source: str, event_type: str, payload: dict):
-            """Publish a pure data event to MQTT."""
-            if not mqtt_available:
-                return
-            event = {
-                "event_id": str(uuid.uuid4()),
-                "type": event_type,
-                "source": source,
-                "payload": payload,
-                "timestamp": time.time(),
-            }
-            topic = f"nova/events/{source}/{event_type}"
-            mqtt_client.publish(topic, json.dumps(event))
-
-        def publish_state(key: str, value: dict):
-            """Publish retained state to MQTT."""
-            if not mqtt_available:
-                return
-            mqtt_client.publish(f"nova/state/{key}", json.dumps(value), retain=True)
-
-        # --- Audio output buffer ---
+        # --- Audio output buffer (stays in main — only used by callbacks + main loop) ---
         audio_output_buffer = []
         audio_lock = threading.Lock()
         audio_playing = False
@@ -289,17 +176,15 @@ class ReachyNova(ReachyMiniApp):
             except Exception as e:
                 logger.warning(f"[Barge-in] Hardware buffer clear failed: {e}")
 
-        # --- Nova 2 Lite (Vision) ---
+        # --- Nova Vision ---
         def on_vision_description(desc: str):
-            # Discard stale vision callbacks during sleep
-            if sleep_manager.state != "awake":
+            if sleep_orch.state != "awake":
                 logger.debug("[Vision] Discarding description during sleep mode")
                 return
             emotional_state.apply_event("vision_description")
-            update_state(vision_description=desc, vision_analyzing=False)
+            state.update(vision_description=desc, vision_analyzing=False)
             logger.info(f"[Vision] {desc}")
-            # Nervous System decides whether/when to inject via MQTT
-            publish_event("vision", "vision_description", {"description": desc})
+            mqtt.publish_event("vision", "vision_description", {"description": desc})
 
         vision = NovaVision(
             on_description=on_vision_description,
@@ -309,18 +194,15 @@ class ReachyNova(ReachyMiniApp):
         # --- Face Recognition ---
         face_manager = FaceManager()
         face_manager.load()
-        update_state(face_count=face_manager.get_face_count())
+        state.update(face_count=face_manager.get_face_count())
 
         def on_face_match(unique_id: str, name: str, score: float):
             emotional_state.apply_event("face_recognized")
-            update_state(face_recognized=name)
-            publish_event("face", "face_recognized", {
+            state.update(face_recognized=name)
+            mqtt.publish_event("face", "face_recognized", {
                 "id": unique_id, "name": name, "score": score,
             })
-            # Greet only if not currently speaking
-            with state_lock:
-                vs = app_state["voice_state"]
-            if vs != "speaking":
+            if state.get("voice_state") != "speaking":
                 sonic.inject_text(format_event(f"You notice {name} is here.", t0))
 
         face_recognition = FaceRecognition(
@@ -332,62 +214,20 @@ class ReachyNova(ReachyMiniApp):
         skill_manager = SkillManager()
         skill_manager.discover()
 
-        # Register look skill executor (needs vision instance)
-        def look_executor(params: dict) -> str:
-            query = params.get("query", "What do you see?")
-            return vision.analyze_latest(query)
-
-        skill_manager.register_executor("look", look_executor)
-
-        # Register mood skill executor
-        def mood_executor(params: dict) -> str:
-            event = params.get("event")
-            if event:
-                if event in emotional_state.get_event_names():
-                    emotional_state.apply_event(event)
-                    return f"[Emotion event '{event}' applied]"
-                return f"[Unknown event '{event}'. Available: {', '.join(emotional_state.get_event_names())}]"
-            mood = params.get("mood", "happy").lower()
-            if mood not in VALID_MOODS:
-                return f"[Unknown mood '{mood}'. Available: {', '.join(sorted(VALID_MOODS))}]"
-            emotional_state.set_mood_override(mood, duration=10.0)
-            return f"[Mood override set to {mood} for 10s]"
-
-        skill_manager.register_executor(
-            "mood",
-            mood_executor,
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "mood": {
-                        "type": "string",
-                        "description": "Direct mood override (temporary, 10s). Use 'event' for natural emotion changes.",
-                        "enum": sorted(VALID_MOODS),
-                    },
-                    "event": {
-                        "type": "string",
-                        "description": "Emotion event to apply (preferred over mood override)",
-                        "enum": emotional_state.get_event_names(),
-                    },
-                },
-            },
-        )
-
-        # --- Nova Act (Browser) ---
+        # --- Browser ---
         def on_browser_result(result: str):
-            update_state(browser_result=result, browser_task="")
+            state.update(browser_result=result, browser_task="")
             logger.info(f"[Browser] {result}")
 
         def on_browser_screenshot(b64: str):
-            update_state(browser_screenshot=b64)
+            state.update(browser_screenshot=b64)
 
-        def on_browser_state(state: str):
-            update_state(browser_state=state)
+        def on_browser_state(s: str):
+            state.update(browser_state=s)
 
         def on_browser_progress(message: str):
-            """Narrate browser progress through the voice stream."""
             logger.info(f"[Browser progress] {message}")
-            publish_event("browser", "progress", {"message": message})
+            mqtt.publish_event("browser", "progress", {"message": message})
 
         browser = NovaBrowser(
             on_result=on_browser_result,
@@ -398,778 +238,135 @@ class ReachyNova(ReachyMiniApp):
             chrome_channel="chromium",
         )
 
-        # Register browse skill executor
-        def browse_executor(params: dict) -> str:
-            query = params.get("query", "")
-            url = params.get("url", "https://www.google.com")
-            update_state(browser_task=query)
-            return browser.execute(query, url)
-
-        skill_manager.register_executor(
-            "browse",
-            browse_executor,
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "What to search for or do in the browser",
-                    },
-                    "url": {
-                        "type": "string",
-                        "description": "URL to navigate to (defaults to Google)",
-                    },
-                },
-                "required": ["query"],
-            },
-        )
-
-        # --- Nova Memory ---
+        # --- Memory ---
         def on_memory_progress(message: str):
             logger.info(f"[Memory progress] {message}")
-            publish_event("memory", "query_result", {"result": message})
-
-        def on_memory_result(result: str):
-            update_state(memory_last_context=result)
-
-        def on_memory_state(state: str):
-            update_state(memory_state=state)
+            mqtt.publish_event("memory", "query_result", {"result": message})
 
         memory = NovaMemory(
             on_progress=on_memory_progress,
-            on_result=on_memory_result,
-            on_state_change=on_memory_state,
+            on_result=lambda r: state.update(memory_last_context=r),
+            on_state_change=lambda s: state.update(memory_state=s),
         )
 
-        # --- Nova Feedback (RLHF) ---
+        # --- Feedback ---
         feedback = NovaFeedback(session_id=session.session_id)
 
-        # Register feedback skill executors
-        def remember_positively_executor(params: dict) -> str:
-            what = params.get("what", "")
-            trigger = params.get("trigger", "")
-            return feedback.record(sentiment="positive", what=what, trigger=trigger)
-
-        skill_manager.register_executor(
-            "remember_positively",
-            remember_positively_executor,
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "what": {
-                        "type": "string",
-                        "description": "What you did that was liked",
-                    },
-                    "trigger": {
-                        "type": "string",
-                        "description": "What triggered the feedback (e.g. head scratch, verbal praise)",
-                    },
-                },
-                "required": ["what"],
-            },
-        )
-
-        def remember_negatively_executor(params: dict) -> str:
-            what = params.get("what", "")
-            trigger = params.get("trigger", "")
-            return feedback.record(sentiment="negative", what=what, trigger=trigger)
-
-        skill_manager.register_executor(
-            "remember_negatively",
-            remember_negatively_executor,
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "what": {
-                        "type": "string",
-                        "description": "What you did that was disliked",
-                    },
-                    "trigger": {
-                        "type": "string",
-                        "description": "What triggered the feedback (e.g. verbal correction, told to stop)",
-                    },
-                },
-                "required": ["what"],
-            },
-        )
-
-        # Register memory skill executor
-        def memory_executor(params: dict) -> str:
-            query = params.get("query", "")
-            mode = params.get("mode", "query")
-            if mode == "store":
-                return memory.store(query)
-            elif mode == "context":
-                return memory.get_startup_context()
-            else:
-                return memory.query(query)
-
-        skill_manager.register_executor(
-            "memory",
-            memory_executor,
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "What to recall, look up, or remember",
-                    },
-                    "mode": {
-                        "type": "string",
-                        "description": "query (default), store, or context",
-                        "enum": ["query", "store", "context"],
-                    },
-                },
-                "required": ["query"],
-            },
-        )
-
-        # --- Nova Slack ---
+        # --- Slack ---
         def on_slack_event(event: SlackEvent):
             summary = f"[{event.user}] {event.text[:80]}" if event.text else f"[{event.user}] ({event.type})"
-            update_state(slack_last_event=summary)
+            state.update(slack_last_event=summary)
             logger.info(f"[Slack event] {summary}")
-            publish_event("slack", f"slack_{event.type}", {
-                "user": event.user,
-                "text": event.text,
-                "channel": event.channel,
-                "ts": event.ts,
-                "is_mention": event.is_mention,
-                "is_dm": event.is_dm,
+            mqtt.publish_event("slack", f"slack_{event.type}", {
+                "user": event.user, "text": event.text,
+                "channel": event.channel, "ts": event.ts,
+                "is_mention": event.is_mention, "is_dm": event.is_dm,
             })
-
-        def on_slack_state(state: str):
-            update_state(slack_state=state)
 
         slack_channel_ids = [
             ch.strip()
             for ch in os.environ.get("SLACK_CHANNEL_IDS", "").split(",")
             if ch.strip()
         ]
-
         slack_bot = NovaSlack(
             on_event=on_slack_event,
-            on_state_change=on_slack_state,
+            on_state_change=lambda s: state.update(slack_state=s),
             channel_ids=slack_channel_ids,
         )
 
-        # Register slack skill executor
-        def slack_executor(params: dict) -> str:
-            return slack_bot.execute(params)
-
-        skill_manager.register_executor(
-            "slack",
-            slack_executor,
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "description": "The Slack action to perform",
-                        "enum": [
-                            "send_message",
-                            "read_messages",
-                            "reply_to_thread",
-                            "add_reaction",
-                        ],
-                    },
-                    "text": {
-                        "type": "string",
-                        "description": "Message text (for send_message/reply_to_thread)",
-                    },
-                    "channel": {
-                        "type": "string",
-                        "description": "Slack channel ID (defaults to first configured channel)",
-                    },
-                    "thread_ts": {
-                        "type": "string",
-                        "description": "Thread timestamp for reply_to_thread",
-                    },
-                    "emoji": {
-                        "type": "string",
-                        "description": "Emoji name for add_reaction (e.g. thumbsup)",
-                    },
-                    "ts": {
-                        "type": "string",
-                        "description": "Message timestamp for add_reaction",
-                    },
-                    "count": {
-                        "type": "number",
-                        "description": "Number of messages to read (default 10, max 50)",
-                    },
-                },
-                "required": ["action"],
-            },
-        )
-
-        # --- Control skill (head/body movement) ---
-        # Smoothing state shared between executor and main loop
-        _smooth_yaw = 0.0
-        _smooth_pitch = 0.0
-        _current_body_yaw = 0.0  # tracked in degrees
-
-        def control_executor(params: dict) -> str:
-            nonlocal _smooth_yaw, _smooth_pitch, _current_body_yaw
-            action = params.get("action", "")
-
-            if action == "move_head":
-                yaw = max(-45, min(45, float(params.get("yaw", 0))))
-                pitch = max(-15, min(25, float(params.get("pitch", 0))))
-                update_state(
-                    tracking_enabled=False,
-                    tracking_mode="idle",
-                    head_override={"yaw": yaw, "pitch": pitch},
-                    head_override_time=time.time(),
-                )
-                return f"[Moving head to yaw={yaw:.0f}, pitch={pitch:.0f}. Tracking disabled.]"
-
-            elif action == "move_body":
-                body_yaw = max(-25, min(25, float(params.get("body_yaw", 0))))
-                duration = max(0.5, min(5, float(params.get("duration", 1.5))))
-                start = _current_body_yaw
-                steps = int(duration / 0.02)
-                for i in range(steps + 1):
-                    alpha = 0.5 * (1 - np.cos(np.pi * i / steps))
-                    current = start + alpha * (body_yaw - start)
-                    reachy_mini.set_target(body_yaw=np.radians(current))
-                    time.sleep(0.02)
-                _current_body_yaw = body_yaw
-                return f"[Body rotated to {body_yaw:.0f} over {duration:.1f}s.]"
-
-            elif action == "enable_tracking":
-                tracker.current_yaw = _smooth_yaw
-                tracker.current_pitch = _smooth_pitch
-                update_state(tracking_enabled=True, head_override=None)
-                return "[Tracking re-enabled.]"
-
-            elif action == "disable_tracking":
-                update_state(tracking_enabled=False, tracking_mode="idle")
-                return "[Tracking disabled.]"
-
-            return f"[Unknown control action: {action}]"
-
-        skill_manager.register_executor(
-            "control",
-            control_executor,
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "description": "The control action to perform",
-                        "enum": [
-                            "move_head",
-                            "move_body",
-                            "enable_tracking",
-                            "disable_tracking",
-                        ],
-                    },
-                    "yaw": {
-                        "type": "number",
-                        "description": "Head yaw angle in degrees (-45 to 45, negative=right, positive=left). For move_head.",
-                    },
-                    "pitch": {
-                        "type": "number",
-                        "description": "Head pitch angle in degrees (-15 to 25, negative=down, positive=up). For move_head.",
-                    },
-                    "body_yaw": {
-                        "type": "number",
-                        "description": "Body rotation in degrees (-25 to 25). For move_body.",
-                    },
-                    "duration": {
-                        "type": "number",
-                        "description": "Duration in seconds for body rotation (default 1.5). For move_body.",
-                    },
-                },
-                "required": ["action"],
-            },
-        )
-
-        # --- Gesture skill executor ---
+        # --- Gesture engine ---
         gesture_cancel_event = threading.Event()
+        gesture_engine = GestureEngine(reachy_mini, state, emotional_state, gesture_cancel_event)
 
-        def gesture_executor(params: dict) -> str:
-            nonlocal _smooth_yaw, _smooth_pitch
+        # --- Tracking ---
+        last_vision_event_time = 0.0
+        VISION_EVENT_COOLDOWN = 3.0
 
-            gesture = params.get("gesture", "").lower()
-            if gesture not in ("yes", "no", "curious", "pondering", "boredom", "nuzzle", "purr", "enjoy"):
-                return f"[Unknown gesture '{gesture}'. Available: yes, no, curious, pondering, boredom, nuzzle, purr, enjoy]"
+        def on_tracking_event(event_type: str, data: dict):
+            nonlocal last_vision_event_time
 
-            with state_lock:
-                if not app_state["movement_enabled"]:
-                    return "[Movement disabled (presentation mode). Cannot perform gesture.]"
+            sleep_state = sleep_orch.state
+            if sleep_state != "awake":
+                if event_type == "snap_detected" and sleep_state == "sleeping":
+                    logger.info("[Sleep] Snap detected — waking up!")
+                    sleep_orch.initiate_wake()
+                return
 
-            # Cancel any running gesture
-            gesture_cancel_event.set()
-            time.sleep(0.05)
-            gesture_cancel_event.clear()
+            mqtt.publish_event("tracking", event_type, data)
 
-            # Capture current head position as animation center
-            center_yaw = _smooth_yaw
-            center_pitch = _smooth_pitch
+            if event_type == "pat_level1":
+                logger.info("[Tracking] Pat level 1 — gentle touch")
+                emotional_state.apply_event("pat_level1")
+                state.update(pat_antenna_time=time.time())
+                if state.get("voice_state") != "speaking":
+                    sonic.inject_text(format_event("You feel a gentle tap on your head.", t0))
+                return
 
-            # Take head ownership — tracking stays enabled so the tracker
-            # keeps updating its target (face/speaker) in the background.
-            # The gesture_active flag prevents the main loop from sending
-            # head commands, so there's no conflict.
-            update_state(
-                gesture_active=True,
-                gesture_name=gesture,
-                head_override=None,
-            )
+            if event_type == "pat_level2":
+                logger.info("[Tracking] Pat level 2 — sustained scratching!")
+                emotional_state.apply_event("pat_level2")
+                if state.get("voice_state") != "speaking":
+                    sonic.inject_text(format_event(
+                        "Someone is scratching your head and it feels wonderful. "
+                        "You're really enjoying this. "
+                        "This probably means they liked what you just did.",
+                        t0,
+                    ))
+                return
 
-            RAMP_TIME = 0.2  # seconds to ease into full amplitude
+            if event_type == "snap_detected":
+                emotional_state.apply_event("snap_detected")
+            elif event_type == "person_lost":
+                emotional_state.apply_event("person_lost")
 
-            try:
-                dt = 0.02  # 50Hz animation loop
+            now = time.time()
+            if now - last_vision_event_time < VISION_EVENT_COOLDOWN:
+                return
+            if event_type in ("person_detected", "snap_detected", "mode_changed"):
+                last_vision_event_time = now
+                logger.info(f"[Tracking event] {event_type} → triggering vision")
+                vision.trigger_analyze()
 
-                if gesture == "yes":
-                    # Nodding: pitch oscillation, 1.2s, 2.5Hz, 12deg amplitude
-                    # Smooth ramp-up + decay envelope for organic feel
-                    duration = 1.2
-                    freq = 2.5
-                    amp = 12.0
-                    elapsed = 0.0
-                    while elapsed < duration and not gesture_cancel_event.is_set():
-                        ramp = 0.5 * (1.0 - np.cos(np.pi * min(elapsed / RAMP_TIME, 1.0)))
-                        decay = 1.0 - 0.7 * (elapsed / duration)
-                        envelope = ramp * decay
-                        pitch = center_pitch + amp * envelope * np.sin(2.0 * np.pi * freq * elapsed)
-                        pitch = max(-15.0, min(25.0, pitch))
-                        yaw = max(-45.0, min(45.0, center_yaw))
-                        pose = create_head_pose(yaw=yaw, pitch=pitch, degrees=True)
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
+        tracker = TrackingManager(on_event=on_tracking_event)
+        last_doa_time = 0.0
 
-                elif gesture == "no":
-                    # Head shake: yaw oscillation, 1.5s, 2.0Hz, 15deg amplitude
-                    # Smooth ramp-up + decay envelope for organic feel
-                    duration = 1.5
-                    freq = 2.0
-                    amp = 15.0
-                    elapsed = 0.0
-                    while elapsed < duration and not gesture_cancel_event.is_set():
-                        ramp = 0.5 * (1.0 - np.cos(np.pi * min(elapsed / RAMP_TIME, 1.0)))
-                        decay = 1.0 - 0.65 * (elapsed / duration)
-                        envelope = ramp * decay
-                        yaw = center_yaw + amp * envelope * np.sin(2.0 * np.pi * freq * elapsed)
-                        yaw = max(-45.0, min(45.0, yaw))
-                        pitch = max(-15.0, min(25.0, center_pitch))
-                        pose = create_head_pose(yaw=yaw, pitch=pitch, degrees=True)
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
-
-                elif gesture == "curious":
-                    # Head tilt (roll) to the side — like a curious dog
-                    # Also trigger curious mood for antenna sync
-                    emotional_state.set_mood_override("curious", duration=10.0)
-                    target_roll = 15.0  # degrees, tilt right
-
-                    # Phase 1: cosine ease into tilted pose (0-0.4s)
-                    elapsed = 0.0
-                    while elapsed < 0.4 and not gesture_cancel_event.is_set():
-                        alpha = 0.5 * (1.0 - np.cos(np.pi * elapsed / 0.4))
-                        roll = alpha * target_roll
-                        pose = create_head_pose(
-                            yaw=center_yaw, pitch=center_pitch, roll=roll, degrees=True,
-                        )
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
-
-                    # Phase 2: hold tilted with subtle roll oscillation (0.4-1.4s)
-                    elapsed = 0.0
-                    while elapsed < 1.0 and not gesture_cancel_event.is_set():
-                        osc = 2.0 * np.sin(2.0 * np.pi * 0.5 * elapsed)
-                        roll = target_roll + osc
-                        pose = create_head_pose(
-                            yaw=center_yaw, pitch=center_pitch, roll=roll, degrees=True,
-                        )
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
-
-                    # Phase 3: cosine ease back to neutral (1.4-1.8s)
-                    elapsed = 0.0
-                    while elapsed < 0.4 and not gesture_cancel_event.is_set():
-                        alpha = 0.5 * (1.0 - np.cos(np.pi * elapsed / 0.4))
-                        roll = target_roll * (1.0 - alpha)
-                        pose = create_head_pose(
-                            yaw=center_yaw, pitch=center_pitch, roll=roll, degrees=True,
-                        )
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
-
-                elif gesture == "pondering":
-                    # Look up and to the side diagonally — thinking pose
-                    emotional_state.set_mood_override("thinking", duration=10.0)
-                    target_yaw = max(-45.0, min(45.0, center_yaw - 20.0))
-                    target_pitch = max(-15.0, min(25.0, center_pitch - 12.0))
-
-                    # Phase 1: cosine ease into pondering pose (0-0.5s)
-                    elapsed = 0.0
-                    while elapsed < 0.5 and not gesture_cancel_event.is_set():
-                        alpha = 0.5 * (1.0 - np.cos(np.pi * elapsed / 0.5))
-                        yaw = center_yaw + alpha * (target_yaw - center_yaw)
-                        pitch = center_pitch + alpha * (target_pitch - center_pitch)
-                        pose = create_head_pose(yaw=yaw, pitch=pitch, degrees=True)
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
-
-                    # Phase 2: hold with subtle drift (0.5-1.8s)
-                    elapsed = 0.0
-                    while elapsed < 1.3 and not gesture_cancel_event.is_set():
-                        drift_yaw = 3.0 * np.sin(2.0 * np.pi * 0.3 * elapsed)
-                        drift_pitch = 2.0 * np.sin(2.0 * np.pi * 0.2 * elapsed)
-                        yaw = max(-45.0, min(45.0, target_yaw + drift_yaw))
-                        pitch = max(-15.0, min(25.0, target_pitch + drift_pitch))
-                        pose = create_head_pose(yaw=yaw, pitch=pitch, degrees=True)
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
-
-                    # Phase 3: cosine ease back to center (1.8-2.3s)
-                    elapsed = 0.0
-                    while elapsed < 0.5 and not gesture_cancel_event.is_set():
-                        alpha = 0.5 * (1.0 - np.cos(np.pi * elapsed / 0.5))
-                        yaw = target_yaw + alpha * (center_yaw - target_yaw)
-                        pitch = target_pitch + alpha * (center_pitch - target_pitch)
-                        pose = create_head_pose(yaw=yaw, pitch=pitch, degrees=True)
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
-
-                elif gesture == "boredom":
-                    # Slow, disengaged look away and down
-                    emotional_state.set_mood_override("sleepy", duration=10.0)
-                    # Look away from common center (if left, look right, etc)
-                    direction = -1.0 if center_yaw > 0 else 1.0
-                    target_yaw = max(-45.0, min(45.0, center_yaw + direction * 30.0))
-                    target_pitch = -25.0
-
-                    # Phase 1: Very slow slide into bored pose (0-2.0s)
-                    elapsed = 0.0
-                    while elapsed < 2.0 and not gesture_cancel_event.is_set():
-                        alpha = 0.5 * (1.0 - np.cos(np.pi * elapsed / 2.0))
-                        yaw = center_yaw + alpha * (target_yaw - center_yaw)
-                        pitch = center_pitch + alpha * (target_pitch - center_pitch)
-                        pose = create_head_pose(yaw=yaw, pitch=pitch, degrees=True)
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
-
-                    # Phase 2: Sigh/Sag (2.0-2.5s)
-                    elapsed = 0.0
-                    while elapsed < 0.5 and not gesture_cancel_event.is_set():
-                        dip = 5.0 * np.sin(np.pi * elapsed / 0.5)
-                        pitch_dip = target_pitch - dip
-                        pose = create_head_pose(yaw=target_yaw, pitch=pitch_dip, degrees=True)
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
-
-                    # Phase 3: Hold while drifting (2.5-4.0s)
-                    elapsed = 0.0
-                    while elapsed < 1.5 and not gesture_cancel_event.is_set():
-                        drift = 2.0 * np.sin(2.0 * np.pi * 0.2 * elapsed)
-                        pose = create_head_pose(
-                            yaw=target_yaw + drift, pitch=target_pitch, degrees=True
-                        )
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
-
-                    # Phase 4: Slow recovery (4.0-5.5s)
-                    elapsed = 0.0
-                    while elapsed < 1.5 and not gesture_cancel_event.is_set():
-                        alpha = 0.5 * (1.0 - np.cos(np.pi * elapsed / 1.5))
-                        yaw = target_yaw + alpha * (center_yaw - target_yaw)
-                        pitch = target_pitch + alpha * (center_pitch - target_pitch)
-                        pose = create_head_pose(yaw=yaw, pitch=pitch, degrees=True)
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
-
-                elif gesture == "nuzzle":
-                    # Side-to-side yaw oscillation with subtle roll — like a cat nuzzling
-                    emotional_state.set_mood_override("excited", duration=5.0)
-                    duration = 2.5
-                    freq = 1.8
-                    yaw_amp = 12.0
-                    roll_amp = 5.0
-                    elapsed = 0.0
-                    while elapsed < duration and not gesture_cancel_event.is_set():
-                        ramp = 0.5 * (1.0 - np.cos(np.pi * min(elapsed / RAMP_TIME, 1.0)))
-                        decay = 1.0 - 0.6 * (elapsed / duration)
-                        envelope = ramp * decay
-                        phase = 2.0 * np.pi * freq * elapsed
-                        yaw = center_yaw + yaw_amp * envelope * np.sin(phase)
-                        yaw = max(-45.0, min(45.0, yaw))
-                        roll = roll_amp * envelope * np.sin(phase + 0.5)
-                        pitch = max(-15.0, min(25.0, center_pitch))
-                        pose = create_head_pose(yaw=yaw, pitch=pitch, roll=roll, degrees=True)
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
-
-                elif gesture == "purr":
-                    # Slow pitch+roll wobble, leaning slightly down — deep contentment
-                    emotional_state.set_mood_override("happy", duration=8.0)
-                    duration = 3.0
-                    lean_pitch = min(25.0, center_pitch + 8.0)
-                    elapsed = 0.0
-                    while elapsed < duration and not gesture_cancel_event.is_set():
-                        ramp = 0.5 * (1.0 - np.cos(np.pi * min(elapsed / 0.4, 1.0)))
-                        decay = 1.0 - 0.3 * (elapsed / duration)
-                        envelope = ramp * decay
-                        pitch = center_pitch + (lean_pitch - center_pitch) * envelope
-                        roll = 4.0 * envelope * np.sin(2.0 * np.pi * 0.8 * elapsed)
-                        yaw = center_yaw + 3.0 * envelope * np.sin(2.0 * np.pi * 0.6 * elapsed)
-                        yaw = max(-45.0, min(45.0, yaw))
-                        pitch = max(-15.0, min(25.0, pitch))
-                        pose = create_head_pose(yaw=yaw, pitch=pitch, roll=roll, degrees=True)
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
-
-                elif gesture == "enjoy":
-                    # Brief lean into touch, short nuzzle, settle back
-                    emotional_state.set_mood_override("happy", duration=5.0)
-
-                    # Phase 1: Lean into touch (0-0.5s)
-                    lean_pitch = min(25.0, center_pitch + 10.0)
-                    elapsed = 0.0
-                    while elapsed < 0.5 and not gesture_cancel_event.is_set():
-                        alpha = 0.5 * (1.0 - np.cos(np.pi * elapsed / 0.5))
-                        pitch = center_pitch + alpha * (lean_pitch - center_pitch)
-                        pose = create_head_pose(yaw=center_yaw, pitch=pitch, degrees=True)
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
-
-                    # Phase 2: Short nuzzle while leaned (0.5-1.5s)
-                    elapsed = 0.0
-                    while elapsed < 1.0 and not gesture_cancel_event.is_set():
-                        decay = 1.0 - 0.4 * elapsed
-                        yaw = center_yaw + 8.0 * decay * np.sin(2.0 * np.pi * 2.0 * elapsed)
-                        yaw = max(-45.0, min(45.0, yaw))
-                        roll = 3.0 * decay * np.sin(2.0 * np.pi * 2.0 * elapsed + 0.5)
-                        pose = create_head_pose(yaw=yaw, pitch=lean_pitch, roll=roll, degrees=True)
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
-
-                    # Phase 3: Settle back (1.5-2.0s)
-                    elapsed = 0.0
-                    while elapsed < 0.5 and not gesture_cancel_event.is_set():
-                        alpha = 0.5 * (1.0 - np.cos(np.pi * elapsed / 0.5))
-                        pitch = lean_pitch + alpha * (center_pitch - lean_pitch)
-                        pose = create_head_pose(yaw=center_yaw, pitch=pitch, degrees=True)
-                        reachy_mini.set_target(head=pose)
-                        time.sleep(dt)
-                        elapsed += dt
-
-                return f"[Gesture '{gesture}' completed.]"
-
-            finally:
-                # Sync smoothing state to pre-gesture position so there's
-                # no jump if head_override kicks in right after.  The tracker
-                # kept running during the gesture, so it already knows where
-                # to point — no need to reset tracker.current_yaw/pitch.
-                _smooth_yaw = center_yaw
-                _smooth_pitch = center_pitch
-                update_state(gesture_active=False, gesture_name="")
-
-        skill_manager.register_executor(
-            "gesture",
-            gesture_executor,
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "gesture": {
-                        "type": "string",
-                        "description": "The gesture to perform",
-                        "enum": ["yes", "no", "curious", "pondering", "boredom", "nuzzle", "purr", "enjoy"],
-                    },
-                },
-                "required": ["gesture"],
-            },
-        )
-
-        # --- Face skill executor ---
-        def face_executor(params: dict) -> str:
-            op = params.get("operation", "")
-            name = params.get("name", "")
-            uid = params.get("unique_id", "")
-            target_id = params.get("target_id", "")
-            target_name = params.get("target_name", "")
-
-            # Admin-only operations
-            admin_ops = {"list", "count", "images", "whois"}
-            if op in admin_ops:
-                if not face_recognition.is_admin_authenticated():
-                    return "[Admin operation only. Admin must be visible to the camera.]"
-
-            if op == "remember":
-                embedding = face_recognition.get_current_embedding()
-                if embedding is None:
-                    return "[No face detected in camera. Please look at me.]"
-                temp_id = face_manager.remember_temporary(embedding)
-                return f"[Face remembered temporarily (15 min). Temp ID: {temp_id}]"
-
-            elif op == "consent":
-                # Find the most recent temp_id
-                temp_id = uid  # uid field reused for temp_id
-                if not temp_id and face_manager.temp_faces:
-                    temp_id = list(face_manager.temp_faces.keys())[-1]
-                if not temp_id:
-                    return "[No temporary face to save. Use 'remember' first.]"
-                if not name:
-                    return "[Full name required for permanent storage.]"
-                result = face_manager.consent(temp_id, name)
-                if result:
-                    update_state(face_count=face_manager.get_face_count())
-                    return f"[Face saved permanently as {name}. ID: {result}]"
-                return "[Failed to save face. Temp ID may be expired or invalid.]"
-
-            elif op == "forget":
-                if not uid or not name:
-                    return "[Both unique_id and name required to forget a face.]"
-                if face_manager.forget(uid, name):
-                    update_state(face_count=face_manager.get_face_count())
-                    return f"[Face {uid} ({name}) deleted.]"
-                return "[Failed to delete. Check ID/name or admin protection.]"
-
-            elif op == "add_angles":
-                if not uid or not name:
-                    return "[Both unique_id and name required.]"
-                embedding = face_recognition.get_current_embedding()
-                if embedding is None:
-                    return "[No face detected in camera. Please look at me.]"
-                if face_manager.add_angles(uid, name, embedding):
-                    return f"[Added new angle for {name}. Recognition should improve.]"
-                return "[Failed to add angle. Check ID and name.]"
-
-            elif op == "merge":
-                if not uid or not name or not target_id or not target_name:
-                    return "[Need unique_id, name, target_id, and target_name to merge.]"
-                if face_manager.merge(uid, name, target_id, target_name):
-                    update_state(face_count=face_manager.get_face_count())
-                    return f"[Merged {target_id} into {uid}. {target_name} merged with {name}.]"
-                return "[Merge failed. Check IDs and names.]"
-
-            elif op == "list":
-                faces = face_manager.list_faces()
-                if not faces:
-                    return "[No faces stored.]"
-                lines = [f"- {f['id']}: {f['name']} ({f['num_embeddings']} embeddings)"
-                         + (" [ADMIN]" if f['is_admin'] else "")
-                         for f in faces]
-                return "[Known faces:\n" + "\n".join(lines) + "]"
-
-            elif op == "count":
-                count = face_manager.get_face_count()
-                return f"[{count} permanent face(s) stored.]"
-
-            elif op == "images":
-                if not uid or not name:
-                    return "[Both unique_id and name required.]"
-                paths = face_manager.get_person_images(uid, name)
-                if not paths:
-                    return "[No images found for that person.]"
-                return f"[{len(paths)} embedding file(s) for {name}.]"
-
-            elif op == "whois":
-                if not name:
-                    return "[Name required for whois lookup.]"
-                found_id = face_manager.get_unique_id(name)
-                if found_id:
-                    return f"[{name} has ID: {found_id}]"
-                return f"[No face found for '{name}'.]"
-
-            return f"[Unknown face operation: {op}]"
-
-        skill_manager.register_executor(
-            "face",
-            face_executor,
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "operation": {
-                        "type": "string",
-                        "description": "The face operation to perform",
-                        "enum": [
-                            "remember", "consent", "forget",
-                            "add_angles", "merge",
-                            "list", "count", "images", "whois",
-                        ],
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "Full name of the person",
-                    },
-                    "unique_id": {
-                        "type": "string",
-                        "description": "Face ID (or temp_id for consent)",
-                    },
-                    "target_id": {
-                        "type": "string",
-                        "description": "Second face ID for merge",
-                    },
-                    "target_name": {
-                        "type": "string",
-                        "description": "Second face name for merge",
-                    },
-                },
-                "required": ["operation"],
-            },
-        )
-
-        # --- Nova Sonic (Voice) ---
+        # --- Voice callbacks ---
         def on_transcript(role: str, text: str):
             feedback.update_conversation(role, text)
             if role == "USER":
-                update_state(last_user_text=text)
+                state.update(last_user_text=text)
                 logger.info(f"[User] {text}")
-                # Check for sleep commands
                 lower = text.lower()
                 if any(kw in lower for kw in ["go to sleep", "time to sleep", "sleep mode", "good night", "nap time"]):
-                    if sleep_manager.state == "awake":
-                        _initiate_sleep()
+                    if sleep_orch.state == "awake":
+                        sleep_orch.initiate_sleep()
                         return
-                # Check for vision commands (fallback keyword path)
                 if any(kw in lower for kw in ["what do you see", "look around", "describe", "what's around"]):
                     vision.trigger_analyze()
-                # Transcript-based emotion detection
                 matched_events = emotional_state.check_transcript(text)
                 for evt in matched_events:
                     emotional_state.apply_event(evt)
                     logger.info(f"[Emotion] Transcript trigger: {evt}")
             else:
                 emotional_state.apply_event("conversation_reply")
-                update_state(last_assistant_text=text)
+                state.update(last_assistant_text=text)
                 logger.info(f"[Nova] {text}")
 
-        def on_voice_state(state: str):
-            update_state(voice_state=state)
-            publish_state("voice", {"state": state})
-            if state == "speaking":
+        def on_voice_state(vs: str):
+            state.update(voice_state=vs)
+            mqtt.publish_state("voice", {"state": vs})
+            if vs == "speaking":
                 emotional_state.apply_event("voice_speaking")
-            elif state == "listening":
+            elif vs == "listening":
                 emotional_state.apply_event("voice_listening")
 
-        # Tool use callback: runs skill in a daemon thread, sends result back
         def on_tool_use(tool_name: str, tool_use_id: str, params: dict):
             def _execute():
                 result = skill_manager.execute(tool_name, params)
                 sonic.send_tool_result(tool_use_id, result)
             threading.Thread(target=_execute, daemon=True).start()
 
-        # Build system prompt with skills context
+        # --- Build system prompt ---
         skills_context = skill_manager.get_system_context()
         system_prompt = (
             "You are Nova. You live in a small robot body called Reachy Mini. "
@@ -1200,402 +397,56 @@ class ReachyNova(ReachyMiniApp):
             voice_id="tiffany",
         )
 
-        # --- Sleep mode helpers (need sonic + sleep_manager in scope) ---
-        def _initiate_sleep():
-            """Stop LLM subsystems, run SDK sleep animation, then enter breathing loop."""
-            nonlocal _high_boredom_start
-            if sleep_manager.state != "awake":
+        # --- Sleep orchestrator ---
+        sleep_orch = SleepOrchestrator(
+            state=state, sonic=sonic, vision=vision, reachy_mini=reachy_mini,
+            gesture_cancel_event=gesture_cancel_event,
+            session=session, memory=memory, feedback=feedback, mqtt=mqtt,
+            stop_event=stop_event,
+            restart_type=restart_type, restart_elapsed=restart_elapsed,
+            previous_session=previous_session, t0=t0,
+        )
+
+        # --- Safety ---
+        safety = SafetyManager()
+
+        # --- Dependency injection context ---
+        ctx = NovaContext(
+            state=state, sonic=sonic, vision=vision, browser=browser,
+            memory=memory, feedback=feedback, slack_bot=slack_bot,
+            tracker=tracker, face_manager=face_manager,
+            face_recognition=face_recognition, skill_manager=skill_manager,
+            gesture_engine=gesture_engine, sleep_orchestrator=sleep_orch,
+            mqtt=mqtt, safety=safety, session=session,
+            emotional_state=emotional_state, reachy_mini=reachy_mini,
+            stop_event=stop_event, t0=t0,
+            gesture_cancel_event=gesture_cancel_event,
+        )
+
+        # --- Register skills and API routes ---
+        register_skill_executors(skill_manager, ctx)
+        register_routes(self.settings_app, ctx)
+
+        # --- Register MQTT inject handler ---
+        def _handle_inject(text: str):
+            if sleep_orch.state != "awake":
                 return
-            logger.info("[Sleep] Initiating sleep — cancelling movements, stopping subsystems")
-            # 1. Cancel any running gesture so it releases head ownership
-            gesture_cancel_event.set()
-            # 2. Clear head override and disable tracking
-            update_state(
-                vision_enabled=False,
-                tracking_enabled=False,
-                tracking_mode="idle",
-                head_override=None,
-                gesture_active=False,
-                gesture_name="",
-            )
-            # Brief pause for gesture thread to see the cancel and exit
-            time.sleep(0.05)
-            gesture_cancel_event.clear()
-            # 3. Stop Sonic
-            sonic.stop()
-            # 4. Clear any pending vision analysis to prevent stale-frame callbacks
-            vision._force_analyze.clear()
-            _high_boredom_start = 0.0
-            # 5. Mark as falling_asleep — main loop short-circuits but sends NO poses
-            #    (the SDK's goto_sleep owns the hardware during this phase)
-            sleep_manager.trigger_sleep()
-            # 6. Run SDK sleep animation in background; when done, hand off to breathing
-            def _sdk_sleep():
-                try:
-                    reachy_mini.goto_sleep()
-                except Exception as e:
-                    logger.warning(f"[Sleep] SDK goto_sleep failed: {e}")
-                # SDK finished — transition to breathing loop
-                sleep_manager.enter_sleeping()
-            threading.Thread(target=_sdk_sleep, daemon=True, name="sdk-sleep").start()
+            tagged = format_event(text, t0)
+            sonic.inject_text(tagged)
+            logger.info(f"[Nervous System] Injected: {tagged[:80]}")
 
-        def _initiate_wake():
-            """Run SDK wake animation and restart LLM subsystems."""
-            nonlocal _startup_context_injected
-            if sleep_manager.state != "sleeping":
-                return
-            logger.info("[Sleep] Initiating wake — restarting Sonic, re-enabling vision/tracking")
-            sleep_manager.trigger_wake()
-            # Run SDK wake animation in background; re-enable subsystems when done
-            def _sdk_wake():
-                nonlocal _startup_context_injected
-                try:
-                    reachy_mini.wake_up()
-                except Exception as e:
-                    logger.warning(f"[Sleep] SDK wake_up failed: {e}")
-                # SDK finished — hand control back to main loop
-                sleep_manager.enter_awake()
-                sonic.restart(stop_event)
-                update_state(vision_enabled=True, tracking_enabled=True)
-                # Deferred startup context injection on first wake
-                if not _startup_context_injected:
-                    _startup_context_injected = True
-                    threading.Thread(
-                        target=_inject_startup_context, daemon=True,
-                        name="memory-startup",
-                    ).start()
-            threading.Thread(target=_sdk_wake, daemon=True, name="sdk-wake").start()
-
-        def _is_in_sleep_position() -> bool:
-            """Check if robot is already physically in the sleep position."""
-            try:
-                head_pos, ant_pos = reachy_mini.get_current_joint_positions()
-                head_dist = np.linalg.norm(
-                    np.array(head_pos) - np.array(SLEEP_HEAD_JOINT_POSITIONS)
-                )
-                ant_diff = np.max(np.abs(
-                    np.array(ant_pos) - np.array(SLEEP_ANTENNAS_JOINT_POSITIONS)
-                ))
-                return head_dist < 0.3 and ant_diff < 0.5
-            except Exception as e:
-                logger.warning(f"[Sleep] Could not read joint positions: {e}")
-                return False
-
-        def _startup_sleep():
-            """Enter sleep mode at startup — skip Sonic, check if already in position."""
-            update_state(
-                vision_enabled=False,
-                tracking_enabled=False,
-                tracking_mode="idle",
-                head_override=None,
-            )
-            if _is_in_sleep_position():
-                logger.info("[Sleep] Already in sleep position — entering sleeping directly")
-                sleep_manager.enter_sleeping_direct()
-            else:
-                logger.info("[Sleep] Not in sleep position — running goto_sleep transition")
-                sleep_manager.trigger_sleep()
-                def _sdk_startup_sleep():
-                    try:
-                        reachy_mini.goto_sleep()
-                    except Exception as e:
-                        logger.warning(f"[Sleep] SDK goto_sleep failed: {e}")
-                    sleep_manager.enter_sleeping()
-                threading.Thread(
-                    target=_sdk_startup_sleep, daemon=True, name="sdk-startup-sleep",
-                ).start()
-
-        # --- API Endpoints ---
-        class VisionToggle(BaseModel):
-            enabled: bool
-
-        class BrowserTask(BaseModel):
-            instruction: str
-            url: str | None = None
-
-        class AntennaMode(BaseModel):
-            mode: str
-
-        @self.settings_app.get("/api/state")
-        def get_state():
-            with state_lock:
-                return {**app_state, "uptime": time.time() - t0}
-
-        @self.settings_app.post("/api/vision/toggle")
-        def toggle_vision(body: VisionToggle):
-            update_state(vision_enabled=body.enabled)
-            return {"vision_enabled": body.enabled}
-
-        @self.settings_app.post("/api/vision/analyze")
-        def trigger_vision():
-            vision.trigger_analyze()
-            update_state(vision_analyzing=True)
-            return {"status": "analyzing"}
-
-        @self.settings_app.post("/api/browser/task")
-        def submit_browser_task(body: BrowserTask):
-            browser.queue_task(body.instruction, body.url)
-            update_state(browser_task=body.instruction)
-            return {"status": "queued", "instruction": body.instruction}
-
-        @self.settings_app.post("/api/antenna/mode")
-        def set_antenna_mode(body: AntennaMode):
-            update_state(antenna_mode=body.mode)
-            return {"antenna_mode": body.mode}
-
-        @self.settings_app.post("/api/mood")
-        def set_mood(body: dict):
-            mood = body.get("mood", "happy").lower()
-            if mood not in VALID_MOODS:
-                return {"error": f"Unknown mood. Available: {sorted(VALID_MOODS)}"}
-            emotional_state.set_mood_override(mood, duration=10.0)
-            return {"mood": mood}
-
-        # --- Emotion API endpoints ---
-        @self.settings_app.get("/api/emotions")
-        def get_emotions():
-            return emotional_state.get_full_state()
-
-        class EmotionEvent(BaseModel):
-            event: str
-            intensity: float = 1.0
-
-        @self.settings_app.post("/api/emotions/event")
-        def apply_emotion_event(body: EmotionEvent):
-            if body.event not in emotional_state.get_event_names():
-                return {"error": f"Unknown event. Available: {emotional_state.get_event_names()}"}
-            emotional_state.apply_event(body.event, body.intensity)
-            return {"status": "applied", "event": body.event, "state": emotional_state.get_full_state()}
-
-        @self.settings_app.post("/api/emotions/reset")
-        def reset_emotions():
-            emotional_state.reload_config()
-            return {"status": "config reloaded"}
-
-        class TrackingToggle(BaseModel):
-            enabled: bool
-
-        @self.settings_app.post("/api/tracking/toggle")
-        def toggle_tracking(body: TrackingToggle):
-            update_state(tracking_enabled=body.enabled)
-            if not body.enabled:
-                update_state(tracking_mode="idle")
-            return {"tracking_enabled": body.enabled}
-
-        # --- Action disable controls (presentation mode) ---
-        class ActionToggle(BaseModel):
-            enabled: bool
-
-        @self.settings_app.post("/api/speech/toggle")
-        def toggle_speech(body: ActionToggle):
-            update_state(speech_enabled=body.enabled)
-            return {"speech_enabled": body.enabled}
-
-        @self.settings_app.post("/api/movement/toggle")
-        def toggle_movement(body: ActionToggle):
-            update_state(movement_enabled=body.enabled)
-            return {"movement_enabled": body.enabled}
-
-        class PresentationMode(BaseModel):
-            enabled: bool
-
-        @self.settings_app.post("/api/presentation")
-        def toggle_presentation(body: PresentationMode):
-            """Convenience: disable speech + movement + antennas all at once."""
-            if body.enabled:
-                update_state(speech_enabled=False, movement_enabled=False, antenna_mode="off")
-            else:
-                update_state(speech_enabled=True, movement_enabled=True, antenna_mode="auto")
-            return {"presentation_mode": body.enabled}
-
-        # --- Sleep API endpoints ---
-        class SleepAction(BaseModel):
-            action: str  # "sleep" or "wake"
-
-        @self.settings_app.post("/api/sleep")
-        def sleep_control(body: SleepAction):
-            if body.action == "sleep":
-                _initiate_sleep()
-                return {"status": "sleeping", "sleep_mode": sleep_manager.state}
-            elif body.action == "wake":
-                _initiate_wake()
-                return {"status": "waking", "sleep_mode": sleep_manager.state}
-            return {"error": f"Unknown action: {body.action}"}
-
-        @self.settings_app.get("/api/sleep/state")
-        def get_sleep_state():
-            return {"sleep_mode": sleep_manager.state}
-
-        # --- Memory API endpoints ---
-        class MemoryQuery(BaseModel):
-            query: str
-            mode: str = "query"
-
-        @self.settings_app.get("/api/memory/health")
-        def memory_health():
-            return memory.health()
-
-        @self.settings_app.post("/api/memory/query")
-        def memory_query(body: MemoryQuery):
-            result = memory.query(body.query) if body.mode == "query" else memory.store(body.query)
-            return {"result": result, "mode": body.mode}
-
-        # --- Feedback API endpoint ---
-        @self.settings_app.get("/api/feedback/stats")
-        def feedback_stats():
-            return feedback.get_stats()
-
-        # --- Session API endpoint ---
-        @self.settings_app.get("/api/session")
-        def get_session():
-            return session.get_session_info()
-
-        # --- Slack API endpoints ---
-        class SlackMessage(BaseModel):
-            channel: str | None = None
-            text: str
-
-        @self.settings_app.get("/api/slack/state")
-        def get_slack_state():
-            with state_lock:
-                return {
-                    "slack_state": app_state["slack_state"],
-                    "slack_last_event": app_state["slack_last_event"],
-                    "recent_count": len(slack_bot._recent_messages),
-                }
-
-        @self.settings_app.post("/api/slack/send")
-        def send_slack_message(body: SlackMessage):
-            channel = body.channel
-            if not channel and slack_channel_ids:
-                channel = slack_channel_ids[0]
-            if not channel:
-                return {"error": "No channel specified and no default configured"}
-            slack_bot.queue_task("send_message", channel=channel, text=body.text)
-            return {"status": "queued", "channel": channel}
-
-        # --- Tracking manager with event-driven vision ---
-        last_vision_event_time = 0.0
-        VISION_EVENT_COOLDOWN = 3.0
-
-        def on_tracking_event(event_type: str, data: dict):
-            nonlocal last_vision_event_time
-
-            # --- Sleep guard: only process snap-wake when sleeping,
-            #     discard all other events when not awake ---
-            sleep_state = sleep_manager.state
-            if sleep_state != "awake":
-                if event_type == "snap_detected" and sleep_state == "sleeping":
-                    logger.info("[Sleep] Snap detected — waking up!")
-                    _initiate_wake()
-                return
-
-            publish_event("tracking", event_type, data)
-
-            if event_type == "pat_level1":
-                logger.info("[Tracking] Pat level 1 — gentle touch")
-                emotional_state.apply_event("pat_level1")
-                update_state(pat_antenna_time=time.time())  # reflex: antenna vibration stays
-                with state_lock:
-                    vs = app_state["voice_state"]
-                if vs != "speaking":
-                    sonic.inject_text(format_event("You feel a gentle tap on your head.", t0))
-                return
-
-            if event_type == "pat_level2":
-                logger.info("[Tracking] Pat level 2 — sustained scratching!")
-                emotional_state.apply_event("pat_level2")
-                with state_lock:
-                    vs = app_state["voice_state"]
-                if vs != "speaking":
-                    sonic.inject_text(format_event(
-                        "Someone is scratching your head and it feels wonderful. "
-                        "You're really enjoying this. "
-                        "This probably means they liked what you just did.",
-                        t0,
-                    ))
-                return
-
-            # Emotion events for tracking
-            if event_type == "snap_detected":
-                emotional_state.apply_event("snap_detected")
-            elif event_type == "person_lost":
-                emotional_state.apply_event("person_lost")
-
-            now = time.time()
-            if now - last_vision_event_time < VISION_EVENT_COOLDOWN:
-                return
-            if event_type in ("person_detected", "snap_detected", "mode_changed"):
-                last_vision_event_time = now
-                logger.info(f"[Tracking event] {event_type} → triggering vision")
-                vision.trigger_analyze()
-
-        tracker = TrackingManager(on_event=on_tracking_event)
-        last_doa_time = 0.0
-
-        # --- Register MQTT inject handler (needs sonic, so done after sonic creation) ---
-        if mqtt_client is not None:
-            def _on_inject(client, userdata, msg):
-                try:
-                    if sleep_manager.state != "awake":
-                        return  # Discard injections during sleep
-                    data = json.loads(msg.payload.decode())
-                    text = data.get("text", "")
-                    if text:
-                        tagged = format_event(text, t0)
-                        sonic.inject_text(tagged)
-                        logger.info(f"[Nervous System] Injected: {tagged[:80]}")
-                except Exception as e:
-                    logger.warning(f"Inject message error: {e}")
-
-            mqtt_client.message_callback_add("nova/inject", _on_inject)
-            logger.info("Registered nova/inject handler — Nervous System can drive voice")
-
-        # --- Inject startup context (session + memory combined) ---
-        # Defined here but only called on first wake (deferred from _initiate_wake)
-        def _inject_startup_context():
-            time.sleep(2)  # Wait for Sonic to be ready
-            try:
-                parts = []
-
-                # Temporal anchor — gives Nova a sense of when it is
-                time_anchor = f"[Current time: {utc_now_precise()}. {utc_now_vague()}]"
-                parts.append(time_anchor)
-
-                # Session context (restart awareness)
-                session_ctx = session.get_restart_context(
-                    restart_type, restart_elapsed, previous_session,
-                )
-                if session_ctx:
-                    parts.append(session_ctx)
-
-                # Memory context
-                memory_ctx = memory.get_startup_context()
-                if memory_ctx:
-                    parts.append(f"Things you remember:\n{memory_ctx}")
-
-                if parts:
-                    combined = "\n\n".join(parts)
-                    sonic.inject_text(combined)
-                    publish_event("memory", "startup_context", {"context": combined})
-                    logger.info(
-                        f"Injected startup context ({len(combined)} chars, "
-                        f"restart={restart_type})"
-                    )
-            except Exception as e:
-                logger.warning(f"Startup context injection failed: {e}")
+        mqtt.register_inject_handler(_handle_inject)
 
         # --- Start services ---
-        # Sonic is NOT started here — it will be started on first wake via sonic.restart()
         vision.start(stop_event)
         browser.start(stop_event)
         slack_bot.start(stop_event)
         face_recognition.start(stop_event)
 
         # Enter sleep mode at startup
-        _startup_sleep()
+        sleep_orch.startup_sleep()
 
-        # Start audio recording from robot mic
+        # Start audio recording
         mic_sr = 16000
         try:
             reachy_mini.media.start_recording()
@@ -1612,10 +463,7 @@ class ReachyNova(ReachyMiniApp):
         audio_chunk_count = 0
         last_face_cleanup_time = 0.0
 
-        # Safety manager for head-body collision avoidance + organic movement
-        safety = SafetyManager()
-
-        # Antenna blending state for smooth mood transitions
+        # Antenna blending state
         prev_antennas = np.array([0.0, 0.0])
         prev_mood = "happy"
         mood_change_time = 0.0
@@ -1628,107 +476,81 @@ class ReachyNova(ReachyMiniApp):
 
         # Periodic vague time sense injection
         _last_clock_inject = 0.0
-        CLOCK_INJECT_INTERVAL = 600.0  # 10 minutes
+        CLOCK_INJECT_INTERVAL = 600.0
 
         # --- Main control loop ---
         _prev_loop_time = time.time()
         while not stop_event.is_set():
             t = time.time() - t0
             now = time.time()
-            dt = min(now - _prev_loop_time, 0.1)  # cap dt to avoid jumps
+            dt = min(now - _prev_loop_time, 0.1)
             _prev_loop_time = now
 
             # Update emotional state and derive mood
             emotional_state.update(dt)
-            with state_lock:
-                voice_state = app_state["voice_state"]
+            voice_state = state.get("voice_state")
             derived_mood = emotional_state.get_derived_mood(voice_state=voice_state)
             emo_state = emotional_state.get_full_state()
-            update_state(
+            state.update(
                 mood=derived_mood,
                 emotion_levels=emo_state["levels"],
                 emotion_boredom=emo_state["boredom"],
                 emotion_wounds=emo_state["wounds"],
             )
 
-            # --- Session persistence (heartbeat + periodic save) ---
+            # Session persistence
             session.update_heartbeat()
-            with state_lock:
-                _face_name = app_state.get("face_recognized", "")
+            face_name = state.get("face_recognized")
             session.save(
                 emotions=emotional_state.get_serializable_state(),
                 conversation=feedback.get_recent_messages(50),
-                sleep_state=sleep_manager.state,
-                face_info={"name": _face_name, "time": now} if _face_name else None,
+                sleep_state=sleep_orch.state,
+                face_info={"name": face_name, "time": now} if face_name else None,
             )
 
-            # --- Periodic vague time sense ---
-            if (sleep_manager.state == "awake"
-                    and now - _last_clock_inject >= CLOCK_INJECT_INTERVAL):
+            # Periodic vague time sense
+            if sleep_orch.state == "awake" and now - _last_clock_inject >= CLOCK_INJECT_INTERVAL:
                 _last_clock_inject = now
                 sonic.inject_text(f"[Time sense: {utc_now_vague()}]")
                 logger.info(f"[Temporal] Injected time sense: {utc_now_vague()}")
 
-            # --- Auto-sleep on sustained boredom ---
+            # Auto-sleep on sustained boredom
             boredom_now = emotional_state.get_boredom()
-            if boredom_now >= 0.8 and sleep_manager.state == "awake":
-                if _high_boredom_start == 0.0:
-                    _high_boredom_start = now
-                elif now - _high_boredom_start >= 60.0:
+            if boredom_now >= 0.8 and sleep_orch.state == "awake":
+                if sleep_orch.high_boredom_start == 0.0:
+                    sleep_orch.high_boredom_start = now
+                elif now - sleep_orch.high_boredom_start >= 60.0:
                     logger.info("[Sleep] Auto-sleep triggered by sustained boredom")
-                    _initiate_sleep()
+                    sleep_orch.initiate_sleep()
             elif boredom_now < 0.8:
-                _high_boredom_start = 0.0
+                sleep_orch.high_boredom_start = 0.0
 
-            # Get current mood for animation
-            with state_lock:
-                mood = app_state["mood"]
-                voice_state = app_state["voice_state"]
-                antenna_mode = app_state["antenna_mode"]
-                vision_enabled = app_state["vision_enabled"]
-                tracking_enabled = app_state["tracking_enabled"]
-                speech_enabled = app_state["speech_enabled"]
-                movement_enabled = app_state["movement_enabled"]
-                gesture_active = app_state["gesture_active"]
+            # Get current state for animation
+            mood, voice_state, antenna_mode, vision_enabled, tracking_enabled, \
+                speech_enabled, movement_enabled, gesture_active = state.get_many(
+                    "mood", "voice_state", "antenna_mode", "vision_enabled",
+                    "tracking_enabled", "speech_enabled", "movement_enabled",
+                    "gesture_active",
+                )
 
             # --- Sleep mode: short-circuit the main loop ---
-            _sleep_state = sleep_manager.state
+            _sleep_state = sleep_orch.state
             if _sleep_state != "awake":
                 if _sleep_state == "sleeping":
-                    # Breathing: gentle antennas + body sway only.
-                    # Head stays at SDK's sleep pose — no set_target(head=...).
-                    t_sleep = time.time() - sleep_manager._sleep_start_time
+                    t_sleep = time.time() - sleep_orch.sleep_manager._sleep_start_time
                     ant_breath = np.deg2rad(1.5) * np.sin(2.0 * np.pi * 0.05 * t_sleep)
                     antennas_rad = np.array([
                         SLEEP_ANTENNAS_JOINT_POSITIONS[0] + ant_breath,
                         SLEEP_ANTENNAS_JOINT_POSITIONS[1] - ant_breath,
                     ])
                     body_sway = np.radians(5.0 * np.sin(2.0 * np.pi * 0.04 * t_sleep))
-                    reachy_mini.set_target(
-                        antennas=antennas_rad,
-                        body_yaw=body_sway,
-                    )
-                # else: falling_asleep / waking_up — SDK owns the robot, don't send poses
+                    reachy_mini.set_target(antennas=antennas_rad, body_yaw=body_sway)
 
-                # Keep reading audio for snap detection only (no Sonic feed, no vision)
+                # Read audio for snap detection only
                 try:
                     audio = reachy_mini.media.get_audio_sample()
                     if audio is not None:
-                        if isinstance(audio, bytes):
-                            audio = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
-                        elif audio.dtype != np.float32:
-                            audio = audio.astype(np.float32)
-                        if audio.ndim == 2:
-                            audio = audio.mean(axis=1)
-                        if mic_sr != 16000:
-                            ratio = 16000 / mic_sr
-                            n_out = int(len(audio) * ratio)
-                            audio = np.interp(
-                                np.linspace(0, len(audio) - 1, n_out),
-                                np.arange(len(audio)),
-                                audio,
-                            ).astype(np.float32)
-                        # Only detect snaps during sleeping (not during transitions)
+                        audio = preprocess_mic_audio(audio, mic_sr)
                         if _sleep_state == "sleeping":
                             tracker.detect_snap(audio)
                 except Exception:
@@ -1736,82 +558,73 @@ class ReachyNova(ReachyMiniApp):
                 time.sleep(0.02)
                 continue
 
-            # --- Gesture active: skip head — gesture thread owns it ---
+            # --- Head position computation ---
+            smooth_yaw = state.get("smooth_yaw")
+            smooth_pitch = state.get("smooth_pitch")
+            body_yaw = state.get("body_yaw")
+
             if gesture_active:
-                yaw_deg, pitch_deg = _smooth_yaw, _smooth_pitch
+                yaw_deg, pitch_deg = smooth_yaw, smooth_pitch
             else:
-              # --- Head override or active tracking ---
-              with state_lock:
-                head_override = app_state["head_override"]
-                head_override_time = app_state["head_override_time"]
+                head_override, head_override_time = state.get_many(
+                    "head_override", "head_override_time",
+                )
 
-              if head_override is not None:
-                # Skill-driven head control with EMA smoothing
-                if time.time() - head_override_time > 30.0:
-                    # Safety timeout: auto-recover tracking
-                    update_state(head_override=None, tracking_enabled=True)
+                if head_override is not None:
+                    if time.time() - head_override_time > 30.0:
+                        state.update(head_override=None, tracking_enabled=True)
+                        yaw_deg, pitch_deg = tracker.get_head_target(t, voice_state, mood)
+                    else:
+                        smooth_yaw += 0.15 * (head_override["yaw"] - smooth_yaw)
+                        smooth_pitch += 0.15 * (head_override["pitch"] - smooth_pitch)
+                        yaw_deg = smooth_yaw
+                        pitch_deg = smooth_pitch
+                elif tracking_enabled:
+                    if t - last_doa_time > 0.2:
+                        last_doa_time = t
+                        try:
+                            doa = reachy_mini.media.audio.get_DoA()
+                            tracker.update_doa(doa)
+                        except Exception:
+                            pass
                     yaw_deg, pitch_deg = tracker.get_head_target(t, voice_state, mood)
+                    state.update(tracking_mode=tracker.mode)
                 else:
-                    target_yaw = head_override["yaw"]
-                    target_pitch = head_override["pitch"]
-                    _smooth_yaw += 0.15 * (target_yaw - _smooth_yaw)
-                    _smooth_pitch += 0.15 * (target_pitch - _smooth_pitch)
-                    yaw_deg = _smooth_yaw
-                    pitch_deg = _smooth_pitch
-              elif tracking_enabled:
-                # Update DoA (throttled to ~5Hz to avoid I2C bus contention)
-                if t - last_doa_time > 0.2:
-                    last_doa_time = t
-                    try:
-                        doa = reachy_mini.media.audio.get_DoA()
-                        tracker.update_doa(doa)
-                    except Exception:
-                        pass
+                    if voice_state == "listening":
+                        yaw_deg = 5.0 * np.sin(2.0 * np.pi * 0.1 * t)
+                        pitch_deg = -5.0
+                    elif voice_state == "speaking":
+                        yaw_deg = 15.0 * np.sin(2.0 * np.pi * SPEAK_YAW_SPEED * t)
+                        pitch_deg = 5.0 * np.sin(2.0 * np.pi * 0.4 * t)
+                    elif voice_state == "thinking":
+                        yaw_deg = 20.0 * np.sin(2.0 * np.pi * 0.05 * t)
+                        pitch_deg = -10.0
+                    else:
+                        yaw_deg = 25.0 * np.sin(2.0 * np.pi * IDLE_YAW_SPEED * t)
+                        pitch_deg = 3.0 * np.sin(2.0 * np.pi * 0.08 * t)
 
-                # Get tracked head target (falls back to idle animation)
-                yaw_deg, pitch_deg = tracker.get_head_target(t, voice_state, mood)
-                update_state(tracking_mode=tracker.mode)
-              else:
-                # Original sinusoidal head animation
-                if voice_state == "listening":
-                    yaw_deg = 5.0 * np.sin(2.0 * np.pi * 0.1 * t)
-                    pitch_deg = -5.0
-                elif voice_state == "speaking":
-                    yaw_deg = 15.0 * np.sin(2.0 * np.pi * SPEAK_YAW_SPEED * t)
-                    pitch_deg = 5.0 * np.sin(2.0 * np.pi * 0.4 * t)
-                elif voice_state == "thinking":
-                    yaw_deg = 20.0 * np.sin(2.0 * np.pi * 0.05 * t)
-                    pitch_deg = -10.0
-                else:
-                    yaw_deg = 25.0 * np.sin(2.0 * np.pi * IDLE_YAW_SPEED * t)
-                    pitch_deg = 3.0 * np.sin(2.0 * np.pi * 0.08 * t)
-
-            # Keep smooth state in sync so gestures capture the right center
             if not gesture_active:
-                _smooth_yaw = yaw_deg
-                _smooth_pitch = pitch_deg
+                smooth_yaw = yaw_deg
+                smooth_pitch = pitch_deg
+                state.update(smooth_yaw=smooth_yaw, smooth_pitch=smooth_pitch)
 
-            # --- Boredom body sway: slow body rotation when bored ---
+            # Boredom body sway
             boredom = emotional_state.get_boredom()
             if boredom > 0.3 and movement_enabled and not gesture_active:
-                # Scale: boredom 0.3→1.0 maps to amplitude 0→15 degrees
                 bored_amp = 15.0 * min(1.0, (boredom - 0.3) / 0.7)
-                bored_yaw = bored_amp * np.sin(2.0 * np.pi * 0.06 * t)
-                _current_body_yaw = bored_yaw
+                body_yaw = bored_amp * np.sin(2.0 * np.pi * 0.06 * t)
+                state.update(body_yaw=body_yaw)
 
-            # Apply safety validation (clamps + organic body follow)
-            safe_yaw, safe_pitch, safe_body_yaw = safety.validate(
-                yaw_deg, pitch_deg, _current_body_yaw
-            )
-            _current_body_yaw = safe_body_yaw
+            # Safety validation
+            safe_yaw, safe_pitch, safe_body_yaw = safety.validate(yaw_deg, pitch_deg, body_yaw)
+            state.update(body_yaw=safe_body_yaw)
 
             head_pose = create_head_pose(yaw=safe_yaw, pitch=safe_pitch, degrees=True)
 
-            # --- Antenna animation (eased, mood-driven) ---
+            # --- Antenna animation ---
             if antenna_mode == "off":
                 antennas_deg = np.array([0.0, 0.0])
             else:
-                # Detect mood change for blending
                 if mood != prev_mood:
                     prev_mood = mood
                     mood_change_time = t
@@ -1823,22 +636,19 @@ class ReachyNova(ReachyMiniApp):
                 offset = profile.get("offset", 0.0)
 
                 if profile["phase"] == "custom" and mood == "thinking":
-                    # Asymmetric thinking pose
                     a1 = offset + amp * ease_fn(t, freq)
                     a2 = -10.0 + 5.0 * ease_fn(t, freq * 1.5)
                     target_antennas = np.array([a1, a2])
                 elif profile["phase"] == "sync":
                     a = offset + amp * ease_fn(t, freq)
                     target_antennas = np.array([a, a])
-                else:  # oppose
+                else:
                     a = amp * ease_fn(t, freq)
                     target_antennas = np.array([offset + a, offset - a])
 
-                # Smooth blend on mood transitions
                 elapsed = t - mood_change_time
                 if elapsed < MOOD_BLEND_TIME:
                     alpha = elapsed / MOOD_BLEND_TIME
-                    # Smoothstep the blend factor
                     alpha = alpha * alpha * (3.0 - 2.0 * alpha)
                     antennas_deg = prev_antennas * (1.0 - alpha) + target_antennas * alpha
                 else:
@@ -1847,14 +657,13 @@ class ReachyNova(ReachyMiniApp):
                 prev_antennas = antennas_deg
 
             # Pat Level 1 antenna vibration overlay
-            with state_lock:
-                _pat_ant_time = app_state["pat_antenna_time"]
+            _pat_ant_time = state.get("pat_antenna_time")
             _pat_ant_elapsed = now - _pat_ant_time
-            _PAT_ANT_DUR = 2.0   # seconds
-            _PAT_ANT_FREQ = 3.5  # Hz
-            _PAT_ANT_AMP = 6.0   # degrees
+            _PAT_ANT_DUR = 2.0
+            _PAT_ANT_FREQ = 3.5
+            _PAT_ANT_AMP = 6.0
             if 0 < _pat_ant_elapsed < _PAT_ANT_DUR:
-                _env = (1.0 - _pat_ant_elapsed / _PAT_ANT_DUR) ** 2  # squared decay
+                _env = (1.0 - _pat_ant_elapsed / _PAT_ANT_DUR) ** 2
                 _vib = _PAT_ANT_AMP * _env * np.sin(2 * np.pi * _PAT_ANT_FREQ * _pat_ant_elapsed)
                 antennas_deg = antennas_deg + np.array([_vib, _vib])
 
@@ -1863,7 +672,6 @@ class ReachyNova(ReachyMiniApp):
             # --- Movement freeze logic ---
             if not movement_enabled:
                 if _prev_movement_enabled:
-                    # Transition: capture current pose as frozen
                     _frozen_head_pose = head_pose
                     _frozen_body_yaw = safe_body_yaw
                     _frozen_antennas_rad = antennas_rad.copy()
@@ -1875,13 +683,13 @@ class ReachyNova(ReachyMiniApp):
                 )
             else:
                 if not _prev_movement_enabled:
-                    # Re-enabled: sync smoothing state to frozen values for smooth transition
-                    _smooth_yaw = np.degrees(np.arctan2(
-                        _frozen_head_pose[0][1], _frozen_head_pose[0][0]
-                    )) if _frozen_head_pose is not None else _smooth_yaw
+                    if _frozen_head_pose is not None:
+                        smooth_yaw = np.degrees(np.arctan2(
+                            _frozen_head_pose[0][1], _frozen_head_pose[0][0]
+                        ))
+                        state.update(smooth_yaw=smooth_yaw)
                     _prev_movement_enabled = True
                 if gesture_active:
-                    # Gesture thread owns head — only send antennas + body
                     reachy_mini.set_target(
                         antennas=antennas_rad,
                         body_yaw=np.radians(safe_body_yaw),
@@ -1893,41 +701,20 @@ class ReachyNova(ReachyMiniApp):
                         body_yaw=np.radians(safe_body_yaw),
                     )
 
-            # --- Pat detection: compare commanded vs actual head pose ---
+            # --- Pat detection ---
             if movement_enabled and tracking_enabled:
                 try:
                     actual_pose = reachy_mini.get_current_head_pose()
                     tracker.detect_pat(head_pose, actual_pose)
                 except Exception:
-                    pass  # No pose feedback yet (startup) or hardware not available
+                    pass
 
             # --- Feed mic audio to Nova Sonic ---
             try:
                 audio = reachy_mini.media.get_audio_sample()
                 if audio is not None:
-                    # Convert to numpy float32 if needed
-                    if isinstance(audio, bytes):
-                        audio = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
-                    elif audio.dtype != np.float32:
-                        audio = audio.astype(np.float32)
+                    audio = preprocess_mic_audio(audio, mic_sr)
 
-                    # Mix to mono if multi-channel
-                    if audio.ndim == 2:
-                        audio = audio.mean(axis=1)
-
-                    # Resample to 16kHz if needed
-                    if mic_sr != 16000:
-                        ratio = 16000 / mic_sr
-                        n_out = int(len(audio) * ratio)
-                        audio = np.interp(
-                            np.linspace(0, len(audio) - 1, n_out),
-                            np.arange(len(audio)),
-                            audio,
-                        ).astype(np.float32)
-
-                    # Feed audio to snap detector only when idle/listening —
-                    # during speaking/thinking, our own audio or processing
-                    # triggers false snaps creating a feedback loop
                     if tracking_enabled and voice_state in ("idle", "listening"):
                         tracker.detect_snap(audio)
 
@@ -1940,7 +727,7 @@ class ReachyNova(ReachyMiniApp):
             except Exception as e:
                 logger.warning(f"Audio feed error: {e}")
 
-            # --- Feed camera frames to Nova Vision and Tracking ---
+            # --- Feed camera frames ---
             if vision_enabled:
                 try:
                     frame = reachy_mini.media.get_frame()
@@ -1953,7 +740,7 @@ class ReachyNova(ReachyMiniApp):
                 except Exception:
                     pass
 
-            # --- Face cleanup (every 60s) ---
+            # Face cleanup (every 60s)
             if t - last_face_cleanup_time > 60.0:
                 last_face_cleanup_time = t
                 face_manager.cleanup_expired()
@@ -1964,28 +751,22 @@ class ReachyNova(ReachyMiniApp):
                 audio_output_buffer.clear()
 
             if not speech_enabled:
-                chunks = []  # Discard audio — robot listens but doesn't speak aloud
+                chunks = []
 
             if chunks:
-                # Resample from 24kHz (Nova Sonic) to output sample rate if needed
                 try:
                     output_sr = reachy_mini.media.get_output_audio_samplerate()
                 except Exception:
                     output_sr = 24000
 
-                VOLUME_GAIN = 1.5    # 50% louder
-                SPEED_FACTOR = 1.05  # 5% faster playback
+                VOLUME_GAIN = 1.5
+                SPEED_FACTOR = 1.05
 
                 for chunk in chunks:
-                    # Always resample: adjust for speed + match output sample rate
-                    effective_source_rate = OUTPUT_SAMPLE_RATE * SPEED_FACTOR
-                    ratio = output_sr / effective_source_rate
-                    n_out = int(len(chunk) * ratio)
-                    indices = np.linspace(0, len(chunk) - 1, n_out)
-                    chunk = np.interp(indices, np.arange(len(chunk)), chunk).astype(np.float32)
-
-                    # Apply volume gain
-                    chunk = np.clip(chunk * VOLUME_GAIN, -1.0, 1.0).astype(np.float32)
+                    chunk = resample_output(
+                        chunk, OUTPUT_SAMPLE_RATE, output_sr,
+                        speed_factor=SPEED_FACTOR, volume_gain=VOLUME_GAIN,
+                    )
                     try:
                         reachy_mini.media.push_audio_sample(chunk)
                     except Exception as e:
@@ -1998,27 +779,19 @@ class ReachyNova(ReachyMiniApp):
 
             time.sleep(0.02)
 
-        # Save session state on clean shutdown
+        # --- Shutdown ---
         try:
-            with state_lock:
-                _face_name = app_state.get("face_recognized", "")
+            face_name = state.get("face_recognized")
             session.save_shutdown(
                 emotions=emotional_state.get_serializable_state(),
                 conversation=feedback.get_recent_messages(50),
-                sleep_state=sleep_manager.state,
-                face_info={"name": _face_name, "time": time.time()} if _face_name else None,
+                sleep_state=sleep_orch.state,
+                face_info={"name": face_name, "time": time.time()} if face_name else None,
             )
         except Exception as e:
             logger.error(f"Session shutdown save failed: {e}")
 
-        # Cleanup
-        if mqtt_available and mqtt_client:
-            try:
-                mqtt_client.loop_stop()
-                mqtt_client.disconnect()
-                logger.info("MQTT disconnected")
-            except Exception:
-                pass
+        mqtt.stop()
         try:
             reachy_mini.media.stop_recording()
         except Exception:
