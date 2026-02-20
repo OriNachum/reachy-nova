@@ -295,8 +295,8 @@ class ReachyNova(ReachyMiniApp):
 
         # --- Wake word detector ---
         wake_word = WakeWordDetector(
-            model=os.getenv("WAKE_WORD_MODEL", "hey_jarvis"),
-            threshold=float(os.getenv("WAKE_WORD_THRESHOLD", "0.5")),
+            phrase=os.getenv("WAKE_WORD_PHRASE", "hey reachy"),
+            model_name=os.getenv("WAKE_WORD_MODEL", "nvidia/parakeet-tdt-0.6b-v2"),
         )
 
         # Wire YuNet face bbox from FaceRecognition into TrackingManager

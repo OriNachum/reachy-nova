@@ -1,35 +1,31 @@
 # Wake Word Configuration
 
-Guide to choosing, tuning, and training wake word models for Reachy Nova.
+Guide to configuring the wake phrase and ASR model used to wake Reachy Nova from sleep.
 
 **Files:** `reachy_nova/wake_word.py`, `reachy_nova/sleep_orchestrator.py`
 
 ## Overview
 
-When the robot is sleeping, it listens for a specific spoken phrase before waking up. This is handled by `WakeWordDetector`, which wraps the [openWakeWord](https://github.com/dscripka/openWakeWord) library.
+During sleep, Reachy Nova continuously buffers microphone audio and periodically transcribes it with **NVIDIA Parakeet TDT** — a 0.6B-parameter speech recognition model. When the transcript contains the configured wake phrase, the robot wakes up.
 
-**Why wake word instead of snap detection?**
-Snap/clap detection is an audio energy heuristic — it fires on any loud transient: background music, dropped objects, nearby conversations. A trained wake word model is a neural classifier that only scores high for the specific phrase it was trained on, making accidental wakeups far less likely.
-
-Snap detection is still active in awake mode for head-turning toward sounds. Only the sleep-exit path was changed.
+This approach is more reliable than energy-based snap/clap detection because it only responds to a specific spoken phrase, not any loud transient.
 
 ---
 
 ## Quick Setup
 
-Add to your `.env` file:
-
 ```ini
-WAKE_WORD_MODEL=hey_jarvis
-WAKE_WORD_THRESHOLD=0.5
+# .env
+WAKE_WORD_PHRASE=hey reachy
+WAKE_WORD_MODEL=nvidia/parakeet-tdt-0.6b-v2
 ```
-
-Then reinstall dependencies and restart:
 
 ```bash
 uv sync
 uv run python -m reachy_nova.main
 ```
+
+The model is downloaded from HuggingFace on first run (~1.2 GB) and cached locally by NeMo.
 
 ---
 
@@ -37,93 +33,27 @@ uv run python -m reachy_nova.main
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `WAKE_WORD_MODEL` | `hey_jarvis` | Built-in model name **or** absolute path to a custom `.onnx` file |
-| `WAKE_WORD_THRESHOLD` | `0.5` | Confidence threshold (0–1). Scores at or above this value trigger a wake. |
+| `WAKE_WORD_PHRASE` | `hey reachy` | The spoken phrase that wakes the robot. Case-insensitive; punctuation is ignored. |
+| `WAKE_WORD_MODEL` | `nvidia/parakeet-tdt-0.6b-v2` | NeMo model name (HuggingFace Hub) or path to a local `.nemo` checkpoint. |
 
 ---
 
-## Built-in Models
+## Choosing a Wake Phrase
 
-openWakeWord ships several pretrained models that work without any extra files. Set `WAKE_WORD_MODEL` to one of these names:
+Any phrase works. Practical guidelines:
 
-| Name | Phrase | Notes |
-| :--- | :--- | :--- |
-| `hey_jarvis` | "hey Jarvis" | Default. Well-tested, low false-positive rate. |
-| `alexa` | "Alexa" | Short, snappy. Higher false-positive rate in noisy environments. |
-| `hey_mycroft` | "hey Mycroft" | Open-source assistant phrase. |
-| `hey_rhasspy` | "hey Rhasspy" | Open-source assistant phrase. |
-| `ok_nabu` | "OK Nabu" | From the Nabu Casa / Home Assistant ecosystem. |
-| `timer` | "set a timer" | Task-phrase model (less useful as a wake word). |
+- **2–3 syllables minimum.** Single-syllable words ("wake", "go") produce too many false positives from ambient speech.
+- **Uncommon sequences.** "Hey Reachy" is unlikely to appear in background TV or conversation. "OK go" would fire constantly.
+- **Avoid homophones.** "Nova" sounds like "no-va" which may match fragments of other words.
+- **Consistent stress pattern.** Phrases with natural stress (HEY rea-CHY) are more reliably transcribed.
 
-To switch models, update `.env` and restart the app — no code changes needed.
-
----
-
-## Custom Models
-
-To wake the robot with a phrase like "hey Reachy", train a custom model using the openWakeWord toolkit:
-
-### 1. Install the training toolkit
-
-```bash
-pip install openwakeword[train]
-```
-
-### 2. Generate positive samples
-
-```bash
-# Install a TTS engine for synthetic data (e.g. pyttsx3 or edge-tts)
-pip install edge-tts
-
-# Generate ~1000 synthetic samples of your phrase
-python -m openwakeword.train.generate_samples \
-    --phrase "hey reachy" \
-    --n_samples 1000 \
-    --output_dir ./samples/hey_reachy/positive
-```
-
-### 3. Train the model
-
-```bash
-python -m openwakeword.train.train_model \
-    --phrase "hey reachy" \
-    --positive_samples ./samples/hey_reachy/positive \
-    --output_path ./models/hey_reachy.onnx \
-    --epochs 100
-```
-
-Training takes ~5–15 minutes on CPU. The output is a single `.onnx` file.
-
-### 4. Deploy the custom model
+To change the phrase at runtime, update `.env` and restart the app:
 
 ```ini
-# .env
-WAKE_WORD_MODEL=/home/spark/models/hey_reachy.onnx
-WAKE_WORD_THRESHOLD=0.5
+WAKE_WORD_PHRASE=wake up reachy
 ```
 
-Restart the app and say "hey Reachy" to wake the robot.
-
----
-
-## Threshold Tuning
-
-The threshold controls the tradeoff between sensitivity (fewer misses) and specificity (fewer false positives).
-
-| Threshold | Behaviour |
-| :--- | :--- |
-| `0.3` | Very sensitive. Wakes on partial matches and background noise. |
-| `0.5` | Default. Balanced for quiet-to-moderate environments. |
-| `0.7` | Strict. Requires clear, close speech. May miss soft or accented voices. |
-| `0.9` | Very strict. Effectively disabled except for ideal conditions. |
-
-### Tuning procedure
-
-1. Set `WAKE_WORD_THRESHOLD=0.3` to confirm the model is loading and detecting at all.
-2. Speak the phrase at your normal distance and volume. The robot should wake reliably.
-3. Walk away, turn on background audio, or have a conversation nearby. Note any false wakes.
-4. Increase the threshold in `0.05` increments until false wakes stop while true wakes still work.
-5. Write the final value to `.env`.
+No retraining or model changes are needed — the phrase is matched as a substring of the ASR transcript after normalization.
 
 ---
 
@@ -131,45 +61,97 @@ The threshold controls the tradeoff between sensitivity (fewer misses) and speci
 
 ### Audio pipeline
 
-1. The main loop reads a ~20ms audio chunk from the microphone at 16 kHz (float32, mono).
-2. During sleep, the `SleepOrchestrator` passes each chunk to `WakeWordDetector.detect()`.
-3. `detect()` converts float32 → int16 PCM and calls `oww_model.predict(audio_int16)`.
-4. openWakeWord runs the audio through a mel-spectrogram frontend and a small LSTM/GRU classifier.
-5. It returns a `{"model_name": score}` dict. Any score ≥ threshold → robot wakes.
+1. The main loop reads ~20ms audio chunks from the microphone at 16 kHz (float32, mono).
+2. During sleep, `SleepOrchestrator.tick_sleeping()` passes each chunk to `WakeWordDetector.detect()`.
+3. `detect()` appends the chunk to a **4-second rolling buffer**.
+4. Every **2 seconds**, the buffer is snapshotted and submitted to a background thread for transcription.
+5. The background thread calls `model.transcribe([audio_array])` — NeMo accepts float32 numpy arrays directly, no temp file needed.
+6. The transcript is normalized (lowercase, punctuation stripped) and checked for the wake phrase as a substring.
+7. On match, `detect()` returns `True` → `initiate_wake()` is called.
+
+### Background thread
+
+Transcription runs in a `ThreadPoolExecutor(max_workers=1)` so it never blocks the main sleep animation (breathing, rocking). The main loop only checks `future.done()` — it never waits.
 
 ### Buffer reset
 
-`WakeWordDetector.reset()` is called every time the robot enters sleep. This clears the model's internal audio buffer so audio captured while the robot was awake (e.g. the tail of the "good night" command) cannot bleed into the sleep-state detection window.
+`WakeWordDetector.reset()` is called every time the robot enters sleep. It clears the audio buffer and cancels any pending transcription, so audio captured while the robot was awake cannot bleed into the first detection window.
 
 ### Detection guard
 
-Wake word detection is suspended for the first **3 seconds** after the robot enters the sleeping state. This prevents the robot from immediately waking itself up if the wake animation triggers a loud mechanical sound.
+The 3-second guard in `tick_sleeping()` (`t_sleep > 3.0`) suspends wake word detection for the first 3 seconds after entering sleep, preventing the sleep animation's own sounds from triggering an immediate re-wake.
+
+---
+
+## Model Details
+
+| Property | Value |
+| :--- | :--- |
+| Model | Parakeet TDT 0.6B v2 |
+| Parameters | 600M |
+| Input | Float32 or int16 numpy array, 16 kHz mono |
+| Max audio length | 24 minutes per inference call |
+| WER (average) | 6.05% |
+| RTFx | 3380 (batch=128 on A100) |
+| Hardware | NVIDIA Ampere / Hopper / Blackwell (DGX Spark: Blackwell) |
+| HuggingFace | [nvidia/parakeet-tdt-0.6b-v2](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2) |
+
+The DGX Spark's Blackwell GPU transcribes a 4-second audio buffer in well under 100ms, making the 2-second polling interval the dominant latency rather than inference time.
+
+---
+
+## Using a Local Checkpoint
+
+If you have a fine-tuned `.nemo` file or want to avoid re-downloading:
+
+```ini
+# .env
+WAKE_WORD_MODEL=/home/spark/models/parakeet-finetuned.nemo
+```
+
+Any `ASRModel`-compatible NeMo checkpoint works. The model is loaded with `ASRModel.from_pretrained()`, which accepts both Hub names and local paths.
+
+---
+
+## Tuning Response Latency
+
+Two constructor parameters control the detection latency (not exposed as env vars, edit `main.py` if needed):
+
+| Parameter | Default | Effect |
+| :--- | :--- | :--- |
+| `transcribe_interval` | `2.0 s` | How often transcription runs. Lower = faster response, more GPU load. |
+| `buffer_seconds` | `4.0 s` | Rolling audio window sent to the model. Longer = more context, more memory. |
+
+The practical minimum for `transcribe_interval` is ~0.5s (below that, inference queues faster than it completes on typical hardware). For the DGX Spark, 1.0s is comfortable if snappier waking is wanted.
 
 ---
 
 ## Troubleshooting
 
-**Robot never wakes on the phrase**
-- Check logs for `[WakeWord] Loaded model:` — if absent, the import failed.
-- Lower `WAKE_WORD_THRESHOLD` to `0.3` temporarily to confirm the model is running.
-- Make sure the phrase is spoken clearly and at close range (~1m).
-- For a custom `.onnx` path, verify the path is absolute and the file exists.
+**Robot never wakes**
+- Check logs for `[WakeWord] Ready` at startup. If absent, the NeMo import failed — run `uv sync`.
+- Check `[WakeWord] Transcript:` debug lines (set log level to DEBUG) to see what the model hears.
+- Speak the phrase louder and closer (~0.5 m from the mic).
+- Try a simpler phrase like `hey reachy` and confirm it appears literally in the transcript.
 
-**Too many accidental wakeups**
-- Raise `WAKE_WORD_THRESHOLD` in `0.05` increments.
-- Switch to a longer phrase (e.g. `hey_jarvis` has lower false-positive rates than `alexa`).
-- Train a custom model on your specific voice and environment.
+**Too many false wakes**
+- Use a longer or more distinctive phrase.
+- Check what `[WakeWord] Matched in:` logs show — if random ambient speech keeps matching, the phrase is too common.
 
-**`ModuleNotFoundError: openwakeword`**
+**Slow startup**
+- First run downloads ~1.2 GB. Subsequent runs use NeMo's local cache (usually `~/.cache/huggingface/`).
+- Model loading (weight allocation) adds ~5–10 seconds to startup on first use after cache warmup.
+
+**`ModuleNotFoundError: nemo`**
 ```bash
 uv sync
-# or
-pip install openwakeword>=0.6.0
+# or manually:
+pip install nemo_toolkit[asr]
 ```
 
-**Model loads but scores are always 0**
-- openWakeWord requires 16 kHz audio. Confirm the mic sample rate with logs: `Mic recording started: samplerate=16000`.
-- If the mic runs at a different rate, `preprocess_mic_audio()` resamples it before detection — verify that path is working.
+**CUDA out of memory**
+- Parakeet TDT requires ~2 GB VRAM. On DGX Spark this is not a concern.
+- If running on a smaller GPU alongside other models, reduce `buffer_seconds` to limit inference input size.
 
 ---
 
@@ -180,6 +162,8 @@ pip install openwakeword>=0.6.0
 | `WakeWordDetector` class | `reachy_nova/wake_word.py` |
 | `detect()` call site | `reachy_nova/sleep_orchestrator.py:tick_sleeping()` |
 | `reset()` call site | `reachy_nova/sleep_orchestrator.py:initiate_sleep()` |
-| Env var: model | `WAKE_WORD_MODEL` (default: `hey_jarvis`) |
-| Env var: threshold | `WAKE_WORD_THRESHOLD` (default: `0.5`) |
-| 3-second guard | `sleep_orchestrator.py` — `t_sleep > 3.0` condition |
+| `WAKE_WORD_PHRASE` env var | default: `hey reachy` |
+| `WAKE_WORD_MODEL` env var | default: `nvidia/parakeet-tdt-0.6b-v2` |
+| Transcription interval | `2.0 s` (constructor param in `main.py`) |
+| Rolling buffer | `4.0 s` (constructor param in `main.py`) |
+| Detection guard | `t_sleep > 3.0` in `sleep_orchestrator.py` |

@@ -49,14 +49,14 @@ Voice commands and the `/api/sleep` endpoint also work as usual.
 
 ### Wake word
 
-During sleep, each audio chunk is passed to `WakeWordDetector.detect()`. The default phrase is "hey Jarvis" (the `hey_jarvis` built-in model). To use a different phrase or a custom-trained model, set the environment variables:
+During sleep, audio is buffered and periodically transcribed by `WakeWordDetector` using **NVIDIA Parakeet TDT**. When the transcript contains the configured phrase, the robot wakes. To change the phrase or model:
 
 ```ini
-WAKE_WORD_MODEL=hey_jarvis        # built-in name or /path/to/custom_model.onnx
-WAKE_WORD_THRESHOLD=0.5           # confidence threshold (0–1)
+WAKE_WORD_PHRASE=hey reachy                        # spoken phrase that wakes the robot
+WAKE_WORD_MODEL=nvidia/parakeet-tdt-0.6b-v2        # NeMo model name or local checkpoint
 ```
 
-The detector resets its internal buffer every time the robot enters sleep, and a 3-second guard prevents the wake animation's own sounds from re-triggering a wake.
+Transcription runs in a background thread (every 2 seconds) so it never blocks the breathing animation. The detector resets its buffer every time the robot enters sleep, and a 3-second guard prevents the wake animation's own sounds from triggering an immediate re-wake.
 
 See [Wake Word Configuration](../configuration/openwakeword.md) for full details on built-in models, custom model training, and threshold tuning.
 
