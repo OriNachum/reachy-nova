@@ -37,6 +37,7 @@ from .face_recognition import FaceRecognition
 from .emotions import EmotionalState
 from .session_state import SessionState
 from .sleep_mode import SleepManager
+from .temporal import utc_now_precise, utc_now_vague, format_event
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -320,7 +321,7 @@ class ReachyNova(ReachyMiniApp):
             with state_lock:
                 vs = app_state["voice_state"]
             if vs != "speaking":
-                sonic.inject_text(f"You notice {name} is here.")
+                sonic.inject_text(format_event(f"You notice {name} is here.", t0))
 
         face_recognition = FaceRecognition(
             face_manager=face_manager,
@@ -1498,7 +1499,7 @@ class ReachyNova(ReachyMiniApp):
                 with state_lock:
                     vs = app_state["voice_state"]
                 if vs != "speaking":
-                    sonic.inject_text("You feel a gentle tap on your head.")
+                    sonic.inject_text(format_event("You feel a gentle tap on your head.", t0))
                 return
 
             if event_type == "pat_level2":
@@ -1507,11 +1508,12 @@ class ReachyNova(ReachyMiniApp):
                 with state_lock:
                     vs = app_state["voice_state"]
                 if vs != "speaking":
-                    sonic.inject_text(
+                    sonic.inject_text(format_event(
                         "Someone is scratching your head and it feels wonderful. "
                         "You're really enjoying this. "
-                        "This probably means they liked what you just did."
-                    )
+                        "This probably means they liked what you just did.",
+                        t0,
+                    ))
                 return
 
             # Emotion events for tracking
@@ -1540,8 +1542,9 @@ class ReachyNova(ReachyMiniApp):
                     data = json.loads(msg.payload.decode())
                     text = data.get("text", "")
                     if text:
-                        sonic.inject_text(text)
-                        logger.info(f"[Nervous System] Injected: {text[:80]}")
+                        tagged = format_event(text, t0)
+                        sonic.inject_text(tagged)
+                        logger.info(f"[Nervous System] Injected: {tagged[:80]}")
                 except Exception as e:
                     logger.warning(f"Inject message error: {e}")
 
@@ -1554,6 +1557,10 @@ class ReachyNova(ReachyMiniApp):
             time.sleep(2)  # Wait for Sonic to be ready
             try:
                 parts = []
+
+                # Temporal anchor — gives Nova a sense of when it is
+                time_anchor = f"[Current time: {utc_now_precise()}. {utc_now_vague()}]"
+                parts.append(time_anchor)
 
                 # Session context (restart awareness)
                 session_ctx = session.get_restart_context(
@@ -1619,6 +1626,10 @@ class ReachyNova(ReachyMiniApp):
         _frozen_antennas_rad = np.array([0.0, 0.0])
         _prev_movement_enabled = True
 
+        # Periodic vague time sense injection
+        _last_clock_inject = 0.0
+        CLOCK_INJECT_INTERVAL = 600.0  # 10 minutes
+
         # --- Main control loop ---
         _prev_loop_time = time.time()
         while not stop_event.is_set():
@@ -1650,6 +1661,13 @@ class ReachyNova(ReachyMiniApp):
                 sleep_state=sleep_manager.state,
                 face_info={"name": _face_name, "time": now} if _face_name else None,
             )
+
+            # --- Periodic vague time sense ---
+            if (sleep_manager.state == "awake"
+                    and now - _last_clock_inject >= CLOCK_INJECT_INTERVAL):
+                _last_clock_inject = now
+                sonic.inject_text(f"[Time sense: {utc_now_vague()}]")
+                logger.info(f"[Temporal] Injected time sense: {utc_now_vague()}")
 
             # --- Auto-sleep on sustained boredom ---
             boredom_now = emotional_state.get_boredom()

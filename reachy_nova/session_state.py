@@ -14,6 +14,8 @@ import time
 import uuid
 from pathlib import Path
 
+from .temporal import format_elapsed_vague, relative_vague, utc_now_vague
+
 logger = logging.getLogger(__name__)
 
 SESSION_DIR = Path.home() / ".reachy_nova" / "session"
@@ -225,7 +227,7 @@ class SessionState:
 
     def _crash_recovery_context(self, prev: dict) -> str:
         """Silent recovery — inject last messages, tell Nova to continue naturally."""
-        lines = ["[Session context — you just restarted due to a brief interruption.]"]
+        lines = [f"[Session context — you just restarted due to a brief interruption. {utc_now_vague()}]"]
 
         conversation = prev.get("conversation", [])
         recent = conversation[-10:] if conversation else []
@@ -234,7 +236,9 @@ class SessionState:
             for msg in recent:
                 role = msg.get("role", "?")
                 text = msg.get("text", "")
-                lines.append(f"  {role}: {text}")
+                ts = msg.get("timestamp", 0)
+                age = f" ({relative_vague(ts)})" if ts else ""
+                lines.append(f"  {role}{age}: {text}")
 
         mood = prev.get("emotions", {}).get("current_mood", "")
         if mood:
@@ -245,15 +249,10 @@ class SessionState:
 
     def _short_break_context(self, elapsed: float, prev: dict) -> str:
         """Brief acknowledgment — inject messages + mood + wounds."""
-        minutes = int(elapsed / 60)
-        seconds = int(elapsed % 60)
-        if minutes > 0:
-            time_str = f"{minutes} minute{'s' if minutes != 1 else ''}"
-        else:
-            time_str = f"{seconds} second{'s' if seconds != 1 else ''}"
+        vague_dur = format_elapsed_vague(elapsed)
 
         lines = [
-            f"[Session context — you were offline for {time_str}.]",
+            f"[Session context — you were away for {vague_dur}. {utc_now_vague()}]",
         ]
 
         conversation = prev.get("conversation", [])
@@ -263,7 +262,9 @@ class SessionState:
             for msg in recent:
                 role = msg.get("role", "?")
                 text = msg.get("text", "")
-                lines.append(f"  {role}: {text}")
+                ts = msg.get("timestamp", 0)
+                age = f" ({relative_vague(ts)})" if ts else ""
+                lines.append(f"  {role}{age}: {text}")
 
         emotions = prev.get("emotions", {})
         mood = emotions.get("current_mood", "")
@@ -284,15 +285,10 @@ class SessionState:
 
     def _long_absence_context(self, elapsed: float, prev: dict) -> str:
         """Warm welcome — summarize topics, mention time passed."""
-        hours = elapsed / 3600
-        if hours >= 24:
-            days = int(hours / 24)
-            time_str = f"{days} day{'s' if days != 1 else ''}"
-        else:
-            time_str = f"{int(hours)} hour{'s' if int(hours) != 1 else ''}"
+        vague_dur = format_elapsed_vague(elapsed)
 
         lines = [
-            f"[Session context — you've been offline for about {time_str}.]",
+            f"[Session context — you've been away for {vague_dur}. {utc_now_vague()}]",
         ]
 
         # Summarize topics from conversation instead of full transcript

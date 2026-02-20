@@ -17,6 +17,8 @@ from pathlib import Path
 
 import boto3
 
+from .temporal import relative_vague
+
 logger = logging.getLogger(__name__)
 
 # Default paths to qq knowledge files
@@ -291,14 +293,16 @@ class NovaMemory:
             regex_pattern = "|".join(re.escape(kw) for kw in keywords)
             cursor = collection.find(
                 {"content": {"$regex": regex_pattern, "$options": "i"}},
-                {"content": 1, "section": 1, "_id": 0},
+                {"content": 1, "section": 1, "created_at": 1, "_id": 0},
             ).limit(5)
 
             chunks = []
             for doc in cursor:
                 section = doc.get("section", "")
                 content = doc.get("content", "")[:400]
-                chunks.append(f"[qq/{section}] {content}")
+                created = doc.get("created_at", 0)
+                age = f" ({relative_vague(created)})" if created else ""
+                chunks.append(f"[qq/{section}] {content}{age}")
             return chunks
         except Exception as e:
             logger.warning(f"MongoDB keyword search error: {e}")
@@ -314,7 +318,7 @@ class NovaMemory:
             # (for small collections; for large ones, use Atlas vector search)
             cursor = collection.find(
                 {"embedding": {"$exists": True}},
-                {"content": 1, "section": 1, "embedding": 1, "_id": 0},
+                {"content": 1, "section": 1, "embedding": 1, "created_at": 1, "_id": 0},
             ).limit(100)
 
             scored = []
@@ -332,7 +336,9 @@ class NovaMemory:
                     break
                 section = doc.get("section", "")
                 content = doc.get("content", "")[:400]
-                chunks.append(f"[nova/{section} sim={sim:.2f}] {content}")
+                created = doc.get("created_at", 0)
+                age = f" ({relative_vague(created)})" if created else ""
+                chunks.append(f"[nova/{section} sim={sim:.2f}] {content}{age}")
             return chunks
         except Exception as e:
             logger.warning(f"MongoDB vector search error: {e}")
@@ -581,11 +587,18 @@ class NovaMemory:
             try:
                 collection = self._mongo_db_handle[DEFAULT_NOVA_COLLECTION]
                 recent = collection.find(
-                    {}, {"content": 1, "section": 1, "_id": 0}
+                    {}, {"content": 1, "section": 1, "created_at": 1, "_id": 0}
                 ).sort("created_at", -1).limit(5)
-                notes = [doc.get("content", "") for doc in recent if doc.get("content")]
-                if notes:
-                    parts.append("[Recent memories] " + " | ".join(notes))
+                labeled = []
+                for doc in recent:
+                    content = doc.get("content", "")
+                    if not content:
+                        continue
+                    created = doc.get("created_at", 0)
+                    age = f" ({relative_vague(created)})" if created else ""
+                    labeled.append(f"{content}{age}")
+                if labeled:
+                    parts.append("[Recent memories] " + " | ".join(labeled))
             except Exception as e:
                 logger.warning(f"Error fetching recent notes: {e}")
 
