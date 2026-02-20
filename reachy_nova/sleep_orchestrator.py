@@ -10,10 +10,19 @@ import threading
 import time
 
 import numpy as np
-from reachy_mini.reachy_mini import SLEEP_HEAD_JOINT_POSITIONS, SLEEP_ANTENNAS_JOINT_POSITIONS
+from reachy_mini.reachy_mini import (
+    SLEEP_ANTENNAS_JOINT_POSITIONS,
+    SLEEP_HEAD_JOINT_POSITIONS,
+    SLEEP_HEAD_POSE,
+)
 
+from .audio_pipeline import preprocess_mic_audio
 from .sleep_mode import SleepManager
 from .temporal import utc_now_precise, utc_now_vague
+
+# Sleep rocking animation (moved from main.py)
+SLEEP_ROCK_FREQ = 0.07   # Hz — ~14s per cycle, very slow and gentle
+SLEEP_ROCK_BODY = 12.0   # degrees — body yaw rocking amplitude
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +34,12 @@ class SleepOrchestrator:
                  gesture_cancel_event: threading.Event,
                  session, memory, feedback, mqtt, stop_event: threading.Event,
                  restart_type: str, restart_elapsed: float, previous_session: dict | None,
-                 t0: float):
+                 t0: float, tracker=None):
         self._state = state
         self._sonic = sonic
         self._vision = vision
         self._reachy_mini = reachy_mini
+        self._tracker = tracker
         self._gesture_cancel_event = gesture_cancel_event
         self._session = session
         self._memory = memory
@@ -50,6 +60,54 @@ class SleepOrchestrator:
     @property
     def state(self) -> str:
         return self.sleep_manager.state
+
+    def tick_sleeping(self, mic_sr: int) -> bool:
+        """Animate sleep (rocking + breathing) and listen for snap.
+
+        Returns True when sleep is active (caller should continue),
+        False when awake (caller proceeds with normal loop).
+        """
+        _sleep_state = self.state
+        if _sleep_state == "awake":
+            return False
+
+        if _sleep_state == "sleeping":
+            t_sleep = time.time() - self.sleep_manager._sleep_start_time
+            # Antenna breathing
+            ant_breath = np.deg2rad(1.5) * np.sin(2.0 * np.pi * 0.05 * t_sleep)
+            antennas_rad = np.array([
+                SLEEP_ANTENNAS_JOINT_POSITIONS[0] + ant_breath,
+                SLEEP_ANTENNAS_JOINT_POSITIONS[1] - ant_breath,
+            ])
+            # Rocking: rotate SLEEP_HEAD_POSE by rock yaw — preserves exact droop
+            rock_phase = 2.0 * np.pi * SLEEP_ROCK_FREQ * t_sleep
+            rock_body = SLEEP_ROCK_BODY * np.sin(rock_phase)
+            yaw_rad = np.radians(rock_body)
+            cos_y, sin_y = np.cos(yaw_rad), np.sin(yaw_rad)
+            yaw_rot = np.array([[cos_y, -sin_y, 0],
+                                [sin_y,  cos_y, 0],
+                                [0,      0,     1]])
+            head_pose = SLEEP_HEAD_POSE.copy()
+            head_pose[:3, :3] = yaw_rot @ SLEEP_HEAD_POSE[:3, :3]
+            self._reachy_mini.set_target(
+                head=head_pose,
+                antennas=antennas_rad,
+                body_yaw=np.radians(rock_body),
+            )
+
+        # Read audio for snap detection only
+        try:
+            audio = self._reachy_mini.media.get_audio_sample()
+            if audio is not None:
+                audio = preprocess_mic_audio(audio, mic_sr)
+                if _sleep_state == "sleeping":
+                    t_sleep = time.time() - self.sleep_manager._sleep_start_time
+                    if t_sleep > 3.0 and self._tracker is not None:
+                        self._tracker.detect_snap(audio)
+        except Exception:
+            pass
+
+        return True
 
     def initiate_sleep(self) -> None:
         """Stop LLM subsystems, run SDK sleep animation, then enter breathing loop."""

@@ -20,7 +20,6 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 import numpy as np
 from reachy_mini import ReachyMini, ReachyMiniApp
-from reachy_mini.reachy_mini import SLEEP_ANTENNAS_JOINT_POSITIONS, SLEEP_HEAD_POSE
 from reachy_mini.utils import create_head_pose
 
 from .nova_sonic import NovaSonic, OUTPUT_SAMPLE_RATE
@@ -54,10 +53,6 @@ logger = logging.getLogger(__name__)
 # Robot animation parameters
 IDLE_YAW_SPEED = 0.15      # Slow idle head sweep
 SPEAK_YAW_SPEED = 0.3      # Animated when speaking
-
-# Sleep rocking animation
-SLEEP_ROCK_FREQ  = 0.07   # Hz — ~14s per cycle, very slow and gentle
-SLEEP_ROCK_BODY  = 12.0   # degrees — body yaw rocking amplitude
 
 # All moods available to the system
 VALID_MOODS = {
@@ -381,7 +376,7 @@ class ReachyNova(ReachyMiniApp):
             session=session, memory=memory, feedback=feedback, mqtt=mqtt,
             stop_event=stop_event,
             restart_type=restart_type, restart_elapsed=restart_elapsed,
-            previous_session=previous_session, t0=t0,
+            previous_session=previous_session, t0=t0, tracker=tracker,
         )
 
         # --- Safety ---
@@ -508,41 +503,7 @@ class ReachyNova(ReachyMiniApp):
                 )
 
             # --- Sleep mode: short-circuit the main loop ---
-            _sleep_state = sleep_orch.state
-            if _sleep_state != "awake":
-                if _sleep_state == "sleeping":
-                    t_sleep = time.time() - sleep_orch.sleep_manager._sleep_start_time
-                    # Antenna breathing (unchanged)
-                    ant_breath = np.deg2rad(1.5) * np.sin(2.0 * np.pi * 0.05 * t_sleep)
-                    antennas_rad = np.array([
-                        SLEEP_ANTENNAS_JOINT_POSITIONS[0] + ant_breath,
-                        SLEEP_ANTENNAS_JOINT_POSITIONS[1] - ant_breath,
-                    ])
-                    # Rocking: rotate SLEEP_HEAD_POSE by rock yaw — preserves exact droop
-                    rock_phase = 2.0 * np.pi * SLEEP_ROCK_FREQ * t_sleep
-                    rock_body  = SLEEP_ROCK_BODY * np.sin(rock_phase)
-                    yaw_rad    = np.radians(rock_body)
-                    cos_y, sin_y = np.cos(yaw_rad), np.sin(yaw_rad)
-                    yaw_rot = np.array([[cos_y, -sin_y, 0],
-                                        [sin_y,  cos_y, 0],
-                                        [0,      0,     1]])
-                    head_pose = SLEEP_HEAD_POSE.copy()
-                    head_pose[:3, :3] = yaw_rot @ SLEEP_HEAD_POSE[:3, :3]
-                    reachy_mini.set_target(
-                        head=head_pose,
-                        antennas=antennas_rad,
-                        body_yaw=np.radians(rock_body),
-                    )
-
-                # Read audio for snap detection only
-                try:
-                    audio = reachy_mini.media.get_audio_sample()
-                    if audio is not None:
-                        audio = preprocess_mic_audio(audio, mic_sr)
-                        if _sleep_state == "sleeping" and t_sleep > 3.0:
-                            tracker.detect_snap(audio)
-                except Exception:
-                    pass
+            if sleep_orch.tick_sleeping(mic_sr):
                 time.sleep(0.02)
                 continue
 
