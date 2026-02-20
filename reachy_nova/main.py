@@ -122,6 +122,7 @@ MOOD_ANTENNAS = {
 }
 
 MOOD_BLEND_TIME = 1.5
+ANTENNA_SMOOTH_TAU = 0.08   # seconds — EMA time constant for servo-smooth output
 
 
 class ReachyNova(ReachyMiniApp):
@@ -478,6 +479,7 @@ class ReachyNova(ReachyMiniApp):
 
         # Antenna blending state
         prev_antennas = np.array([0.0, 0.0])
+        _smooth_antennas = np.array([0.0, 0.0])
         prev_mood = "happy"
         mood_change_time = 0.0
 
@@ -679,6 +681,11 @@ class ReachyNova(ReachyMiniApp):
                 _env = (1.0 - _pat_ant_elapsed / _PAT_ANT_DUR) ** 2
                 _vib = _PAT_ANT_AMP * _env * np.sin(2 * np.pi * _PAT_ANT_FREQ * _pat_ant_elapsed)
                 antennas_deg = antennas_deg + np.array([_vib, _vib])
+
+            # Low-pass filter for servo-smooth antenna output
+            _ant_alpha = 1.0 - np.exp(-dt / ANTENNA_SMOOTH_TAU)
+            antennas_deg = _smooth_antennas + _ant_alpha * (antennas_deg - _smooth_antennas)
+            _smooth_antennas = antennas_deg.copy()
 
             antennas_rad = np.deg2rad(antennas_deg)
 
