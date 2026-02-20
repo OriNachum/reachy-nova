@@ -295,23 +295,36 @@ class ReachyNova(ReachyMiniApp):
             mqtt.publish_event("tracking", event_type, data)
 
             if event_type == "pat_level1":
-                logger.info("[Tracking] Pat level 1 — gentle touch")
+                touch_type = data.get("touch_type", "scratch")
+                logger.info(f"[Tracking] Pat level 1 — {touch_type}")
                 emotional_state.apply_event("pat_level1")
                 state.update(pat_antenna_time=time.time())
                 if state.get("voice_state") != "speaking":
-                    sonic.inject_text(format_event("You feel a gentle tap on your head.", t0))
+                    if touch_type == "side_pat":
+                        sonic.inject_text(format_event("You feel a gentle touch on the side of your head.", t0))
+                    else:
+                        sonic.inject_text(format_event("You feel a gentle tap on the top of your head.", t0))
                 return
 
             if event_type == "pat_level2":
-                logger.info("[Tracking] Pat level 2 — sustained scratching!")
+                touch_type = data.get("touch_type", "scratch")
+                logger.info(f"[Tracking] Pat level 2 — {touch_type}!")
                 emotional_state.apply_event("pat_level2")
                 if state.get("voice_state") != "speaking":
-                    sonic.inject_text(format_event(
-                        "Someone is scratching your head and it feels wonderful. "
-                        "You're really enjoying this. "
-                        "This probably means they liked what you just did.",
-                        t0,
-                    ))
+                    if touch_type == "side_pat":
+                        sonic.inject_text(format_event(
+                            "Someone is caressing the side of your head and it feels wonderful. "
+                            "You're really enjoying this. "
+                            "This probably means they liked what you just did.",
+                            t0,
+                        ))
+                    else:
+                        sonic.inject_text(format_event(
+                            "Someone is scratching your head and it feels wonderful. "
+                            "You're really enjoying this. "
+                            "This probably means they liked what you just did.",
+                            t0,
+                        ))
                 return
 
             if event_type == "snap_detected":

@@ -34,108 +34,150 @@ IDLE_PITCH_SPEED = 0.08
 class PatDetector:
     """Detects patting gestures on the robot head.
 
-    Compares the commanded head pitch with the actual head pitch read back
-    from the servos. When someone pats the head from above, the actual pitch
-    deviates downward from the commanded pitch. Repeated downward impulses
-    within a short time window are classified as a pat.
+    Compares the commanded head pose with the actual head pose read back
+    from the servos. When someone pats the head, the actual pose deviates
+    from the commanded pose. Repeated impulses within a short time window
+    are classified as a pat.
 
-    This distinguishes pats from accidental bumps (single event) and normal
-    servo noise (below threshold).
+    Tracks both pitch (forward/down push = "scratch") and yaw (side-to-side
+    nudge = "side_pat") to differentiate touch types.
     """
 
     def __init__(self):
         # Rolling deviation history (timestamp, deviation_degrees)
         self.deviation_history: deque[tuple[float, float]] = deque(maxlen=150)
 
-        # Timestamps of detected press impulses
-        self.press_times: deque[float] = deque(maxlen=20)
+        # Detected press impulses: (timestamp, axis) where axis is "pitch" or "yaw"
+        self.press_times: deque[tuple[float, str]] = deque(maxlen=20)
         self.last_pat_time: float = 0.0
 
-        # --- Tunable parameters ---
-        self.press_threshold: float = 1.5    # degrees: deviation to count as a "press"
-        self.release_threshold: float = 0.6  # degrees: deviation below this = released
+        # --- Tunable parameters (pitch) ---
+        self.press_threshold: float = 0.8    # degrees: deviation to count as a "press"
+        self.release_threshold: float = 0.3  # degrees: deviation below this = released
         self.min_presses: int = 2            # minimum presses for a pat
-        self.pat_window: float = 2.5         # seconds: window to accumulate presses
-        self.pat_cooldown: float = 3.0       # seconds: between pat events
+        self.pat_window: float = 3.0         # seconds: window to accumulate presses
+        self.pat_cooldown: float = 2.0       # seconds: between pat events
 
-        # Internal state
+        # --- Tunable parameters (yaw) ---
+        self.yaw_press_threshold: float = 0.8   # degrees: yaw deviation to count as press
+        self.yaw_release_threshold: float = 0.3  # degrees: yaw release threshold
+
+        # Internal state (pitch)
         self._in_press: bool = False
         self._baseline_offset: float = 0.0   # rolling baseline for steady-state offset
-        self._baseline_alpha: float = 0.005   # slow EMA to track servo bias
+        self._baseline_alpha: float = 0.003   # slow EMA to track servo bias
+
+        # Internal state (yaw)
+        self.yaw_deviation_history: deque[tuple[float, float]] = deque(maxlen=150)
+        self._yaw_in_press: bool = False
+        self._yaw_baseline_offset: float = 0.0
+
+        # Current touch type carried from level1 to level2
+        self._current_touch_type: str = "scratch"
 
         # --- Two-level state machine ---
         self._state: str = "idle"                   # "idle" | "level1" | "level2_cooldown"
         self._level1_time: float = 0.0              # when level 1 fired
-        self._level2_threshold: float = 0.0         # random 5-15s for level 2
+        self._level2_threshold: float = 0.0         # random 4-8s for level 2
         self._last_press_time: float = 0.0          # most recent press (for gap detection)
-        self._interaction_gap_timeout: float = 3.0  # no presses for 3s -> reset
+        self._interaction_gap_timeout: float = 5.0  # no presses for 5s -> reset
         self._level2_cooldown: float = 5.0          # cooldown after level 2
 
-    def update(self, commanded_pitch: float, actual_pitch: float) -> str | None:
-        """Feed one sample of commanded vs actual pitch.
+    def _classify_touch(self) -> str:
+        """Classify touch type based on recent press axis distribution.
+
+        Returns:
+            "scratch" if pitch-dominated, "side_pat" if yaw-dominated.
+        """
+        now = time.time()
+        cutoff = now - self.pat_window
+        pitch_count = sum(1 for t, axis in self.press_times if t > cutoff and axis == "pitch")
+        yaw_count = sum(1 for t, axis in self.press_times if t > cutoff and axis == "yaw")
+        return "side_pat" if yaw_count > pitch_count else "scratch"
+
+    def update(
+        self,
+        commanded_pitch: float,
+        actual_pitch: float,
+        commanded_yaw: float = 0.0,
+        actual_yaw: float = 0.0,
+    ) -> tuple[str, str] | None:
+        """Feed one sample of commanded vs actual pitch and yaw.
 
         Args:
             commanded_pitch: the pitch we commanded (degrees, positive=up)
             actual_pitch: the pitch read back from the servo (degrees)
+            commanded_yaw: the yaw we commanded (degrees)
+            actual_yaw: the yaw read back from the servo (degrees)
 
         Returns:
-            "level1" on initial pat detection, "level2" on sustained scratching,
-            or None if no event.
+            (level, touch_type) tuple on detection — level is "level1" or "level2",
+            touch_type is "scratch" or "side_pat". Returns None if no event.
         """
         now = time.time()
 
-        # Raw deviation (negative = head pushed downward relative to command)
+        # --- Pitch deviation processing ---
         raw_deviation = actual_pitch - commanded_pitch
-
-        # Update slow baseline to compensate for constant servo offset / gravity
         self._baseline_offset += self._baseline_alpha * (raw_deviation - self._baseline_offset)
-
-        # Corrected deviation: remove baseline drift
         deviation = raw_deviation - self._baseline_offset
         self.deviation_history.append((now, deviation))
 
-        # Detect press events: deviation dips below threshold (head pushed down)
+        # Detect pitch press: head pushed downward (negative deviation)
         if deviation < -self.press_threshold and not self._in_press:
             self._in_press = True
-            self.press_times.append(now)
+            self.press_times.append((now, "pitch"))
             self._last_press_time = now
-            logger.debug(f"Pat press detected: deviation={deviation:.2f}deg")
+            logger.debug(f"Pat pitch press: deviation={deviation:.2f}deg")
         elif deviation > -self.release_threshold:
             self._in_press = False
 
+        # --- Yaw deviation processing ---
+        raw_yaw_dev = actual_yaw - commanded_yaw
+        self._yaw_baseline_offset += self._baseline_alpha * (raw_yaw_dev - self._yaw_baseline_offset)
+        yaw_dev = raw_yaw_dev - self._yaw_baseline_offset
+        self.yaw_deviation_history.append((now, yaw_dev))
+
+        # Detect yaw press: head nudged sideways (absolute deviation)
+        if abs(yaw_dev) > self.yaw_press_threshold and not self._yaw_in_press:
+            self._yaw_in_press = True
+            self.press_times.append((now, "yaw"))
+            self._last_press_time = now
+            logger.debug(f"Pat yaw press: deviation={yaw_dev:.2f}deg")
+        elif abs(yaw_dev) < self.yaw_release_threshold:
+            self._yaw_in_press = False
+
         # --- State machine ---
         if self._state == "idle":
-            # Count recent presses within the time window
             cutoff = now - self.pat_window
-            recent_presses = sum(1 for t in self.press_times if t > cutoff)
+            recent_presses = sum(1 for t, _ in self.press_times if t > cutoff)
 
             if recent_presses >= self.min_presses and now - self.last_pat_time > self.pat_cooldown:
+                touch_type = self._classify_touch()
+                self._current_touch_type = touch_type
                 self.last_pat_time = now
                 self.press_times.clear()
                 self._state = "level1"
                 self._level1_time = now
-                self._level2_threshold = random.uniform(5.0, 15.0)
-                logger.info(f"Pat level 1! ({recent_presses} presses, level2 threshold={self._level2_threshold:.1f}s)")
-                return "level1"
+                self._level2_threshold = random.uniform(4.0, 8.0)
+                logger.info(f"Pat level 1! type={touch_type} ({recent_presses} presses, level2 threshold={self._level2_threshold:.1f}s)")
+                return ("level1", touch_type)
 
         elif self._state == "level1":
-            # Check for interaction gap: no presses for 3s -> reset
             if self._last_press_time > 0 and now - self._last_press_time > self._interaction_gap_timeout:
                 logger.info("Pat interaction gap — resetting to idle")
                 self._state = "idle"
                 return None
 
-            # Check if sustained scratching exceeds random threshold
             elapsed = now - self._level1_time
             if elapsed > self._level2_threshold:
+                touch_type = self._current_touch_type
                 self.last_pat_time = now
                 self.press_times.clear()
                 self._state = "level2_cooldown"
-                logger.info(f"Pat level 2! (sustained {elapsed:.1f}s)")
-                return "level2"
+                logger.info(f"Pat level 2! type={touch_type} (sustained {elapsed:.1f}s)")
+                return ("level2", touch_type)
 
         elif self._state == "level2_cooldown":
-            # Suppress all detection for cooldown period, then reset
             if now - self.last_pat_time > self._level2_cooldown:
                 logger.info("Pat cooldown expired — ready for new detection")
                 self._state = "idle"
@@ -146,9 +188,13 @@ class PatDetector:
     def reset(self):
         """Reset detector state."""
         self.deviation_history.clear()
+        self.yaw_deviation_history.clear()
         self.press_times.clear()
         self._in_press = False
+        self._yaw_in_press = False
         self._baseline_offset = 0.0
+        self._yaw_baseline_offset = 0.0
+        self._current_touch_type = "scratch"
         self._state = "idle"
         self._level1_time = 0.0
         self._level2_threshold = 0.0
@@ -387,23 +433,34 @@ class TrackingManager:
             actual_pose: 4x4 homogeneous matrix read from get_current_head_pose()
         """
         try:
-            # Extract pitch from both poses (euler "xyz" convention, index 1 = pitch)
+            # Extract pitch (index 1) and yaw (index 2) from both poses
             cmd_euler = Rotation.from_matrix(commanded_pose[:3, :3]).as_euler("xyz", degrees=True)
             act_euler = Rotation.from_matrix(actual_pose[:3, :3]).as_euler("xyz", degrees=True)
             commanded_pitch = cmd_euler[1]
             actual_pitch = act_euler[1]
+            commanded_yaw = cmd_euler[2]
+            actual_yaw = act_euler[2]
 
-            result = self.pat_detector.update(commanded_pitch, actual_pitch)
+            result = self.pat_detector.update(
+                commanded_pitch, actual_pitch,
+                commanded_yaw, actual_yaw,
+            )
             event_data = {
                 "commanded_pitch": float(commanded_pitch),
                 "actual_pitch": float(actual_pitch),
                 "deviation": float(actual_pitch - commanded_pitch),
+                "commanded_yaw": float(commanded_yaw),
+                "actual_yaw": float(actual_yaw),
+                "yaw_deviation": float(actual_yaw - commanded_yaw),
             }
-            if result == "level1":
-                self.pat_level1_time = time.time()
-                self._fire_event("pat_level1", event_data)
-            elif result == "level2":
-                self._fire_event("pat_level2", event_data)
+            if result is not None:
+                level, touch_type = result
+                event_data["touch_type"] = touch_type
+                if level == "level1":
+                    self.pat_level1_time = time.time()
+                    self._fire_event("pat_level1", event_data)
+                elif level == "level2":
+                    self._fire_event("pat_level2", event_data)
         except Exception as e:
             logger.debug(f"Pat detection error: {e}")
 
