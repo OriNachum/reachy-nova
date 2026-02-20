@@ -17,6 +17,7 @@ from reachy_mini.reachy_mini import (
 )
 
 from .audio_pipeline import preprocess_mic_audio
+from .movement_math import ease_sin_soft
 from .sleep_mode import SleepManager
 from .temporal import utc_now_precise, utc_now_vague
 
@@ -74,15 +75,16 @@ class SleepOrchestrator:
 
         if _sleep_state == "sleeping":
             t_sleep = time.time() - self.sleep_manager._sleep_start_time
-            # Antenna breathing
-            ant_breath = np.deg2rad(1.5) * np.sin(2.0 * np.pi * 0.05 * t_sleep)
+            # Startup ramp — prevents abrupt jump on sleep entry, full amplitude after 8s
+            ramp = min(1.0, t_sleep / 8.0)
+            # Antenna breathing — ease_sin_soft: zero vel/accel at turnarounds = no stutter
+            ant_breath = np.deg2rad(1.5) * ramp * ease_sin_soft(t_sleep, 0.05)
             antennas_rad = np.array([
                 SLEEP_ANTENNAS_JOINT_POSITIONS[0] + ant_breath,
                 SLEEP_ANTENNAS_JOINT_POSITIONS[1] - ant_breath,
             ])
             # Rocking: rotate SLEEP_HEAD_POSE by rock yaw — preserves exact droop
-            rock_phase = 2.0 * np.pi * SLEEP_ROCK_FREQ * t_sleep
-            rock_body = SLEEP_ROCK_BODY * np.sin(rock_phase)
+            rock_body = SLEEP_ROCK_BODY * ramp * ease_sin_soft(t_sleep, SLEEP_ROCK_FREQ)
             yaw_rad = np.radians(rock_body)
             cos_y, sin_y = np.cos(yaw_rad), np.sin(yaw_rad)
             yaw_rot = np.array([[cos_y, -sin_y, 0],

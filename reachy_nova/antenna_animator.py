@@ -9,19 +9,7 @@ import logging
 
 import numpy as np
 
-
-# ---------------------------------------------------------------------------
-# Easing helpers
-# ---------------------------------------------------------------------------
-
-def ease_sin(t: float, freq: float) -> float:
-    """Pure sine wave — naturally smooth, decelerates at peaks."""
-    return np.sin(2.0 * np.pi * freq * t)
-
-
-def ease_sin_soft(t: float, freq: float) -> float:
-    """Sine-of-sine — extra dwell time at the extremes for organic feel."""
-    return float(np.sin(0.5 * np.pi * np.sin(2.0 * np.pi * freq * t)))
+from .movement_math import ease_sin, ease_sin_soft
 
 
 # ---------------------------------------------------------------------------
