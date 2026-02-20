@@ -252,9 +252,27 @@ class TrackingManager:
         self.pat_detector = PatDetector()
         self.pat_level1_time: float = 0.0     # timestamp when level 1 pat fired
 
+        # --- YuNet face bbox (fed from FaceRecognition callback) ---
+        self.yunet_face_bbox: tuple | None = None   # (x1,y1,x2,y2) normalized
+        self.yunet_face_time: float = 0.0
+        self.yunet_face_hold: float = 1.5           # seconds to hold after last detection
+
         # --- Face recognition state ---
         self.recognized_person: str | None = None  # name of recognized person
         self.face_recognized_time: float = 0.0
+
+        # --- Focus mode state ---
+        self.focus_active: bool = False
+        self.focus_target: str = "face"           # "face" or recognized person name
+        self.focus_last_seen: float = 0.0         # last time target was visible
+        self.focus_lost_threshold: float = 3.0    # seconds before entering search
+        self.focus_searching: bool = False
+        self.focus_search_start: float = 0.0
+        self.focus_search_max: float = 60.0       # auto-abandon after this many seconds
+        self.focus_scan_yaw: float = 0.0          # current scan yaw
+        self.focus_scan_dir: float = 1.0          # +1 right, -1 left
+        self.focus_prompted_llm: bool = False     # gate for repeated LLM prompts
+        self.on_focus_event: Callable[[str, dict], None] | None = None
 
         # --- Current mode ---
         self.mode = "idle"
@@ -332,16 +350,23 @@ class TrackingManager:
                     self.person_bbox = (box[0] / w, box[1] / h, box[2] / w, box[3] / h)
                     self.person_lost_time = 0.0
 
-                    cx = (self.person_bbox[0] + self.person_bbox[2]) / 2.0
-                    cy = (self.person_bbox[1] + self.person_bbox[3]) / 2.0
-                    error_x = cx - 0.5
-                    error_y = cy - 0.5
+                    # Skip YOLO body-center accumulator update if a fresh YuNet face bbox
+                    # was seen recently — face update already happened in update_face_bbox()
+                    yunet_fresh = (
+                        self.yunet_face_bbox is not None
+                        and time.time() - self.yunet_face_time < self.yunet_face_hold
+                    )
+                    if not yunet_fresh:
+                        cx = (self.person_bbox[0] + self.person_bbox[2]) / 2.0
+                        cy = (self.person_bbox[1] + self.person_bbox[3]) / 2.0
+                        error_x = cx - 0.5
+                        error_y = cy - 0.5
 
-                    self.face_yaw_accum -= self.face_kp * error_x
-                    self.face_pitch_accum += self.face_kp * error_y * 0.5
+                        self.face_yaw_accum -= self.face_kp * error_x
+                        self.face_pitch_accum += self.face_kp * error_y * 0.5
 
-                    self.face_yaw_accum = np.clip(self.face_yaw_accum, -MAX_YAW, MAX_YAW)
-                    self.face_pitch_accum = np.clip(self.face_pitch_accum, MIN_PITCH, MAX_PITCH)
+                        self.face_yaw_accum = np.clip(self.face_yaw_accum, -MAX_YAW, MAX_YAW)
+                        self.face_pitch_accum = np.clip(self.face_pitch_accum, MIN_PITCH, MAX_PITCH)
 
                     # Fire person_detected when transitioning from no person to person
                     if not had_person:
@@ -480,6 +505,64 @@ class TrackingManager:
         target_pitch = 0.0
         prev_mode = self.mode
 
+        # --- Focus mode: persistent target-locked tracking ---
+        if self.focus_active:
+            with self._vision_lock:
+                person_visible = self.person_bbox is not None
+                yunet_visible = (
+                    self.yunet_face_bbox is not None
+                    and now - self.yunet_face_time < self.yunet_face_hold
+                )
+                target_visible = person_visible or yunet_visible
+
+            if target_visible:
+                # Target in view — update last_seen and fall through to normal tracking below
+                self.focus_last_seen = now
+                self.focus_searching = False
+                self.focus_prompted_llm = False
+                # (normal priority cascade handles visual targeting)
+            else:
+                lost_elapsed = now - self.focus_last_seen if self.focus_last_seen > 0 else 0.0
+                if lost_elapsed >= self.focus_lost_threshold:
+                    # Enter / continue search mode
+                    if not self.focus_searching:
+                        self.focus_searching = True
+                        self.focus_search_start = now
+                        logger.info("[Focus] Target lost — starting search sweep")
+
+                    search_elapsed = now - self.focus_search_start
+
+                    # Prompt LLM once per search session
+                    if not self.focus_prompted_llm and self.on_focus_event:
+                        self.focus_prompted_llm = True
+                        try:
+                            self.on_focus_event("lost", {"elapsed": lost_elapsed})
+                        except Exception as e:
+                            logger.warning(f"on_focus_event callback error: {e}")
+
+                    # Auto-abandon
+                    if search_elapsed >= self.focus_search_max:
+                        logger.info("[Focus] Search timed out — auto-stopping focus")
+                        self.focus_active = False
+                        self.focus_searching = False
+                        if self.on_focus_event:
+                            try:
+                                self.on_focus_event("abandoned", {"elapsed": search_elapsed})
+                            except Exception as e:
+                                logger.warning(f"on_focus_event callback error: {e}")
+                    else:
+                        # Slow sinusoidal scan
+                        self.mode = "face"
+                        scan_yaw = MAX_YAW * np.sin(2.0 * np.pi * search_elapsed / 20.0)
+                        target_yaw = scan_yaw
+                        target_pitch = self.face_pitch_accum  # hold last known pitch
+                        self.current_yaw += 0.05 * (target_yaw - self.current_yaw)
+                        self.current_pitch += 0.05 * (target_pitch - self.current_pitch)
+                        self.current_pitch = float(np.clip(self.current_pitch, MIN_PITCH, MAX_PITCH))
+                        if self.mode != prev_mode:
+                            self._fire_event("mode_changed", {"from": prev_mode, "to": self.mode})
+                        return self.current_yaw, self.current_pitch
+
         # Priority 1: Snap look
         if now - self.snap_time < self.snap_duration:
             self.mode = "snap"
@@ -489,8 +572,8 @@ class TrackingManager:
             self.current_yaw += 0.5 * (target_yaw - self.current_yaw)
             self.current_pitch += 0.5 * (target_pitch - self.current_pitch)
 
-        # Priority 2: Face/person tracking (read under lock)
-        elif self._has_person():
+        # Priority 2: Face/person tracking (YOLO body or fresh YuNet face)
+        elif self._has_person_or_face(now):
             self.mode = "face"
             with self._vision_lock:
                 target_yaw = self.face_yaw_accum
@@ -542,6 +625,25 @@ class TrackingManager:
 
         return self.current_yaw, self.current_pitch
 
+    def update_face_bbox(self, bbox_norm: tuple | None):
+        """Update YuNet face bbox from FaceRecognition callback (thread-safe).
+
+        Args:
+            bbox_norm: normalized (x1, y1, x2, y2) or None if no face detected
+        """
+        with self._vision_lock:
+            self.yunet_face_bbox = bbox_norm
+            if bbox_norm is not None:
+                self.yunet_face_time = time.time()
+                cx = (bbox_norm[0] + bbox_norm[2]) / 2.0
+                cy = (bbox_norm[1] + bbox_norm[3]) / 2.0
+                error_x = cx - 0.5
+                error_y = cy - 0.5
+                self.face_yaw_accum -= self.face_kp * error_x
+                self.face_pitch_accum += self.face_kp * error_y * 0.5
+                self.face_yaw_accum = np.clip(self.face_yaw_accum, -MAX_YAW, MAX_YAW)
+                self.face_pitch_accum = np.clip(self.face_pitch_accum, MIN_PITCH, MAX_PITCH)
+
     def update_face_recognition(self, match_data: tuple[str, str, float] | None):
         """Update face recognition state from FaceRecognition engine.
 
@@ -560,7 +662,42 @@ class TrackingManager:
         else:
             self.recognized_person = None
 
+    def start_focus(self, target: str = "face"):
+        """Enable persistent focus tracking on a face or person."""
+        self.focus_active = True
+        self.focus_target = target
+        self.focus_last_seen = time.time()
+        self.focus_searching = False
+        self.focus_prompted_llm = False
+        logger.info(f"[Focus] Started focus on target='{target}'")
+
+    def stop_focus(self):
+        """Disable focus mode, returning to normal reactive tracking."""
+        self.focus_active = False
+        self.focus_searching = False
+        self.focus_prompted_llm = False
+        logger.info("[Focus] Focus stopped")
+
+    def continue_focus_search(self):
+        """Reset search timer to extend search by up to focus_search_max more seconds."""
+        if self.focus_active:
+            self.focus_search_start = time.time()
+            self.focus_prompted_llm = False
+            logger.info("[Focus] Search timer reset — continuing search")
+
     def _has_person(self) -> bool:
         """Check if a person is currently being tracked (thread-safe)."""
         with self._vision_lock:
             return self.person_bbox is not None
+
+    def _has_person_or_face(self, now: float | None = None) -> bool:
+        """Check if a person or fresh YuNet face is currently tracked (thread-safe)."""
+        if now is None:
+            now = time.time()
+        with self._vision_lock:
+            if self.person_bbox is not None:
+                return True
+            return (
+                self.yunet_face_bbox is not None
+                and now - self.yunet_face_time < self.yunet_face_hold
+            )

@@ -57,14 +57,17 @@ class FaceRecognition:
         self,
         face_manager: FaceManager,
         on_match: Callable[[str, str, float], None] | None = None,
+        on_face_bbox: Callable[[tuple | None], None] | None = None,
     ):
         """
         Args:
             face_manager: FaceManager instance for matching
             on_match: callback(unique_id, name, score) when a face is recognized
+            on_face_bbox: callback(bbox_norm) with normalized (x1,y1,x2,y2) or None
         """
         self.face_manager = face_manager
         self.on_match = on_match
+        self.on_face_bbox = on_face_bbox
 
         # Models (lazy-loaded)
         self._detector = None
@@ -154,12 +157,26 @@ class FaceRecognition:
                 with self._lock:
                     self._current_embedding = None
                     self._recognized_person = None
+                if self.on_face_bbox:
+                    try:
+                        self.on_face_bbox(None)
+                    except Exception as e:
+                        logger.warning(f"on_face_bbox callback error: {e}")
                 return
 
             # Pick largest face by bounding box area
             areas = faces[:, 2] * faces[:, 3]  # width * height
             best_idx = int(np.argmax(areas))
             best_face = faces[best_idx]
+
+            # Fire normalized face bbox callback (x, y, w, h are first 4 columns)
+            bx, by, bw, bh = float(best_face[0]), float(best_face[1]), float(best_face[2]), float(best_face[3])
+            bbox_norm = (bx / w, by / h, (bx + bw) / w, (by + bh) / h)
+            if self.on_face_bbox:
+                try:
+                    self.on_face_bbox(bbox_norm)
+                except Exception as e:
+                    logger.warning(f"on_face_bbox callback error: {e}")
 
             # Align and extract embedding (128-dim)
             aligned = self._recognizer.alignCrop(frame, best_face)

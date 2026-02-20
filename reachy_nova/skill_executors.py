@@ -207,6 +207,21 @@ def _face_executor(params: dict, ctx) -> str:
     return f"[Unknown face operation: {op}]"
 
 
+def _focus_executor(params: dict, ctx) -> str:
+    action = params.get("action", "start")
+    target = params.get("target", "face")
+    if action == "start":
+        ctx.tracker.start_focus(target=target)
+        return f"[Focus started on {target}. Tracking persistently locked.]"
+    elif action == "stop":
+        ctx.tracker.stop_focus()
+        return "[Focus released. Returning to normal reactive tracking.]"
+    elif action == "continue_search":
+        ctx.tracker.continue_focus_search()
+        return "[Search timer reset — extending search up to 60 more seconds.]"
+    return f"[Unknown focus action: {action}]"
+
+
 def register_all(skill_manager, ctx) -> None:
     """Register all skill executors with their JSON schemas."""
 
@@ -443,5 +458,29 @@ def register_all(skill_manager, ctx) -> None:
                 },
             },
             "required": ["operation"],
+        },
+    )
+
+    skill_manager.register_executor(
+        "focus",
+        lambda params: _focus_executor(params, ctx),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": (
+                        "start: lock attention on face/person persistently. "
+                        "stop: release focus, return to reactive tracking. "
+                        "continue_search: extend search when target is lost."
+                    ),
+                    "enum": ["start", "stop", "continue_search"],
+                },
+                "target": {
+                    "type": "string",
+                    "description": "What to focus on: 'face' (default) or a recognized person's name",
+                },
+            },
+            "required": ["action"],
         },
     )

@@ -344,6 +344,28 @@ class ReachyNova(ReachyMiniApp):
         tracker = TrackingManager(on_event=on_tracking_event)
         last_doa_time = 0.0
 
+        # Wire YuNet face bbox from FaceRecognition into TrackingManager
+        face_recognition.on_face_bbox = lambda bbox: tracker.update_face_bbox(bbox)
+
+        # Focus event handler: inject LLM prompts when focus target is lost/abandoned
+        def on_focus_event(event_type: str, info: dict):
+            if sleep_orch.state != "awake":
+                return
+            if event_type == "lost":
+                sonic.inject_text(format_event(
+                    "[Focus: Lost sight of focus target. "
+                    "Call focus(action='continue_search') to keep searching up to 1 minute, "
+                    "or focus(action='stop') to give up.]",
+                    t0,
+                ))
+            elif event_type == "abandoned":
+                sonic.inject_text(format_event(
+                    "[Focus: Gave up searching. Focus turned off automatically.]",
+                    t0,
+                ))
+
+        tracker.on_focus_event = on_focus_event
+
         # --- Voice callbacks ---
         def on_transcript(role: str, text: str):
             feedback.update_conversation(role, text)
