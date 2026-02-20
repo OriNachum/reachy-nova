@@ -20,7 +20,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 import numpy as np
 from reachy_mini import ReachyMini, ReachyMiniApp
-from reachy_mini.reachy_mini import SLEEP_ANTENNAS_JOINT_POSITIONS
+from reachy_mini.reachy_mini import SLEEP_ANTENNAS_JOINT_POSITIONS, SLEEP_HEAD_POSE
 from reachy_mini.utils import create_head_pose
 
 from .nova_sonic import NovaSonic, OUTPUT_SAMPLE_RATE
@@ -56,9 +56,8 @@ IDLE_YAW_SPEED = 0.15      # Slow idle head sweep
 SPEAK_YAW_SPEED = 0.3      # Animated when speaking
 
 # Sleep rocking animation
-SLEEP_ROCK_FREQ        = 0.07   # Hz — ~14s per cycle, very slow and gentle
-SLEEP_ROCK_BODY        = 12.0   # degrees — body yaw rocking amplitude
-SLEEP_HEAD_DROOP_PITCH = 24.4   # degrees — sleep droop pitch (from SLEEP_HEAD_POSE FK)
+SLEEP_ROCK_FREQ  = 0.07   # Hz — ~14s per cycle, very slow and gentle
+SLEEP_ROCK_BODY  = 12.0   # degrees — body yaw rocking amplitude
 
 # All moods available to the system
 VALID_MOODS = {
@@ -519,12 +518,16 @@ class ReachyNova(ReachyMiniApp):
                         SLEEP_ANTENNAS_JOINT_POSITIONS[0] + ant_breath,
                         SLEEP_ANTENNAS_JOINT_POSITIONS[1] - ant_breath,
                     ])
-                    # Rocking: body and head yaw together, head keeps sleep droop pitch
+                    # Rocking: rotate SLEEP_HEAD_POSE by rock yaw — preserves exact droop
                     rock_phase = 2.0 * np.pi * SLEEP_ROCK_FREQ * t_sleep
                     rock_body  = SLEEP_ROCK_BODY * np.sin(rock_phase)
-                    head_pose  = create_head_pose(
-                        yaw=rock_body, pitch=SLEEP_HEAD_DROOP_PITCH, degrees=True
-                    )
+                    yaw_rad    = np.radians(rock_body)
+                    cos_y, sin_y = np.cos(yaw_rad), np.sin(yaw_rad)
+                    yaw_rot = np.array([[cos_y, -sin_y, 0],
+                                        [sin_y,  cos_y, 0],
+                                        [0,      0,     1]])
+                    head_pose = SLEEP_HEAD_POSE.copy()
+                    head_pose[:3, :3] = yaw_rot @ SLEEP_HEAD_POSE[:3, :3]
                     reachy_mini.set_target(
                         head=head_pose,
                         antennas=antennas_rad,
