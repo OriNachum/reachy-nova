@@ -34,12 +34,13 @@ class SleepOrchestrator:
                  gesture_cancel_event: threading.Event,
                  session, memory, feedback, mqtt, stop_event: threading.Event,
                  restart_type: str, restart_elapsed: float, previous_session: dict | None,
-                 t0: float, tracker=None):
+                 t0: float, tracker=None, wake_word=None):
         self._state = state
         self._sonic = sonic
         self._vision = vision
         self._reachy_mini = reachy_mini
         self._tracker = tracker
+        self._wake_word = wake_word
         self._gesture_cancel_event = gesture_cancel_event
         self._session = session
         self._memory = memory
@@ -95,15 +96,17 @@ class SleepOrchestrator:
                 body_yaw=np.radians(rock_body),
             )
 
-        # Read audio for snap detection only
+        # Read audio for wake word detection during sleep
         try:
             audio = self._reachy_mini.media.get_audio_sample()
             if audio is not None:
                 audio = preprocess_mic_audio(audio, mic_sr)
                 if _sleep_state == "sleeping":
                     t_sleep = time.time() - self.sleep_manager._sleep_start_time
-                    if t_sleep > 3.0 and self._tracker is not None:
-                        self._tracker.detect_snap(audio)
+                    if t_sleep > 3.0 and self._wake_word is not None:
+                        if self._wake_word.detect(audio):
+                            logger.info("[Sleep] Wake word detected — waking up!")
+                            self.initiate_wake()
         except Exception:
             pass
 
@@ -140,10 +143,14 @@ class SleepOrchestrator:
 
         self.high_boredom_start = 0.0
 
-        # 5. Mark as falling_asleep
+        # 5. Reset wake word buffer so stale audio doesn't cause instant re-wake
+        if self._wake_word is not None:
+            self._wake_word.reset()
+
+        # 6. Mark as falling_asleep
         self.sleep_manager.trigger_sleep()
 
-        # 6. Run SDK sleep animation in background
+        # 7. Run SDK sleep animation in background
         def _sdk_sleep():
             try:
                 self._reachy_mini.goto_sleep()

@@ -44,6 +44,7 @@ from .nova_context import NovaContext
 from .skill_executors import register_all as register_skill_executors
 from .api_routes import register_routes
 from .sleep_orchestrator import SleepOrchestrator
+from .wake_word import WakeWordDetector
 from .audio_pipeline import preprocess_mic_audio, resample_output
 from .antenna_animator import AntennaAnimator
 
@@ -224,9 +225,6 @@ class ReachyNova(ReachyMiniApp):
 
             sleep_state = sleep_orch.state
             if sleep_state != "awake":
-                if event_type == "snap_detected" and sleep_state == "sleeping":
-                    logger.info("[Sleep] Snap detected — waking up!")
-                    sleep_orch.initiate_wake()
                 return
 
             mqtt.publish_event("tracking", event_type, data)
@@ -279,6 +277,12 @@ class ReachyNova(ReachyMiniApp):
 
         tracker = TrackingManager(on_event=on_tracking_event)
         last_doa_time = 0.0
+
+        # --- Wake word detector ---
+        wake_word = WakeWordDetector(
+            model=os.getenv("WAKE_WORD_MODEL", "hey_jarvis"),
+            threshold=float(os.getenv("WAKE_WORD_THRESHOLD", "0.5")),
+        )
 
         # Wire YuNet face bbox from FaceRecognition into TrackingManager
         face_recognition.on_face_bbox = lambda bbox: tracker.update_face_bbox(bbox)
@@ -377,6 +381,7 @@ class ReachyNova(ReachyMiniApp):
             stop_event=stop_event,
             restart_type=restart_type, restart_elapsed=restart_elapsed,
             previous_session=previous_session, t0=t0, tracker=tracker,
+            wake_word=wake_word,
         )
 
         # --- Safety ---
