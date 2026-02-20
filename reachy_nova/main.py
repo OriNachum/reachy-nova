@@ -54,6 +54,12 @@ logger = logging.getLogger(__name__)
 IDLE_YAW_SPEED = 0.15      # Slow idle head sweep
 SPEAK_YAW_SPEED = 0.3      # Animated when speaking
 
+# Sleep rocking animation
+SLEEP_ROCK_FREQ   = 0.07    # Hz — ~14s per cycle, very slow and gentle
+SLEEP_ROCK_YAW    = 12.0    # degrees — head side-to-side swing
+SLEEP_ROCK_PITCH  = 4.0     # degrees — head forward/back (90° offset = circular)
+SLEEP_ROCK_BODY   = 6.0     # degrees — body follows head yaw
+
 # All moods available to the system
 VALID_MOODS = {
     "happy", "excited", "curious", "thinking",
@@ -122,7 +128,9 @@ MOOD_ANTENNAS = {
 }
 
 MOOD_BLEND_TIME = 1.5
-ANTENNA_SMOOTH_TAU = 0.08   # seconds — EMA time constant for servo-smooth output
+ANTENNA_SMOOTH_TAU = 0.10   # seconds — EMA time constant (double-pass)
+ANTENNA_MAX_SLEW = 80.0     # deg/s — velocity clamp to prevent servo stutter
+ANTENNA_DEBUG = False        # set True to log to /tmp/antenna_diag.log
 
 
 class ReachyNova(ReachyMiniApp):
@@ -502,6 +510,8 @@ class ReachyNova(ReachyMiniApp):
         # Antenna blending state
         prev_antennas = np.array([0.0, 0.0])
         _smooth_antennas = np.array([0.0, 0.0])
+        _smooth_antennas_2 = np.array([0.0, 0.0])   # second EMA pass for velocity smoothing
+        _antenna_t = 0.0        # decoupled time accumulator — never jumps on loop stalls
         prev_mood = "happy"
         mood_change_time = 0.0
 
@@ -514,6 +524,17 @@ class ReachyNova(ReachyMiniApp):
         # Periodic vague time sense injection
         _last_clock_inject = 0.0
         CLOCK_INJECT_INTERVAL = 600.0
+
+        # Antenna diagnostic logging (enable with ANTENNA_DEBUG = True)
+        _ant_diag_logger = None
+        if ANTENNA_DEBUG:
+            _ant_diag_logger = logging.getLogger("antenna_diag")
+            _ant_diag_logger.setLevel(logging.DEBUG)
+            _ant_diag_logger.propagate = False
+            _ant_diag_fh = logging.FileHandler("/tmp/antenna_diag.log", mode="w")
+            _ant_diag_fh.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+            _ant_diag_logger.addHandler(_ant_diag_fh)
+        _ant_prev_output = np.array([0.0, 0.0])
 
         # --- Main control loop ---
         _prev_loop_time = time.time()
@@ -575,13 +596,23 @@ class ReachyNova(ReachyMiniApp):
             if _sleep_state != "awake":
                 if _sleep_state == "sleeping":
                     t_sleep = time.time() - sleep_orch.sleep_manager._sleep_start_time
+                    # Antenna breathing (unchanged)
                     ant_breath = np.deg2rad(1.5) * np.sin(2.0 * np.pi * 0.05 * t_sleep)
                     antennas_rad = np.array([
                         SLEEP_ANTENNAS_JOINT_POSITIONS[0] + ant_breath,
                         SLEEP_ANTENNAS_JOINT_POSITIONS[1] - ant_breath,
                     ])
-                    body_sway = np.radians(5.0 * np.sin(2.0 * np.pi * 0.04 * t_sleep))
-                    reachy_mini.set_target(antennas=antennas_rad, body_yaw=body_sway)
+                    # Circular rocking: yaw=sin, pitch=cos (90° offset traces an ellipse)
+                    rock_phase = 2.0 * np.pi * SLEEP_ROCK_FREQ * t_sleep
+                    rock_yaw   = SLEEP_ROCK_YAW   * np.sin(rock_phase)
+                    rock_pitch = SLEEP_ROCK_PITCH * np.cos(rock_phase)
+                    rock_body  = SLEEP_ROCK_BODY  * np.sin(rock_phase)  # body in sync with head yaw
+                    head_pose = create_head_pose(yaw=rock_yaw, pitch=rock_pitch, roll=0.0, degrees=True)
+                    reachy_mini.set_target(
+                        head=head_pose,
+                        antennas=antennas_rad,
+                        body_yaw=np.radians(rock_body),
+                    )
 
                 # Read audio for snap detection only
                 try:
@@ -659,12 +690,15 @@ class ReachyNova(ReachyMiniApp):
             head_pose = create_head_pose(yaw=safe_yaw, pitch=safe_pitch, degrees=True)
 
             # --- Antenna animation ---
+            _ant_dt = min(dt, 0.03)   # cap so loop stalls don't cause target jumps
+            _antenna_t += _ant_dt
+
             if antenna_mode == "off":
                 antennas_deg = np.array([0.0, 0.0])
             else:
                 if mood != prev_mood:
                     prev_mood = mood
-                    mood_change_time = t
+                    mood_change_time = _antenna_t
 
                 profile = MOOD_ANTENNAS.get(mood, MOOD_ANTENNAS["happy"])
                 ease_fn = profile["ease"]
@@ -673,17 +707,17 @@ class ReachyNova(ReachyMiniApp):
                 offset = profile.get("offset", 0.0)
 
                 if profile["phase"] == "custom" and mood == "thinking":
-                    a1 = offset + amp * ease_fn(t, freq)
-                    a2 = -10.0 + 5.0 * ease_fn(t, freq * 1.5)
+                    a1 = offset + amp * ease_fn(_antenna_t, freq)
+                    a2 = -10.0 + 5.0 * ease_fn(_antenna_t, freq * 1.5)
                     target_antennas = np.array([a1, a2])
                 elif profile["phase"] == "sync":
-                    a = offset + amp * ease_fn(t, freq)
+                    a = offset + amp * ease_fn(_antenna_t, freq)
                     target_antennas = np.array([a, a])
                 else:
-                    a = amp * ease_fn(t, freq)
+                    a = amp * ease_fn(_antenna_t, freq)
                     target_antennas = np.array([offset + a, offset - a])
 
-                elapsed = t - mood_change_time
+                elapsed = _antenna_t - mood_change_time
                 if elapsed < MOOD_BLEND_TIME:
                     alpha = elapsed / MOOD_BLEND_TIME
                     alpha = alpha * alpha * (3.0 - 2.0 * alpha)
@@ -698,16 +732,38 @@ class ReachyNova(ReachyMiniApp):
             _pat_ant_elapsed = now - _pat_ant_time
             _PAT_ANT_DUR = 2.0
             _PAT_ANT_FREQ = 3.5
-            _PAT_ANT_AMP = 6.0
+            _PAT_ANT_AMP = 10.0
             if 0 < _pat_ant_elapsed < _PAT_ANT_DUR:
                 _env = (1.0 - _pat_ant_elapsed / _PAT_ANT_DUR) ** 2
                 _vib = _PAT_ANT_AMP * _env * np.sin(2 * np.pi * _PAT_ANT_FREQ * _pat_ant_elapsed)
                 antennas_deg = antennas_deg + np.array([_vib, _vib])
 
-            # Low-pass filter for servo-smooth antenna output
-            _ant_alpha = 1.0 - np.exp(-dt / ANTENNA_SMOOTH_TAU)
-            antennas_deg = _smooth_antennas + _ant_alpha * (antennas_deg - _smooth_antennas)
-            _smooth_antennas = antennas_deg.copy()
+            # Double EMA — smooths both position and velocity for stutter-free output
+            _ant_alpha = 1.0 - np.exp(-_ant_dt / ANTENNA_SMOOTH_TAU)
+            _smooth_antennas = _smooth_antennas + _ant_alpha * (antennas_deg - _smooth_antennas)
+            _smooth_antennas_2 = _smooth_antennas_2 + _ant_alpha * (_smooth_antennas - _smooth_antennas_2)
+            antennas_deg = _smooth_antennas_2.copy()
+
+            # Velocity clamp — cap max deg/frame so servos can track smoothly
+            _max_step = ANTENNA_MAX_SLEW * dt
+            _ant_delta = antennas_deg - _ant_prev_output
+            _ant_delta = np.clip(_ant_delta, -_max_step, _max_step)
+            antennas_deg = _ant_prev_output + _ant_delta
+
+            # Diagnostic logging (gated by ANTENNA_DEBUG)
+            if _ant_diag_logger is not None:
+                _ant_jump = np.max(np.abs(_ant_delta))
+                if dt > 0.04:
+                    _ant_diag_logger.debug(
+                        "DT_SPIKE dt=%.4f jump=%.2f pos=[%.1f,%.1f]",
+                        dt, _ant_jump, antennas_deg[0], antennas_deg[1],
+                    )
+                if _ant_jump >= _max_step * 0.99:
+                    _ant_diag_logger.debug(
+                        "CLAMP    dt=%.4f step=%.2f max=%.2f pos=[%.1f,%.1f]",
+                        dt, _ant_jump, _max_step, antennas_deg[0], antennas_deg[1],
+                    )
+            _ant_prev_output = antennas_deg.copy()
 
             antennas_rad = np.deg2rad(antennas_deg)
 
@@ -819,7 +875,9 @@ class ReachyNova(ReachyMiniApp):
                             except Exception:
                                 pass
 
-            time.sleep(0.02)
+            # Adaptive sleep — target 50Hz to match the backend daemon's update rate
+            _loop_elapsed = time.time() - now
+            time.sleep(max(0.002, 0.02 - _loop_elapsed))
 
         # --- Shutdown ---
         try:
