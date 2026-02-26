@@ -25,10 +25,7 @@ from reachy_mini.utils import create_head_pose
 from .nova_sonic import NovaSonic, OUTPUT_SAMPLE_RATE
 from .safety import SafetyManager
 from .nova_vision import NovaVision
-from .nova_browser import NovaBrowser
-from .nova_memory import NovaMemory
 from .nova_feedback import NovaFeedback
-from .nova_slack import NovaSlack, SlackEvent
 from .skills import SkillManager
 from .tracking import TrackingManager
 from .face_manager import FaceManager
@@ -44,7 +41,8 @@ from .nova_context import NovaContext
 from .skill_executors import register_all as register_skill_executors
 from .api_routes import register_routes
 from .sleep_orchestrator import SleepOrchestrator
-from .wake_word import WakeWordDetector
+from .config import load_config
+from .wake_word_factory import create_wake_word
 from .audio_pipeline import preprocess_mic_audio, resample_output
 from .antenna_animator import AntennaAnimator
 
@@ -68,6 +66,9 @@ class ReachyNova(ReachyMiniApp):
 
     def run(self, reachy_mini: ReachyMini, stop_event: threading.Event):
         t0 = time.time()
+
+        # --- Deployment config ---
+        config = load_config()
 
         # --- Core state ---
         mqtt = NovaMQTT()
@@ -152,65 +153,86 @@ class ReachyNova(ReachyMiniApp):
         skill_manager = SkillManager()
         skill_manager.discover()
 
-        # --- Browser ---
-        def on_browser_result(result: str):
-            state.update(browser_result=result, browser_task="")
-            logger.info(f"[Browser] {result}")
+        # --- Browser (conditional) ---
+        browser = None
+        if config.features.browser:
+            try:
+                from .nova_browser import NovaBrowser
 
-        def on_browser_screenshot(b64: str):
-            state.update(browser_screenshot=b64)
+                def on_browser_result(result: str):
+                    state.update(browser_result=result, browser_task="")
+                    logger.info(f"[Browser] {result}")
 
-        def on_browser_state(s: str):
-            state.update(browser_state=s)
+                def on_browser_screenshot(b64: str):
+                    state.update(browser_screenshot=b64)
 
-        def on_browser_progress(message: str):
-            logger.info(f"[Browser progress] {message}")
-            mqtt.publish_event("browser", "progress", {"message": message})
+                def on_browser_state(s: str):
+                    state.update(browser_state=s)
 
-        browser = NovaBrowser(
-            on_result=on_browser_result,
-            on_screenshot=on_browser_screenshot,
-            on_state_change=on_browser_state,
-            on_progress=on_browser_progress,
-            headless=False,
-            chrome_channel="chromium",
-        )
+                def on_browser_progress(message: str):
+                    logger.info(f"[Browser progress] {message}")
+                    mqtt.publish_event("browser", "progress", {"message": message})
 
-        # --- Memory ---
-        def on_memory_progress(message: str):
-            logger.info(f"[Memory progress] {message}")
-            mqtt.publish_event("memory", "query_result", {"result": message})
+                browser = NovaBrowser(
+                    on_result=on_browser_result,
+                    on_screenshot=on_browser_screenshot,
+                    on_state_change=on_browser_state,
+                    on_progress=on_browser_progress,
+                    headless=config.features.browser_headless,
+                    chrome_channel="chromium",
+                )
+            except ImportError:
+                logger.warning("[Config] Browser enabled but nova-act not installed — disabling")
+        else:
+            logger.info("[Config] Browser disabled")
 
-        memory = NovaMemory(
-            on_progress=on_memory_progress,
-            on_result=lambda r: state.update(memory_last_context=r),
-            on_state_change=lambda s: state.update(memory_state=s),
-        )
+        # --- Memory (conditional) ---
+        memory = None
+        if config.features.memory:
+            from .nova_memory import NovaMemory
+
+            def on_memory_progress(message: str):
+                logger.info(f"[Memory progress] {message}")
+                mqtt.publish_event("memory", "query_result", {"result": message})
+
+            memory = NovaMemory(
+                on_progress=on_memory_progress,
+                on_result=lambda r: state.update(memory_last_context=r),
+                on_state_change=lambda s: state.update(memory_state=s),
+            )
+        else:
+            logger.info("[Config] Memory disabled")
 
         # --- Feedback ---
         feedback = NovaFeedback(session_id=session.session_id)
 
-        # --- Slack ---
-        def on_slack_event(event: SlackEvent):
-            summary = f"[{event.user}] {event.text[:80]}" if event.text else f"[{event.user}] ({event.type})"
-            state.update(slack_last_event=summary)
-            logger.info(f"[Slack event] {summary}")
-            mqtt.publish_event("slack", f"slack_{event.type}", {
-                "user": event.user, "text": event.text,
-                "channel": event.channel, "ts": event.ts,
-                "is_mention": event.is_mention, "is_dm": event.is_dm,
-            })
+        # --- Slack (conditional — requires slack-bolt) ---
+        slack_bot = None
+        try:
+            from .nova_slack import NovaSlack, SlackEvent
 
-        slack_channel_ids = [
-            ch.strip()
-            for ch in os.environ.get("SLACK_CHANNEL_IDS", "").split(",")
-            if ch.strip()
-        ]
-        slack_bot = NovaSlack(
-            on_event=on_slack_event,
-            on_state_change=lambda s: state.update(slack_state=s),
-            channel_ids=slack_channel_ids,
-        )
+            def on_slack_event(event: SlackEvent):
+                summary = f"[{event.user}] {event.text[:80]}" if event.text else f"[{event.user}] ({event.type})"
+                state.update(slack_last_event=summary)
+                logger.info(f"[Slack event] {summary}")
+                mqtt.publish_event("slack", f"slack_{event.type}", {
+                    "user": event.user, "text": event.text,
+                    "channel": event.channel, "ts": event.ts,
+                    "is_mention": event.is_mention, "is_dm": event.is_dm,
+                })
+
+            slack_channel_ids = [
+                ch.strip()
+                for ch in os.environ.get("SLACK_CHANNEL_IDS", "").split(",")
+                if ch.strip()
+            ]
+            slack_bot = NovaSlack(
+                on_event=on_slack_event,
+                on_state_change=lambda s: state.update(slack_state=s),
+                channel_ids=slack_channel_ids,
+            )
+        except ImportError:
+            logger.info("[Config] Slack disabled (slack-bolt not installed)")
 
         # --- Gesture engine ---
         gesture_cancel_event = threading.Event()
@@ -290,14 +312,14 @@ class ReachyNova(ReachyMiniApp):
                 logger.info(f"[Tracking event] {event_type} → triggering vision")
                 vision.trigger_analyze()
 
-        tracker = TrackingManager(on_event=on_tracking_event)
+        tracker = TrackingManager(
+            on_event=on_tracking_event,
+            enable_yolo=config.features.yolo_tracking,
+        )
         last_doa_time = 0.0
 
         # --- Wake word detector ---
-        wake_word = WakeWordDetector(
-            phrase=os.getenv("WAKE_WORD_PHRASE", "hey reachy"),
-            model_name=os.getenv("WAKE_WORD_MODEL", "nvidia/parakeet-tdt-0.6b-v2"),
-        )
+        wake_word = create_wake_word(config.wake_word)
 
         # Wire YuNet face bbox from FaceRecognition into TrackingManager
         face_recognition.on_face_bbox = lambda bbox: tracker.update_face_bbox(bbox)
@@ -409,7 +431,7 @@ class ReachyNova(ReachyMiniApp):
             stop_event=stop_event,
             restart_type=restart_type, restart_elapsed=restart_elapsed,
             previous_session=previous_session, t0=t0, tracker=tracker,
-            wake_word=wake_word,
+            wake_word=wake_word, config=config,
         )
 
         # --- Safety ---
@@ -426,6 +448,7 @@ class ReachyNova(ReachyMiniApp):
             emotional_state=emotional_state, reachy_mini=reachy_mini,
             stop_event=stop_event, t0=t0,
             gesture_cancel_event=gesture_cancel_event,
+            config=config,
         )
 
         # --- Register skills and API routes ---
@@ -444,8 +467,10 @@ class ReachyNova(ReachyMiniApp):
 
         # --- Start services ---
         vision.start(stop_event)
-        browser.start(stop_event)
-        slack_bot.start(stop_event)
+        if browser is not None:
+            browser.start(stop_event)
+        if slack_bot is not None:
+            slack_bot.start(stop_event)
         face_recognition.start(stop_event)
 
         # Enter sleep mode at startup

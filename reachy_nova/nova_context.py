@@ -33,3 +33,4 @@ class NovaContext:
     stop_event: threading.Event = None
     t0: float = 0.0
     gesture_cancel_event: threading.Event = None
+    config: object = None         # NovaConfig

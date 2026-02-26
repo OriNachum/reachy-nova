@@ -35,7 +35,7 @@ class SleepOrchestrator:
                  gesture_cancel_event: threading.Event,
                  session, memory, feedback, mqtt, stop_event: threading.Event,
                  restart_type: str, restart_elapsed: float, previous_session: dict | None,
-                 t0: float, tracker=None, wake_word=None):
+                 t0: float, tracker=None, wake_word=None, config=None):
         self._state = state
         self._sonic = sonic
         self._vision = vision
@@ -52,12 +52,14 @@ class SleepOrchestrator:
         self._restart_elapsed = restart_elapsed
         self._previous_session = previous_session
         self._t0 = t0
+        self._config = config
 
         self.sleep_manager = SleepManager(
             on_state_change=lambda s: self._state.update(sleep_mode=s),
         )
         self.high_boredom_start = 0.0
         self._startup_context_injected = False
+        self._sleep_audio_chunks = 0
 
     @property
     def state(self) -> str:
@@ -102,6 +104,9 @@ class SleepOrchestrator:
         try:
             audio = self._reachy_mini.media.get_audio_sample()
             if audio is not None:
+                self._sleep_audio_chunks += 1
+                if self._sleep_audio_chunks % 200 == 1:
+                    logger.info(f"[Sleep] Audio flowing, chunk #{self._sleep_audio_chunks}, len={len(audio)}, mic_sr={mic_sr}")
                 audio = preprocess_mic_audio(audio, mic_sr)
                 if _sleep_state == "sleeping":
                     t_sleep = time.time() - self.sleep_manager._sleep_start_time
@@ -109,8 +114,18 @@ class SleepOrchestrator:
                         if self._wake_word.detect(audio):
                             logger.info("[Sleep] Wake word detected — waking up!")
                             self.initiate_wake()
-        except Exception:
-            pass
+                    # Snap/clap fallback wake trigger
+                    snap_fallback = (
+                        self._config is not None
+                        and self._config.wake_word.snap_fallback
+                    )
+                    if snap_fallback and t_sleep > 3.0 and self._tracker is not None:
+                        self._tracker.detect_snap(audio)
+                        if time.time() - self._tracker.snap_time < 0.5:
+                            logger.info("[Sleep] Snap detected — waking up!")
+                            self.initiate_wake()
+        except Exception as e:
+            logger.warning(f"[Sleep] Audio/wake-word error: {e}", exc_info=True)
 
         return True
 
@@ -243,9 +258,10 @@ class SleepOrchestrator:
             if session_ctx:
                 parts.append(session_ctx)
 
-            memory_ctx = self._memory.get_startup_context()
-            if memory_ctx:
-                parts.append(f"Things you remember:\n{memory_ctx}")
+            if self._memory is not None:
+                memory_ctx = self._memory.get_startup_context()
+                if memory_ctx:
+                    parts.append(f"Things you remember:\n{memory_ctx}")
 
             if parts:
                 combined = "\n\n".join(parts)

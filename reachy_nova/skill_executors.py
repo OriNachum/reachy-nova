@@ -38,6 +38,8 @@ def _mood_executor(params: dict, ctx) -> str:
 
 
 def _browse_executor(params: dict, ctx) -> str:
+    if ctx.browser is None:
+        return "[Browser not available in this deployment]"
     query = params.get("query", "")
     url = params.get("url", "https://www.google.com")
     ctx.state.update(browser_task=query)
@@ -45,6 +47,8 @@ def _browse_executor(params: dict, ctx) -> str:
 
 
 def _memory_executor(params: dict, ctx) -> str:
+    if ctx.memory is None:
+        return "[Memory not available in this deployment]"
     query = params.get("query", "")
     mode = params.get("mode", "query")
     if mode == "store":
@@ -250,44 +254,46 @@ def register_all(skill_manager, ctx) -> None:
         },
     )
 
-    skill_manager.register_executor(
-        "browse",
-        lambda params: _browse_executor(params, ctx),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "What to search for or do in the browser",
+    if ctx.browser is not None:
+        skill_manager.register_executor(
+            "browse",
+            lambda params: _browse_executor(params, ctx),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to search for or do in the browser",
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "URL to navigate to (defaults to Google)",
+                    },
                 },
-                "url": {
-                    "type": "string",
-                    "description": "URL to navigate to (defaults to Google)",
-                },
+                "required": ["query"],
             },
-            "required": ["query"],
-        },
-    )
+        )
 
-    skill_manager.register_executor(
-        "memory",
-        lambda params: _memory_executor(params, ctx),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "What to recall, look up, or remember",
+    if ctx.memory is not None:
+        skill_manager.register_executor(
+            "memory",
+            lambda params: _memory_executor(params, ctx),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to recall, look up, or remember",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "query (default), store, or context",
+                        "enum": ["query", "store", "context"],
+                    },
                 },
-                "mode": {
-                    "type": "string",
-                    "description": "query (default), store, or context",
-                    "enum": ["query", "store", "context"],
-                },
+                "required": ["query"],
             },
-            "required": ["query"],
-        },
-    )
+        )
 
     skill_manager.register_executor(
         "remember_positively",
@@ -327,50 +333,51 @@ def register_all(skill_manager, ctx) -> None:
         },
     )
 
-    skill_manager.register_executor(
-        "slack",
-        lambda params: _slack_executor(params, ctx),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "description": "The Slack action to perform",
-                    "enum": [
-                        "send_message",
-                        "read_messages",
-                        "reply_to_thread",
-                        "add_reaction",
-                    ],
+    if ctx.slack_bot is not None:
+        skill_manager.register_executor(
+            "slack",
+            lambda params: _slack_executor(params, ctx),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "The Slack action to perform",
+                        "enum": [
+                            "send_message",
+                            "read_messages",
+                            "reply_to_thread",
+                            "add_reaction",
+                        ],
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Message text (for send_message/reply_to_thread)",
+                    },
+                    "channel": {
+                        "type": "string",
+                        "description": "Slack channel ID (defaults to first configured channel)",
+                    },
+                    "thread_ts": {
+                        "type": "string",
+                        "description": "Thread timestamp for reply_to_thread",
+                    },
+                    "emoji": {
+                        "type": "string",
+                        "description": "Emoji name for add_reaction (e.g. thumbsup)",
+                    },
+                    "ts": {
+                        "type": "string",
+                        "description": "Message timestamp for add_reaction",
+                    },
+                    "count": {
+                        "type": "number",
+                        "description": "Number of messages to read (default 10, max 50)",
+                    },
                 },
-                "text": {
-                    "type": "string",
-                    "description": "Message text (for send_message/reply_to_thread)",
-                },
-                "channel": {
-                    "type": "string",
-                    "description": "Slack channel ID (defaults to first configured channel)",
-                },
-                "thread_ts": {
-                    "type": "string",
-                    "description": "Thread timestamp for reply_to_thread",
-                },
-                "emoji": {
-                    "type": "string",
-                    "description": "Emoji name for add_reaction (e.g. thumbsup)",
-                },
-                "ts": {
-                    "type": "string",
-                    "description": "Message timestamp for add_reaction",
-                },
-                "count": {
-                    "type": "number",
-                    "description": "Number of messages to read (default 10, max 50)",
-                },
+                "required": ["action"],
             },
-            "required": ["action"],
-        },
-    )
+        )
 
     skill_manager.register_executor(
         "control",

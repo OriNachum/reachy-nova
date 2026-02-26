@@ -204,8 +204,10 @@ class PatDetector:
 class TrackingManager:
     """Fuses DoA, vision, and snap signals into head target angles."""
 
-    def __init__(self, on_event: Callable[[str, dict], None] | None = None):
+    def __init__(self, on_event: Callable[[str, dict], None] | None = None,
+                 enable_yolo: bool = True):
         self.on_event = on_event
+        self._enable_yolo = enable_yolo
         self._prev_mode = "idle"  # for mode_changed events
 
         # --- YOLO face/person detection (lazy-loaded, runs in bg thread) ---
@@ -281,10 +283,20 @@ class TrackingManager:
         """Lazy-load YOLO model on first use."""
         if self.model is not None:
             return
+        if not self._enable_yolo:
+            logger.info("YOLO tracking disabled by config — using face/DoA tracking only")
+            self.model = False  # sentinel to skip YOLO
+            return
         try:
             from ultralytics import YOLO
             self.model = YOLO("yolov8n.pt")
             logger.info("YOLO model loaded (yolov8n.pt)")
+        except ImportError:
+            logger.warning(
+                "ultralytics not installed — YOLO tracking disabled. "
+                "Install with: uv sync --extra full"
+            )
+            self.model = False
         except Exception as e:
             logger.error(f"Failed to load YOLO model: {e}")
             self.model = False  # sentinel to avoid retrying

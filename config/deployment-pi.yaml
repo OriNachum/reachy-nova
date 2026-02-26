@@ -1,0 +1,19 @@
+# Reachy Nova Deployment Configuration — Raspberry Pi CM4
+#
+# Install with: uv sync --extra pi
+# Use with: REACHY_NOVA_CONFIG=config/deployment-pi.yaml uv run python -m reachy_nova.main
+mode: ondevice
+
+wake_word:
+  backend: openwakeword
+  phrase: "hey reachy"
+  snap_fallback: true
+  openwakeword:
+    model: "hey_jarvis"
+    threshold: 0.5
+
+features:
+  browser: false              # nova-act + Playwright + Chromium too heavy for CM4
+  browser_headless: true
+  yolo_tracking: false        # no GPU — uses face (YuNet) + DoA tracking
+  memory: false               # disabled until Pi-compatible system exists

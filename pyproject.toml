@@ -13,20 +13,28 @@ dependencies = [
     "reachy-mini",
     "boto3>=1.35.0",
     "aws_sdk_bedrock_runtime>=0.3.0",
-    "nova-act>=3.0.0",
     "numpy",
     "opencv-python",
     "python-dotenv",
-    "pyaudio",
-    "ultralytics",
-    "pymongo>=4.6.0",
-    "neo4j>=5.0.0",
-    "slack-bolt>=1.18.0",
     "paho-mqtt>=2.0.0",
     "pyyaml>=6.0",
-    "nemo_toolkit[asr]",
+    "scipy",
+    "gst-signalling>=1.1.2",
 ]
-keywords = ["reachy-mini-app"]
+
+[project.optional-dependencies]
+full = [
+    "nemo_toolkit[asr]",
+    "ultralytics",
+    "nova-act>=3.0.0",
+    "slack-bolt>=1.18.0",
+    "pymongo>=4.6.0",
+    "neo4j>=5.0.0",
+    "pyaudio",
+]
+pi = [
+    "openwakeword",
+]
 
 [project.scripts]
 sonic-demo = "tools.sonic_demo:main"

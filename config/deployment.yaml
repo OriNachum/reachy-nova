@@ -1,0 +1,24 @@
+# Reachy Nova Deployment Configuration
+#
+# Deployment mode: auto | lite | wireless | ondevice
+#   auto   - detect environment automatically (same as lite)
+#   lite   - DGX Spark with USB-connected robot, all features
+#   wireless - DGX Spark controlling wireless robot over LAN, browser headless
+#   ondevice - Running on robot's Raspberry Pi CM4, lightweight backends
+mode: auto
+
+wake_word:
+  backend: parakeet          # parakeet | openwakeword | disabled
+  phrase: "hey reachy"
+  snap_fallback: true        # use snap/clap as backup wake trigger
+  parakeet:
+    model: "nvidia/parakeet-tdt-0.6b-v2"
+  openwakeword:
+    model: "hey_jarvis"
+    threshold: 0.5
+
+features:
+  browser: true
+  browser_headless: false     # true for wireless/ondevice (no display)
+  yolo_tracking: true         # false on Pi -> falls back to face/DoA tracking
+  memory: true                # false on Pi until Pi-compatible system exists

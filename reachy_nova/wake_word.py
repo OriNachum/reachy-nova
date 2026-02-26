@@ -13,12 +13,14 @@ import time
 
 import numpy as np
 
+from .wake_word_base import WakeWordBase
+
 logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000  # Hz — must match the existing mic pipeline
 
 
-class WakeWordDetector:
+class WakeWordDetector(WakeWordBase):
     """ASR-based wake word detector backed by NVIDIA Parakeet TDT."""
 
     def __init__(
