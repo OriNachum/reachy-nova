@@ -3,11 +3,15 @@
 import numpy as np
 
 
-def preprocess_mic_audio(audio, mic_sr: int, target_sr: int = 16000) -> np.ndarray:
+def preprocess_mic_audio(audio, mic_sr: int, target_sr: int = 16000, aec_channel: int | None = 0) -> np.ndarray:
     """Convert raw mic audio to float32 mono at target sample rate.
 
-    Handles bytes (int16), non-float32 numpy arrays, multi-channel mixdown,
+    Handles bytes (int16), non-float32 numpy arrays, multi-channel selection,
     and resampling via linear interpolation.
+
+    Args:
+        aec_channel: Channel index to select from multi-channel audio.
+            0 = AEC-processed (default), None = average all channels.
     """
     if isinstance(audio, bytes):
         audio = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
@@ -15,7 +19,10 @@ def preprocess_mic_audio(audio, mic_sr: int, target_sr: int = 16000) -> np.ndarr
         audio = audio.astype(np.float32)
 
     if audio.ndim == 2:
-        audio = audio.mean(axis=1)
+        if aec_channel is not None and aec_channel < audio.shape[1]:
+            audio = audio[:, aec_channel]
+        else:
+            audio = audio.mean(axis=1)
 
     if mic_sr != target_sr:
         ratio = target_sr / mic_sr

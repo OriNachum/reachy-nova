@@ -52,15 +52,15 @@ class PatDetector:
         self.last_pat_time: float = 0.0
 
         # --- Tunable parameters (pitch) ---
-        self.press_threshold: float = 0.8    # degrees: deviation to count as a "press"
-        self.release_threshold: float = 0.3  # degrees: deviation below this = released
+        self.press_threshold: float = 1.2    # degrees: deviation to count as a "press"
+        self.release_threshold: float = 0.5  # degrees: deviation below this = released
         self.min_presses: int = 2            # minimum presses for a pat
         self.pat_window: float = 3.0         # seconds: window to accumulate presses
         self.pat_cooldown: float = 2.0       # seconds: between pat events
 
         # --- Tunable parameters (yaw) ---
-        self.yaw_press_threshold: float = 0.8   # degrees: yaw deviation to count as press
-        self.yaw_release_threshold: float = 0.3  # degrees: yaw release threshold
+        self.yaw_press_threshold: float = 1.2   # degrees: yaw deviation to count as press
+        self.yaw_release_threshold: float = 0.5  # degrees: yaw release threshold
 
         # Internal state (pitch)
         self._in_press: bool = False

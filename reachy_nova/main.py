@@ -62,6 +62,46 @@ VALID_MOODS = {
 }
 
 
+def enable_hardware_aec(respeaker):
+    """Enable XMOS XVF3800 hardware acoustic echo cancellation.
+
+    The XMOS outputs 2 USB channels: channel 0 is AEC-processed,
+    channel 1 is raw/reference. After enabling, callers should use
+    only channel 0 for speech input.
+    """
+    if respeaker is None:
+        logger.warning("No ReSpeaker device — skipping AEC setup")
+        return False
+
+    try:
+        # Log current channel configuration
+        try:
+            selected_ch = respeaker.read("AUDIO_MGR_SELECTED_CHANNELS")
+            op_l = respeaker.read("AUDIO_MGR_OP_L")
+            op_r = respeaker.read("AUDIO_MGR_OP_R")
+            logger.info(f"XMOS channel config: selected={selected_ch}, L={op_l}, R={op_r}")
+        except Exception:
+            logger.debug("Could not read XMOS channel config")
+
+        # Enable post-processing echo suppression
+        respeaker.write("PP_ECHOONOFF", [1])
+
+        # Enable AEC high-pass filter
+        respeaker.write("AEC_HPFONOFF", [1])
+
+        # Enable nonlinear AEC attenuation
+        respeaker.write("PP_NLATTENONOFF", [1])
+
+        # Enable far-end DSP processing (reference signal for AEC)
+        respeaker.write("AUDIO_MGR_FAR_END_DSP_ENABLE", [1])
+
+        logger.info("Hardware AEC enabled on XMOS XVF3800")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to enable hardware AEC: {e}")
+        return False
+
+
 class ReachyNova(ReachyMiniApp):
     custom_app_url: str | None = "http://0.0.0.0:8042"
     request_media_backend: str | None = None
@@ -463,6 +503,11 @@ class ReachyNova(ReachyMiniApp):
         except Exception as e:
             logger.warning(f"Could not start mic recording: {e}")
 
+        # Enable hardware echo cancellation
+        respeaker = getattr(reachy_mini.media.audio, '_respeaker', None)
+        aec_enabled = enable_hardware_aec(respeaker)
+        logger.info(f"Hardware AEC: {'enabled' if aec_enabled else 'DISABLED'}")
+
         logger.info(f"Media backend: {reachy_mini.media.backend}, audio={reachy_mini.media.audio}")
         logger.info("Reachy Nova is alive! All systems go.")
         audio_chunk_count = 0
@@ -662,6 +707,13 @@ class ReachyNova(ReachyMiniApp):
                     if audio_chunk_count % 500 == 1:
                         rms = np.sqrt(np.mean(audio ** 2))
                         logger.info(f"Audio chunks fed: {audio_chunk_count}, RMS: {rms:.4f}, sonic.state={sonic.state}")
+                        if aec_enabled:
+                            try:
+                                converged = respeaker.read("AEC_AECCONVERGED")
+                                rt60 = respeaker.read("AEC_RT60")
+                                logger.info(f"AEC converged={converged}, RT60={rt60}")
+                            except Exception:
+                                pass
             except Exception as e:
                 logger.warning(f"Audio feed error: {e}")
 
