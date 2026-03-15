@@ -185,7 +185,10 @@ class NovaSonic:
                     "maxTokens": 1024,
                     "topP": 0.9,
                     "temperature": 0.7,
-                }
+                },
+                "turnDetectionConfiguration": {
+                    "endpointingSensitivity": "LOW",
+                },
             }
         })
 
@@ -519,9 +522,9 @@ class NovaSonic:
         if not self._active or not self._loop:
             return
 
-        # Convert to mono if stereo
+        # Use AEC-processed channel 0 if multi-channel
         if samples.ndim == 2:
-            samples = samples.mean(axis=1)
+            samples = samples[:, 0]
 
         # Convert float32 [-1, 1] to int16 PCM bytes
         pcm = (samples * 32767).astype(np.int16).tobytes()

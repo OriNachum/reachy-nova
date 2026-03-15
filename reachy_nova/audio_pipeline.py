@@ -15,7 +15,7 @@ def preprocess_mic_audio(audio, mic_sr: int, target_sr: int = 16000) -> np.ndarr
         audio = audio.astype(np.float32)
 
     if audio.ndim == 2:
-        audio = audio.mean(axis=1)
+        audio = audio[:, 0]  # Use channel 0 (XMOS AEC-processed) instead of averaging all channels
 
     if mic_sr != target_sr:
         ratio = target_sr / mic_sr

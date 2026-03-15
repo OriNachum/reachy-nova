@@ -44,6 +44,7 @@ from .sleep_orchestrator import SleepOrchestrator
 from .config import load_config
 from .wake_word_factory import create_wake_word
 from .audio_pipeline import preprocess_mic_audio, resample_output
+from .xmos_aec import verify_xmos_aec
 from .antenna_animator import AntennaAnimator
 
 logging.basicConfig(level=logging.INFO)
@@ -487,6 +488,13 @@ class ReachyNova(ReachyMiniApp):
                 logger.info(f"Will resample {mic_sr}Hz/{mic_ch}ch → 16000Hz/mono for Nova Sonic")
         except Exception as e:
             logger.warning(f"Could not start mic recording: {e}")
+
+        # Verify XMOS AEC settings
+        try:
+            respeaker = getattr(reachy_mini.media.audio, '_respeaker', None)
+            verify_xmos_aec(respeaker)
+        except Exception as e:
+            logger.warning(f"[AEC] Verification failed: {e}")
 
         logger.info(f"Media backend: {reachy_mini.media.backend}, audio={reachy_mini.media.audio}")
         logger.info("Reachy Nova is alive! All systems go.")
