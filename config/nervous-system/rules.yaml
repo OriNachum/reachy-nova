@@ -33,6 +33,54 @@ rules:
     urgency: BACKGROUND
     llm_evaluate: false
 
+  tracking/face_recognized:
+    # Fired by TrackingManager.update_face_recognition() via _fire_event,
+    # republished under source "tracking" by main.py's on_tracking_event.
+    # Same payload shape as face/face_recognized below (id/name/score).
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You notice {name} is here."
+
+  tracking/pat_level1:
+    # Reflex already handled in-process: main.py's on_tracking_event injects
+    # directly on pat_level1/2, so the nervous system need not re-inject.
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  tracking/pat_level2:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  tracking/audio_direction:
+    # Rate-limited DoA bearing event {bearing_deg, label, speech_active}
+    # (reachy_nova/tracking.py, TrackingManager.update_doa). Background
+    # signal — direction rides along with speech/vision events, not a
+    # standalone interrupt.
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  # --- Speech events ---
+  speech/speech_detected:
+    # Speech-capture lane onset event (payload includes a backtracked clip
+    # path, transcript, duration_seconds and onset timestamp).
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You just heard: {transcript}"
+
+  # --- Face events ---
+  face/face_recognized:
+    # Fired directly by main.py's on_face_match (FaceRecognition engine
+    # callback), payload {id, name, score}.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You notice {name} is here."
+
   # --- Vision events ---
   vision/vision_description:
     priority: NORMAL
@@ -127,3 +175,24 @@ rules:
     priority: LOW
     urgency: BACKGROUND
     llm_evaluate: false
+
+  # --- Skill-forge events ---
+  forge/staged:
+    # A generated skill passed validation and is staged for activation.
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  forge/activated:
+    # A staged skill was hot-registered into the live skill set.
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  forge/rejected:
+    # Validation failed or the forge endpoint was unreachable/unparseable —
+    # surfaced at NORMAL/NOW so a failed forge attempt is never silent.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "A new skill idea didn't pass its safety check: {reason}"
