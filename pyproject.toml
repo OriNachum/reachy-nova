@@ -28,6 +28,11 @@ dependencies = [
 ]
 keywords = ["reachy-mini-app"]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
 [project.scripts]
 sonic-demo = "tools.sonic_demo:main"
 
@@ -43,3 +48,6 @@ where = ["."]
 
 [tool.setuptools.package-data]
 reachy_nova = ["**/*"] # Also include all non-.py files
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
