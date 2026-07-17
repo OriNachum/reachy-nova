@@ -29,7 +29,8 @@ from .nova_browser import NovaBrowser
 from .nova_memory import NovaMemory
 from .nova_feedback import NovaFeedback
 from .nova_slack import NovaSlack, SlackEvent
-from .skills import SkillManager
+from .skills import SkillManager, ForgedSkillContext, activate_forged
+from .skill_forge import SkillForge
 from .tracking import TrackingManager
 from .face_manager import FaceManager
 from .face_recognition import FaceRecognition
@@ -56,6 +57,12 @@ logger = logging.getLogger(__name__)
 # A speech event carries direction only when an audio_direction event arrived
 # within this window — beyond it the bearing is stale, so no direction claim.
 DIRECTION_CORRELATION_WINDOW = 3.0
+
+# Runtime self-extension areas (frame decision q2: auto-activate after
+# validation). Staged skills await validation+activation; active ones are
+# live and reloaded on every startup.
+FORGED_STAGING_DIR = Path.home() / ".reachy_nova" / "skills-forged"
+FORGED_ACTIVE_DIR = Path.home() / ".reachy_nova" / "skills-active"
 
 
 def forward_mic_audio(audio, sonic, speech_lane=None):
@@ -490,6 +497,20 @@ class ReachyNova(ReachyMiniApp):
                 sonic.send_tool_result(tool_use_id, result)
             threading.Thread(target=_execute, daemon=True).start()
 
+        # --- Forged skills: restricted execution context + startup reload ---
+        # Forged executors see ONLY this sanctioned surface (the same one
+        # forge_validator allow-lists), never the full NovaContext. Sonic is
+        # bound just after construction below.
+        forged_ctx = ForgedSkillContext(
+            gesture_engine=gesture_engine,
+            skill_manager=skill_manager,
+            state=state,
+            emotional_state=emotional_state,
+        )
+        reloaded_forged = skill_manager.discover_runtime(FORGED_ACTIVE_DIR, ctx=forged_ctx)
+        if reloaded_forged:
+            logger.info(f"[Forge] Reloaded active forged skills: {reloaded_forged}")
+
         # --- Build system prompt ---
         skills_context = skill_manager.get_system_context()
         system_prompt = (
@@ -564,6 +585,36 @@ class ReachyNova(ReachyMiniApp):
         # The vocalize executor reaches the speaker through the same buffer
         # Sonic output rides, so barge-in clearing and speech_enabled apply.
         ctx.audio_output = handle_audio_output
+
+        # Late-bind sonic onto the forged surface (constructed before sonic).
+        forged_ctx._sonic = sonic
+
+        # --- Skill forge: runtime self-extension (auto-activate per q2) ---
+        def _forge_publish(event_type: str, payload: dict):
+            # SkillForge emits "forge/<transition>"; MQTT wants (source, type).
+            mqtt.publish_event("forge", event_type.split("/", 1)[-1], payload)
+
+        def _auto_activate_forged(name: str):
+            if not name:
+                return
+            result = activate_forged(
+                FORGED_STAGING_DIR, FORGED_ACTIVE_DIR, name,
+                skill_manager, forged_ctx, sonic, state,
+                publish=_forge_publish,
+                restart=lambda: sonic.restart(stop_event),
+            )
+            logger.info(f"[Forge] {result}")
+
+        def _on_forge_event(event_type: str, payload: dict):
+            _forge_publish(event_type, payload)
+            if event_type == "forge/staged":
+                threading.Thread(
+                    target=_auto_activate_forged,
+                    args=(str(payload.get("name", "")),),
+                    daemon=True,
+                ).start()
+
+        ctx.skill_forge = SkillForge(publish=_on_forge_event, staging_root=FORGED_STAGING_DIR)
 
         # --- Register skills and API routes ---
         register_skill_executors(skill_manager, ctx)
