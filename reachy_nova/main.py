@@ -47,9 +47,80 @@ from .sleep_orchestrator import SleepOrchestrator
 from .wake_word import WakeWordDetector
 from .audio_pipeline import preprocess_mic_audio, resample_output
 from .antenna_animator import AntennaAnimator
+from .speech_events import SpeechEventDetector
+from .sensory_log import stage as sensory_stage
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# A speech event carries direction only when an audio_direction event arrived
+# within this window — beyond it the bearing is stale, so no direction claim.
+DIRECTION_CORRELATION_WINDOW = 3.0
+
+
+def forward_mic_audio(audio, sonic, speech_lane=None):
+    """Forward one preprocessed mic chunk to Sonic and, additively, the speech lane.
+
+    Sonic always receives exactly the same chunk, first — the speech lane is a
+    parallel observer that can never alter, delay, or drop Sonic's feed; a lane
+    failure is contained here.
+    """
+    sonic.feed_audio(audio)
+    if speech_lane is not None:
+        try:
+            speech_lane.feed(audio)
+        except Exception as e:
+            logger.warning(f"[SpeechLane] feed error (Sonic unaffected): {e}")
+
+
+def make_on_speech(mqtt, sonic, t0, last_direction, is_awake):
+    """Build the speech_detected handler: stage logs -> MQTT event -> inject.
+
+    *last_direction* is a mutable dict ({"time": float, "label": str}) the
+    tracking handler refreshes on every audio_direction event; a speech event
+    carries its label only while fresh (DIRECTION_CORRELATION_WINDOW).
+    """
+
+    def on_speech(payload: dict):
+        event_id = f"speech-{int(float(payload.get('onset_ts', 0.0)) * 1000)}"
+        sensory_stage(
+            "capture", "speech", event_id,
+            f"clip={payload.get('clip_path')} "
+            f"duration={float(payload.get('duration_seconds', 0.0)):.2f}s",
+        )
+        sensory_stage(
+            "vad", "speech", event_id,
+            f"onset_ts={float(payload.get('onset_ts', 0.0)):.3f} "
+            f"transcript={str(payload.get('transcript', ''))[:60]!r}",
+        )
+        direction = None
+        if time.time() - last_direction.get("time", 0.0) <= DIRECTION_CORRELATION_WINDOW:
+            direction = last_direction.get("label") or None
+        event = {
+            "clip_path": str(payload.get("clip_path", "")),
+            "transcript": payload.get("transcript", ""),
+            "duration_seconds": float(payload.get("duration_seconds", 0.0)),
+            "onset_ts": float(payload.get("onset_ts", 0.0)),
+            "direction": direction,
+        }
+        mqtt.publish_event("speech", "speech_detected", event)
+        sensory_stage(
+            "event", "speech", event_id,
+            f"published speech/speech_detected direction={direction}",
+        )
+        if not is_awake():
+            sensory_stage("inject", "speech", event_id, "suppressed reason=sleeping")
+            return
+        if direction:
+            notice = f"You hear someone speaking from your {direction}."
+        else:
+            notice = "You hear someone speaking nearby."
+        sonic.inject_text(format_event(notice, t0))
+        # inject_text may still throttle/skip — those drops log loudly via
+        # nova_sonic's own sensory stage lines; this line records the attempt.
+        sensory_stage("inject", "speech", event_id, f"attempted notice={notice!r}")
+
+    return on_speech
 
 # Robot animation parameters
 IDLE_YAW_SPEED = 0.15      # Slow idle head sweep
@@ -116,6 +187,10 @@ class ReachyNova(ReachyMiniApp):
         state = State(on_change=mqtt.on_state_change)
 
         emotional_state = EmotionalState()
+
+        # Freshest audio_direction bearing (fed by tracking events, read by
+        # the speech lane's on_speech for direction-tagged speech events).
+        last_direction = {"time": 0.0, "label": ""}
 
         # --- Session persistence ---
         session = SessionState()
@@ -273,6 +348,11 @@ class ReachyNova(ReachyMiniApp):
                 return
 
             mqtt.publish_event("tracking", event_type, data)
+
+            if event_type == "audio_direction":
+                last_direction["time"] = time.time()
+                last_direction["label"] = str(data.get("label", ""))
+                return
 
             if event_type == "pat_level1":
                 touch_type = data.get("touch_type", "scratch")
@@ -441,6 +521,19 @@ class ReachyNova(ReachyMiniApp):
             voice_id="tiffany",
         )
 
+        # --- Speech-capture lane (parallel observer; Sonic's feed untouched) ---
+        # Shares the ALREADY-LOADED wake-word parakeet instance — never a second
+        # load. If the model failed to load, the XMOS speech flag (held on the
+        # tracker by DoA updates) drives onset instead.
+        speech_lane = SpeechEventDetector(
+            asr_handle=getattr(wake_word, "_model", None),
+            speech_flag_provider=lambda: bool(getattr(tracker, "doa_speech_active", False)),
+            on_speech=make_on_speech(
+                mqtt, sonic, t0, last_direction,
+                is_awake=lambda: sleep_orch.state == "awake",
+            ),
+        )
+
         # --- Sleep orchestrator ---
         sleep_orch = SleepOrchestrator(
             state=state, sonic=sonic, vision=vision, reachy_mini=reachy_mini,
@@ -467,6 +560,10 @@ class ReachyNova(ReachyMiniApp):
             stop_event=stop_event, t0=t0,
             gesture_cancel_event=gesture_cancel_event,
         )
+
+        # The vocalize executor reaches the speaker through the same buffer
+        # Sonic output rides, so barge-in clearing and speech_enabled apply.
+        ctx.audio_output = handle_audio_output
 
         # --- Register skills and API routes ---
         register_skill_executors(skill_manager, ctx)
@@ -702,7 +799,7 @@ class ReachyNova(ReachyMiniApp):
                         tracker.detect_snap(audio)
 
                     feedback.update_audio(audio)
-                    sonic.feed_audio(audio)
+                    forward_mic_audio(audio, sonic, speech_lane)
                     audio_chunk_count += 1
                     if audio_chunk_count % 500 == 1:
                         rms = np.sqrt(np.mean(audio ** 2))
