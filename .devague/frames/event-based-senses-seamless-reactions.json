@@ -1,0 +1,481 @@
+{
+  "slug": "event-based-senses-seamless-reactions",
+  "title": "event-based senses + seamless reactions",
+  "schema_version": 2,
+  "status": "exported",
+  "created": "2026-07-17T12:49:15Z",
+  "updated": "2026-07-17T13:04:07Z",
+  "claims": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "Reachy Nova's senses become one verifiable event pipeline: speech is captured with an always-on ring buffer + VAD that backtracks 1-2s to the utterance start, and every sense \u2014 speech, audio direction, touch, image, face \u2014 reaches the agent as a logged, event-based signal it can answer with speech, harmonic vocalizations, movement, or any combination, seamlessly",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h1",
+          "text": "Honest only if every one of the five senses demonstrably reaches the agent as an event in a live run \u2014 a sense that only reaches head-tracking or a log line does not count as 'sent to the agent'",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c2",
+      "kind": "requirement",
+      "text": "A speech-capture lane: the mic already records continuously (main.py feeds every chunk straight to Sonic), but nothing detects speech \u2014 add a rolling pre-roll ring buffer + VAD so a speech onset emits a speech_detected event whose audio starts 1-2s BEFORE the onset, so the first word is never clipped",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h2",
+          "text": "Honest only if a test plays speech starting at t0 and the captured clip's audio begins at or before t0 \u2014 the backtrack is measured, not assumed; detection delay up to the transcribe cadence is covered by the ring buffer, not by luck",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c3",
+      "kind": "requirement",
+      "text": "Per-stage structured logs across the whole sensory path \u2014 capture, AEC/preprocess, VAD gate, event publish, inject, reaction \u2014 so 'speech was captured and heard correctly' is verifiable from the log alone; today main.py logs RMS once per 500 chunks and nova_sonic silently drops throttled injects at DEBUG level",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h3",
+          "text": "Honest only if a dropped or throttled inject appears in the log at INFO+ with a reason \u2014 'seamless' must never be achieved by silently discarding sensory input",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c4",
+      "kind": "requirement",
+      "text": "Audio direction becomes an event: XMOS DoA already returns (angle, speech_detected) but is only polled at 5Hz for head tracking inside tracking.py \u2014 publish audio_direction events to MQTT and make direction available to the agent (e.g. 'the voice came from your left')",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h4",
+          "text": "Honest only if audio_direction events carry a usable bearing (left/right/front semantics verified against the XMOS 0=left, pi/2=front mapping) and are rate-limited so continuous speech does not flood the bus",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c5",
+      "kind": "requirement",
+      "text": "Close the event-coverage gaps for the already-event-based senses: touch (pat_level1/2), image (vision_description) and face (face_recognized) all publish MQTT + inject today, but rules.yaml has NO explicit entries for face/* or tracking/pat_* \u2014 every sensory source gets an explicit nervous-system rule, including the new speech and audio_direction sources",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h5",
+          "text": "Honest only if rules.yaml has an explicit entry for EVERY source that publishes events (grep-verifiable) \u2014 no sense rides the default rule",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c6",
+      "kind": "requirement",
+      "text": "A harmonics-vocal reaction seam: the agent can currently speak (Sonic) or move (gesture skill) but has NO non-speech voice \u2014 add a vocalize skill that synthesizes harmonic chirps/tones through the existing speaker path (resample_output + push_audio_sample), so reactions compose freely: speak, vocalize, move, or all at once",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h6",
+          "text": "Honest only if vocalize produces audible non-speech sound on the robot speaker in a live run AND respects the AEC reference path (the robot must not hear its own chirps as user speech)",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c7",
+      "kind": "success_signal",
+      "text": "A single log trace shows one spoken sentence traveling capture -> VAD (with the 1-2s backtrack visible) -> event -> inject -> reaction, and each of the five senses (speech, direction, touch, image, face) produces a visible MQTT event that reaches the agent",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h7",
+          "text": "Honest only if the trace comes from one real end-to-end run on the robot (not stitched from unit tests), with the five senses each showing a real event id",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c8",
+      "kind": "boundary",
+      "text": "The continuous mic->Sonic feed stays untouched: Sonic does its own turn detection and barge-in (nova_sonic.py), so the VAD lane runs IN PARALLEL for eventing/logging/clip capture \u2014 never as a gate in front of Sonic's audio input, which would change conversation behavior",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h8",
+          "text": "Honest only if a diff of the Sonic feed path shows zero behavioral change when the VAD lane is disabled \u2014 byte-identical audio reaches Sonic with the lane on or off",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c9",
+      "kind": "boundary",
+      "text": "reachy_mini SDK and XMOS firmware are consumed as-is: DoA via media.audio.get_DoA(), AEC channel 0 via preprocess_mic_audio \u2014 no SDK or firmware changes",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h9",
+          "text": "Honest only if no vendored/patched SDK or firmware files appear in the diff; new capability comes from consuming existing APIs only",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c10",
+      "kind": "boundary",
+      "text": "The MQTT nervous system stays the single event fabric: new senses join nova/events/<source>/<type> + rules.yaml + the existing LLM interrupt evaluator \u2014 no second bus, no new transport",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h10",
+          "text": "Honest only if new senses publish through NovaMQTT.publish_event and nothing else \u2014 no direct sockets, no second broker, and the direct-callback fallback still works when MQTT is down",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c11",
+      "kind": "non_goal",
+      "text": "No raw audio/frame firehose to the cloud: events carry metadata + short summaries; speech clips stay local (the existing feedback store's local/S3 policy is unchanged); this is perception plumbing, not a data-collection feature",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c12",
+      "kind": "decision",
+      "text": "VAD engine = parakeet (resolves park v1): reuse the already-loaded parakeet-TDT model as the speech detector \u2014 periodic transcription over the rolling ring buffer, speech onset = transcript appears \u2014 more precise than an energy/XMOS flag and no second model in memory (the wake-word instance is reused, not duplicated). CONDITIONAL on being fast enough on-device",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Benchmark on the robot before committing: parakeet transcription latency over a 2-4s rolling window must keep speech-event detection delay within the pre-roll budget (backtrack still captures the utterance start) and must not starve the 50Hz main loop or the sleep-mode wake-word cadence. If the latency check fails, fall back to the XMOS speech_detected flag as onset trigger with parakeet confirming asynchronously."
+    },
+    {
+      "id": "c13",
+      "kind": "requirement",
+      "text": "A skill-forge seam: Nova can dispatch a code task (goal + sensory context + optionally an existing skill to improve, e.g. one that earned negative feedback) to a configurable qwen3 coder endpoint (OpenAI-compatible, env-configured \u2014 the robot and the rig are different machines); the result lands as a new/updated skill folder (SKILL.md + executor) in a runtime skills area, distinct from the shipped built-ins",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h11",
+          "text": "Honest only if the forge round-trip is proven live against the real qwen3 endpoint at least once (request -> generated skill on disk), and an unreachable endpoint degrades to a logged forge/rejected event \u2014 never a hang or crash in the 50Hz loop",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [
+        {
+          "id": "q1",
+          "text": "risk: The robot and the qwen3 rig are separate machines: rig downtime, model reloads, or lobes-gateway auth (Bearer) can make the forge seam flaky in exactly the way lobes-cli#91/#95 already bit colleague \u2014 the endpoint config and failure path need the same care as the senses",
+          "resolved": false,
+          "blocking": false
+        }
+      ],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c14",
+      "kind": "requirement",
+      "text": "Hot skill registration: SkillManager can discover and load a forged skill at runtime \u2014 noting Sonic's toolConfiguration is FIXED at session start (main.py passes get_tool_specs() to the NovaSonic constructor), so activation rides the existing nova_sonic.restart() path or waits for the next natural session restart; the activation moment is logged and announced to the agent",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h12",
+          "text": "Honest only if a forged skill is actually callable by the model after activation (toolSpec present in the NEW Sonic session) \u2014 activation that only writes files but never reaches Sonic's tool list does not count",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c15",
+      "kind": "boundary",
+      "text": "Forged skills are constrained, not arbitrary code: executors may only compose sanctioned reaction primitives (gesture engine, vocalize, inject_text, state reads, emotion events) \u2014 no network, filesystem, or subprocess access from generated code; a generation that fails validation (syntax, primitive allow-list) is rejected and loudly logged, never activated, and never crashes the robot",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h13",
+          "text": "Honest only if the validator provably rejects a skill that imports os/subprocess/socket or calls outside the primitive allow-list (negative tests exist), and validation runs BEFORE any generated code is imported or executed",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c16",
+      "kind": "boundary",
+      "text": "Forged skills are staged before activation and every forge/activate/reject transition is a nervous-system event (forge/*) \u2014 the pipeline stays observable end-to-end like every other sense",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h14",
+          "text": "Honest only if every forge lifecycle transition observed in a live run has a matching forge/* MQTT event \u2014 staging with no event is a violation, not an optimization",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c17",
+      "kind": "audience",
+      "text": "Ori (operator and admin of the robot) and anyone sharing a room with Nova; secondarily the nervous-system/dashboard consumers reading the event stream, and future contributors extending senses or reaction skills",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h15",
+          "text": "Honest only if the delivered UX is validated with the operator physically present in a live session \u2014 audience claims are not satisfied by CI alone",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c18",
+      "kind": "before_state",
+      "text": "Today the mic feeds Sonic continuously with no speech events, no pre-roll, and near-silent logging (RMS every 500 chunks, injects dropped at DEBUG); DoA is a private head-tracking signal; touch/image/face events exist but with rules gaps; reactions are speech or movement only \u2014 no non-speech voice, and the skill set is fixed at build time",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h16",
+          "text": "Honest only if each stated gap is verifiable in the pre-change tree at a cited location (main.py audio feed, nova_sonic inject throttle, rules.yaml coverage) \u2014 no strawman baseline",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c19",
+      "kind": "after_state",
+      "text": "Every sense is a logged MQTT event the agent actually receives: speech onsets arrive with their first word intact (1-2s backtrack), direction/touch/image/face all reach the agent through one observable fabric, the agent answers with any mix of speech, harmonic vocalization, and movement, and Nova can forge new reaction skills live via qwen3 \u2014 validated, staged, auto-activated, and visible as forge/* events",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h17",
+          "text": "Honest only if every after-state capability maps to a confirmed requirement claim with its own honesty condition met \u2014 the after-state is the sum of proven parts, not a vision statement",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    },
+    {
+      "id": "c20",
+      "kind": "why_it_matters",
+      "text": "Being heard correctly is the robot's front door: a clipped first word or a silently dropped sensory inject reads as deafness or indifference. One verifiable event pipeline makes the experience seamless AND debuggable, and the live skill-forge turns feedback into growth instead of a backlog",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h18",
+          "text": "Honest only if the seamlessness claims trace to measurable signals (backtrack test, drop logging, live trace) \u2014 'feels alive' language never substitutes for the measured pipeline",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": ""
+    }
+  ],
+  "open_vagueness": [
+    {
+      "id": "v1",
+      "text": "VAD engine choice: XMOS already exposes a hardware speech_detected flag (zero new deps) and nemo/parakeet is already installed; a dedicated VAD dep (silero/webrtcvad) is the alternative \u2014 decidable at plan time",
+      "kind": "unknown_nonblocking",
+      "claim_id": null
+    },
+    {
+      "id": "v2",
+      "text": "speech_detected event payload design: clip path only, or also an on-device parakeet transcript + duration/confidence \u2014 decidable at plan time",
+      "kind": "unknown_nonblocking",
+      "claim_id": null
+    }
+  ],
+  "scope_entries": [
+    {
+      "id": "s1",
+      "surface": "reachy_nova/main.py (50Hz loop, audio feed)",
+      "finding": "mic audio is preprocessed (AEC ch0, resample to 16k) and fed to Sonic EVERY chunk with no VAD, no pre-roll, no speech event; the only audio log is RMS once per 500 chunks; DoA is polled at 5Hz solely for head tracking",
+      "seeds": [
+        "c2",
+        "c3",
+        "c7"
+      ]
+    },
+    {
+      "id": "s2",
+      "surface": "reachy_nova/wake_word.py",
+      "finding": "a rolling 4s buffer + parakeet-TDT ASR already exists, but only for the wake phrase during sleep mode \u2014 proof the always-buffered-audio pattern runs on this hardware",
+      "seeds": [
+        "c2"
+      ]
+    },
+    {
+      "id": "s3",
+      "surface": "reachy_nova/tracking.py (update_doa, detect_snap, PatDetector)",
+      "finding": "XMOS DoA returns (angle_radians, speech_detected) \u2014 a hardware VAD flag is already available; snap and pat fire events via _fire_event, but DoA itself never becomes an event",
+      "seeds": [
+        "c2",
+        "c4"
+      ]
+    },
+    {
+      "id": "s4",
+      "surface": "nova_mqtt.py + docker/nervous-system/nervous_system.py + config/nervous-system/rules.yaml",
+      "finding": "the event fabric exists end-to-end: publish_event -> nova/events/<source>/<type> -> rules (priority/urgency) -> optional Nova-2-Lite interrupt evaluator -> nova/inject -> sonic.inject_text; rules.yaml covers tracking/vision/slack/browser/memory/emotions but has NO face/* or pat entries",
+      "seeds": [
+        "c5",
+        "c10"
+      ]
+    },
+    {
+      "id": "s5",
+      "surface": "reachy_nova/face_recognition.py + docs/components/patting.md + main.py callbacks",
+      "finding": "face (YuNet+SFace, on_match with 30s cooldown), touch (two-tier pat reflex+deliberate) and image (vision_description) are already event-based with MQTT publish + inject \u2014 the user's 'basic face recognition' already exists; the work is coverage + logging, not new detectors",
+      "seeds": [
+        "c5"
+      ]
+    },
+    {
+      "id": "s6",
+      "surface": "reachy_nova/skills.py + skill_executors.py",
+      "finding": "skills ARE the reaction seams: SKILL.md folders + register_executor become Sonic toolSpecs the model calls freely \u2014 a new reaction (e.g. vocalize) is a new skill folder + executor, exactly the shape a code-writing model can produce",
+      "seeds": [
+        "c6"
+      ]
+    },
+    {
+      "id": "s7",
+      "surface": "reachy_nova/nova_sonic.py (feed_audio, inject_text)",
+      "finding": "inject_text has a 3s throttle and a skipped-while-speaking path that drop sensory notifications at DEBUG level \u2014 a 'seamless' pipeline must at least LOG these drops loudly; Sonic owns turn detection and barge-in, so VAD must not gate its input",
+      "seeds": [
+        "c3",
+        "c8"
+      ]
+    },
+    {
+      "id": "s8",
+      "surface": "pyproject.toml + repo-wide grep for VAD libs",
+      "finding": "no VAD dependency exists (no silero/webrtcvad hits); nemo_toolkit[asr] + parakeet are already installed, and the XMOS speech flag is free \u2014 the VAD engine choice is open but well-supplied",
+      "seeds": [
+        "c2"
+      ]
+    },
+    {
+      "id": "s9",
+      "surface": "reachy_nova/gestures.py + audio output path (audio_pipeline.resample_output, media.push_audio_sample)",
+      "finding": "movement gestures exist (nuzzle/purr/enjoy) and speech exists (Sonic), but NO sound-synthesis module anywhere \u2014 harmonics-vocal is green-field; the speaker path it would ride is already there",
+      "seeds": [
+        "c6"
+      ]
+    },
+    {
+      "id": "s10",
+      "surface": "parakeet-as-VAD feasibility (wake_word.py timings)",
+      "finding": "wake_word.py already runs parakeet over a 4s rolling buffer every 2s in a single background worker without blocking the sleep animation \u2014 evidence the same model can serve as the awake-mode speech detector; detection delay up to the transcribe interval is covered by the ring-buffer backtrack",
+      "seeds": [
+        "c12"
+      ]
+    },
+    {
+      "id": "s11",
+      "surface": "skills discovery + Sonic tool lifecycle (skills.py, main.py, nova_sonic.py)",
+      "finding": "skills are discovered once at startup and Sonic tools are fixed at session start; nova_sonic.restart() exists and is the plausible activation path for a newly forged skill",
+      "seeds": [
+        "c13",
+        "c14"
+      ]
+    },
+    {
+      "id": "s12",
+      "surface": "face_manager.is_admin + FaceRecognition.is_admin_authenticated",
+      "finding": "camera-based admin authentication already exists (voice claims explicitly rejected) \u2014 a ready-made primitive for gating forged-skill activation on a physically present admin",
+      "seeds": [
+        "c15"
+      ]
+    }
+  ]
+}
