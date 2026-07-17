@@ -474,12 +474,16 @@ def test_validator_raising_is_treated_as_rejection(tmp_path, monkeypatch, caplog
 
 
 def test_no_validator_provided_and_no_forge_validator_module_fails_closed(tmp_path, monkeypatch):
-    """validator=None with no injected stub -> lazy-imports reachy_nova.forge_validator.
+    """validator=None with the forge_validator module unavailable fails CLOSED.
 
-    That sibling module is built by a different task and does not exist in
-    this worktree, so the ImportError must fail CLOSED: forge/rejected with
-    reason 'validator unavailable' — never forge/staged.
+    The sibling module exists on the merged tree, so its absence is simulated
+    explicitly: a None entry in sys.modules makes the lazy import raise
+    ImportError. The contract under test is unchanged — no validator means
+    forge/rejected with reason 'validator unavailable', never forge/staged.
     """
+    import sys
+
+    monkeypatch.setitem(sys.modules, "reachy_nova.forge_validator", None)
     monkeypatch.setenv("FORGE_BASE_URL", "http://forge.local/v1")
     publisher = _RecordingPublisher()
 
