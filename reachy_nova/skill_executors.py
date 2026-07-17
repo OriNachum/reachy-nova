@@ -1,6 +1,6 @@
 """Tool-callable skill implementations for Reachy Nova.
 
-Registers all 13 skill executors with the SkillManager.
+Registers all 14 skill executors with the SkillManager.
 Each executor is a module-level function taking (params, ctx).
 """
 
@@ -247,6 +247,35 @@ def _vocalize_executor(params: dict, ctx) -> str:
     audio_output(samples)
     duration_s = len(samples) / vocalize.DEFAULT_SAMPLE_RATE
     return f"[Vocalized '{kind}' ({duration_s:.2f}s)]"
+
+
+def _forge_executor(params: dict, ctx) -> str:
+    goal = params.get("goal", "").strip()
+    if not goal:
+        return "[Forge requires a 'goal' parameter]"
+    improve = params.get("improve") or None
+
+    forge = getattr(ctx, "skill_forge", None)
+    if forge is None:
+        return "[Forge unavailable]"
+
+    # Best-effort sensory context for the coder model — never let a bad
+    # snapshot sink the forge request.
+    context: dict = {}
+    state = getattr(ctx, "state", None)
+    if state is not None and hasattr(state, "snapshot"):
+        try:
+            context = state.snapshot()
+        except Exception as e:
+            logger.warning(f"forge: failed reading state snapshot: {e}")
+
+    try:
+        forge.dispatch(goal, context, improve)
+    except Exception as e:
+        logger.warning(f"forge: dispatch failed to start: {e}")
+        return f"[Forge failed to start: {e}]"
+
+    return f"[Forging '{goal}' — I'll let you know when it's ready.]"
 
 
 def register_all(skill_manager, ctx) -> None:
@@ -529,5 +558,24 @@ def register_all(skill_manager, ctx) -> None:
                 },
             },
             "required": ["action"],
+        },
+    )
+
+    skill_manager.register_executor(
+        "forge",
+        lambda params: _forge_executor(params, ctx),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "string",
+                    "description": "What new capability to forge, in plain language",
+                },
+                "improve": {
+                    "type": "string",
+                    "description": "Existing executor.py source to improve/iterate on (optional)",
+                },
+            },
+            "required": ["goal"],
         },
     )
