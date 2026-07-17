@@ -9,6 +9,8 @@ import time
 
 import numpy as np
 
+from . import vocalize
+
 logger = logging.getLogger(__name__)
 
 # All moods available to the system
@@ -220,6 +222,31 @@ def _focus_executor(params: dict, ctx) -> str:
         ctx.tracker.continue_focus_search()
         return "[Search timer reset — extending search up to 60 more seconds.]"
     return f"[Unknown focus action: {action}]"
+
+
+def _vocalize_executor(params: dict, ctx) -> str:
+    kind = params.get("kind", "chirp_up").lower()
+    if kind not in vocalize.VALID_KINDS:
+        return f"[Unknown vocalize kind '{kind}'. Available: {', '.join(vocalize.VALID_KINDS)}]"
+
+    try:
+        intensity = float(params.get("intensity", 1.0))
+    except (TypeError, ValueError):
+        intensity = 1.0
+
+    samples = vocalize.synthesize(kind, intensity=intensity)
+
+    # Reach the speaker buffer the same way Sonic's own audio does
+    # (see handle_audio_output in main.py). Wiring ctx.audio_output up to
+    # that callback is later integration work; look it up defensively so
+    # this executor degrades gracefully (e.g. under a stub ctx in tests).
+    audio_output = getattr(ctx, "audio_output", None)
+    if audio_output is None:
+        return "[Vocalize audio path unavailable]"
+
+    audio_output(samples)
+    duration_s = len(samples) / vocalize.DEFAULT_SAMPLE_RATE
+    return f"[Vocalized '{kind}' ({duration_s:.2f}s)]"
 
 
 def register_all(skill_manager, ctx) -> None:
@@ -458,6 +485,26 @@ def register_all(skill_manager, ctx) -> None:
                 },
             },
             "required": ["operation"],
+        },
+    )
+
+    skill_manager.register_executor(
+        "vocalize",
+        lambda params: _vocalize_executor(params, ctx),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "description": "The expressive non-speech sound to vocalize",
+                    "enum": list(vocalize.VALID_KINDS),
+                },
+                "intensity": {
+                    "type": "number",
+                    "description": "How pronounced the vocalization is, 0.0-1.0 (default 1.0)",
+                },
+            },
+            "required": ["kind"],
         },
     )
 
