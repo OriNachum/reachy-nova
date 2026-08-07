@@ -22,6 +22,8 @@ from aws_sdk_bedrock_runtime.models import (
 from aws_sdk_bedrock_runtime.config import Config
 from smithy_aws_core.identity.environment import EnvironmentCredentialsResolver
 
+from .sensory_log import stage as sensory_stage
+
 logger = logging.getLogger(__name__)
 
 INPUT_SAMPLE_RATE = 16000
@@ -546,13 +548,20 @@ class NovaSonic:
         # Don't inject while the model is actively generating audio — this can
         # destabilize the Bedrock bidirectional stream and cause it to hang.
         if self._speaking and not force:
-            logger.debug("inject_text skipped — model is speaking")
+            sensory_stage(
+                "inject", "speech", str(uuid.uuid4()),
+                f"dropped reason=speaking text={text[:60]!r}",
+            )
             return
 
         # Throttle: skip if too soon after last inject to avoid flooding Bedrock
         now = time.time()
         if now - self._last_inject_time < self._inject_min_interval:
-            logger.debug(f"inject_text throttled (interval={now - self._last_inject_time:.1f}s)")
+            sensory_stage(
+                "inject", "speech", str(uuid.uuid4()),
+                f"dropped reason=throttled interval={now - self._last_inject_time:.1f}s "
+                f"text={text[:60]!r}",
+            )
             return
         self._last_inject_time = now
 

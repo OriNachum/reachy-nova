@@ -30,6 +30,32 @@ IDLE_YAW_SPEED = 0.15
 IDLE_PITCH_AMP = 3.0
 IDLE_PITCH_SPEED = 0.08
 
+# --- Audio direction event tuning ---
+# Rate limit for the "audio_direction" event fired from update_doa(): at most
+# one event per window, unless the bearing swings past the jump threshold.
+AUDIO_DIRECTION_RATE_LIMIT_S = 2.0
+AUDIO_DIRECTION_BEARING_JUMP_DEG = 15.0
+# Label band around dead-ahead (yaw=0). Beyond +-this many degrees is called
+# left/right; within it is called "front". Mirrors the yaw convention derived
+# in update_doa (front=0, left=positive, right=negative).
+AUDIO_DIRECTION_LABEL_THRESHOLD_DEG = 20.0
+
+
+def _audio_direction_label(bearing_deg: float) -> str:
+    """Map a DoA-derived yaw bearing (degrees) to a left/front/right label.
+
+    Follows the XMOS convention baked into update_doa's yaw conversion
+    (angle 0 = left, pi/2 = front, pi = right -> yaw where left is positive
+    and right is negative): a bearing beyond
+    +-AUDIO_DIRECTION_LABEL_THRESHOLD_DEG of dead-ahead is left/right,
+    otherwise "front".
+    """
+    if bearing_deg > AUDIO_DIRECTION_LABEL_THRESHOLD_DEG:
+        return "left"
+    if bearing_deg < -AUDIO_DIRECTION_LABEL_THRESHOLD_DEG:
+        return "right"
+    return "front"
+
 
 class PatDetector:
     """Detects patting gestures on the robot head.
@@ -235,6 +261,11 @@ class TrackingManager:
         self.speaker_hold_duration = 3.0  # hold speaker direction 3s
         self.doa_yaw_target = 0.0  # computed yaw in degrees
 
+        # --- audio_direction event rate limiting (purely additive on top of
+        # the head-tracking state above; never gates doa_yaw_target itself) ---
+        self._last_audio_direction_emit_time: float | None = None
+        self._last_audio_direction_bearing: float | None = None
+
         # --- Snap detection ---
         self.energy_history = deque(maxlen=30)
         self.snap_time = 0.0
@@ -318,6 +349,8 @@ class TrackingManager:
             yaw_rad = (np.pi / 2) - angle_rad
             self.doa_yaw_target = np.degrees(yaw_rad)
             self.doa_yaw_target = np.clip(self.doa_yaw_target, -MAX_YAW, MAX_YAW)
+
+            self._maybe_fire_audio_direction(float(self.doa_yaw_target))
         else:
             if self.doa_speech_active:
                 # Speech just stopped, start hold timer
@@ -326,6 +359,42 @@ class TrackingManager:
                 # Check if hold expired
                 if time.time() - self.speaker_lost_time > self.speaker_hold_duration:
                     self.doa_speech_active = False
+
+    def _maybe_fire_audio_direction(self, bearing_deg: float) -> None:
+        """Fire a rate-limited 'audio_direction' event for the given bearing.
+
+        Purely additive on top of update_doa's head-tracking state: this
+        never affects doa_yaw_target, only whether the event itself fires.
+        Fires at most once per AUDIO_DIRECTION_RATE_LIMIT_S window, unless
+        the bearing has moved AUDIO_DIRECTION_BEARING_JUMP_DEG+ since the
+        last emitted event, in which case the window resets immediately.
+        """
+        now = time.time()
+
+        first_emit = self._last_audio_direction_emit_time is None
+        window_elapsed = (
+            first_emit
+            or (now - self._last_audio_direction_emit_time) >= AUDIO_DIRECTION_RATE_LIMIT_S
+        )
+        # Tiny epsilon absorbs float round-trip noise (degrees<->radians) so
+        # a jump of exactly AUDIO_DIRECTION_BEARING_JUMP_DEG reliably counts
+        # as "15+ degrees" rather than landing a hair under it.
+        bearing_jumped = (
+            self._last_audio_direction_bearing is not None
+            and abs(bearing_deg - self._last_audio_direction_bearing)
+            >= AUDIO_DIRECTION_BEARING_JUMP_DEG - 1e-9
+        )
+
+        if not (window_elapsed or bearing_jumped):
+            return
+
+        self._last_audio_direction_emit_time = now
+        self._last_audio_direction_bearing = bearing_deg
+        self._fire_event("audio_direction", {
+            "bearing_deg": bearing_deg,
+            "label": _audio_direction_label(bearing_deg),
+            "speech_active": self.doa_speech_active,
+        })
 
     def _run_detection(self, frame):
         """Run YOLO detection in background thread. Non-blocking."""
