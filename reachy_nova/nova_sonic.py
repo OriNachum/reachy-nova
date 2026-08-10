@@ -89,6 +89,10 @@ class NovaSonic:
         # Tool use tracking
         self._current_tool_use: dict | None = None
 
+        # Watchdog bookkeeping: a generation that stalls mid-utterance (stream
+        # hang, lost contentEnd) must not pin the speaking guard forever.
+        self._last_audio_time = 0.0
+
         self.state = "idle"  # idle, listening, thinking, speaking
         self.last_user_text = ""
         self.last_assistant_text = ""
@@ -325,10 +329,12 @@ class NovaSonic:
                             self.on_transcript(role or "ASSISTANT", text)
 
                     elif "audioOutput" in event:
+                        self._last_audio_time = time.time()
                         if not self._speaking:
                             self._speaking = True
                             self._set_state("speaking")
                             assistant_text_parts = []
+                            logger.info("Utterance audio started")
                         audio_b64 = event["audioOutput"].get("content", "")
                         if audio_b64:
                             pcm_bytes = base64.b64decode(audio_b64)
@@ -359,6 +365,8 @@ class NovaSonic:
                                 except Exception as e:
                                     logger.error(f"on_tool_use callback error: {e}")
                         elif role == "ASSISTANT":
+                            if self._speaking:
+                                logger.info("Utterance ended — back to listening")
                             self._speaking = False
                             self._set_state("listening")
 
@@ -432,6 +440,19 @@ class NovaSonic:
             try:
                 # Wait until stop requested OR response loop dies
                 while not self._should_stop(stop_event) and not response_task.done():
+                    # Speaking watchdog: a stalled generation (no audio for 10s
+                    # while _speaking) would otherwise pin the inject guard
+                    # forever and hold the speaker's utterance buffer hostage.
+                    if (
+                        self._speaking
+                        and self._last_audio_time
+                        and time.time() - self._last_audio_time > 10.0
+                    ):
+                        logger.warning(
+                            "Speaking watchdog: no audio for 10s — clearing stuck speaking state"
+                        )
+                        self._speaking = False
+                        self._set_state("listening")
                     await asyncio.sleep(0.1)
             finally:
                 # Mark inactive FIRST to stop all incoming traffic
