@@ -272,13 +272,18 @@ suggestion in
   utterance flushes and plays.
 - **KNOWN HARDWARE BLOCKER (outside harness scope)**: head/body motors do not
   move — antennas only. Verified below every layer of ours: engine-confirmed
-  gotos, then raw `reachy_mini` SDK (`goto_target`, runtime stopped) both
-  produce zero motion; SDK goto hangs on the daemon motion service. Daemon
-  backend never reports alive (`ready: false`, `last_alive: null`) despite a
-  49Hz motor-controller loop, with serial errors on `body_rotation` (id 10)
-  and `stewart_6` (id 16). Survives daemon restart AND full power cycle.
-  Motor torque itself works (antennas). Needs Pollen/ReachyMiniOS-level
-  debugging (firmware/serial bus), not harness work.
+  gotos, raw `reachy_mini` SDK (`goto_target`, runtime stopped), AND the
+  daemon's own HTTP `/api/move/goto` all produce zero motion; SDK goto hangs
+  on the daemon motion service. Daemon backend never reports alive
+  (`ready: false`, `last_alive: null`) despite a 49Hz motor-controller loop,
+  with serial errors on `body_rotation` (id 10) and `stewart_6` (id 16).
+  Survives daemon restart AND full power cycle. 2026-08-11 refinement: the
+  head/body motors are physically limp (no holding torque — Ori's
+  observation) while the antennas hold and animate, and the unit DID move
+  fully before (with the old app and with demo-mode) — so this is not
+  shipped-broken hardware and not today's software: prime suspect is a loose
+  head/body motor-chain connection (exactly the ids throwing comm errors).
+  Being verified physically.
 - **Upstream findings for reachy-mini-cli** (branch `wireless-motor-enable`
   pushed): (1) wireless daemon boots `motor_control_mode=disabled` — the CLI
   never calls `enable_motors()`; patched best-effort in `HeldMediaClient`
