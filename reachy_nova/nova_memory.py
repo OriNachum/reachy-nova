@@ -19,6 +19,8 @@ import boto3
 
 from .temporal import relative_vague
 
+from . import config
+
 logger = logging.getLogger(__name__)
 
 # Default paths to qq knowledge files
@@ -26,9 +28,9 @@ DEFAULT_CORE_MD = Path.home() / "git/autonomous-intelligence/qq/memory/core.md"
 DEFAULT_NOTES_MD = Path.home() / "git/autonomous-intelligence/qq/memory/notes.md"
 
 # Bedrock model IDs
-EMBEDDING_MODEL = "amazon.nova-2-multimodal-embeddings-v1:0"
+EMBEDDING_MODEL = config.embedding_model_id()
 EMBEDDING_DIM = 1024
-LLM_MODEL = "us.amazon.nova-2-lite-v1:0"
+LLM_MODEL = config.lite_model_id()
 
 # MongoDB defaults
 DEFAULT_MONGO_URI = "mongodb://localhost:27017"
@@ -57,7 +59,7 @@ class NovaMemory:
 
     def __init__(
         self,
-        region: str = "us-east-1",
+        region: str | None = None,
         mongo_uri: str | None = None,
         mongo_db: str | None = None,
         neo4j_uri: str | None = None,
@@ -70,7 +72,7 @@ class NovaMemory:
         on_state_change: Callable[[str], None] | None = None,
         on_context: Callable[[str], None] | None = None,
     ):
-        self.region = region
+        self.region = region or config.region()
         self.mongo_uri = mongo_uri or os.environ.get("MONGODB_URI", DEFAULT_MONGO_URI)
         self.mongo_db = mongo_db or os.environ.get("MONGO_DB", DEFAULT_MONGO_DB)
         self.neo4j_uri = neo4j_uri or os.environ.get("NEO4J_URI", DEFAULT_NEO4J_URI)
@@ -101,7 +103,7 @@ class NovaMemory:
 
         # Initialize Bedrock client eagerly (needed for embeddings)
         try:
-            self._bedrock_client = boto3.client("bedrock-runtime", region_name=region)
+            self._bedrock_client = boto3.client("bedrock-runtime", region_name=self.region)
             self._bedrock_available = True
         except Exception as e:
             logger.warning(f"Bedrock client init failed: {e}")

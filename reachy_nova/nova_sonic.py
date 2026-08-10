@@ -22,6 +22,7 @@ from aws_sdk_bedrock_runtime.models import (
 from aws_sdk_bedrock_runtime.config import Config
 from smithy_aws_core.identity.environment import EnvironmentCredentialsResolver
 
+from . import config
 from .sensory_log import stage as sensory_stage
 
 logger = logging.getLogger(__name__)
@@ -37,8 +38,8 @@ class NovaSonic:
 
     def __init__(
         self,
-        region: str = "us-east-1",
-        model_id: str = "amazon.nova-2-sonic-v1:0",
+        region: str | None = None,
+        model_id: str | None = None,
         voice_id: str = "matthew",
         system_prompt: str = (
             "You are Nova, a small curious robot. "
@@ -53,8 +54,8 @@ class NovaSonic:
         on_tool_use: Callable[[str, str, dict], None] | None = None,
         on_interruption: Callable[[], None] | None = None,
     ):
-        self.region = region
-        self.model_id = model_id
+        self.region = region or config.region()
+        self.model_id = model_id or config.sonic_model_id()
         self.voice_id = voice_id
         self.system_prompt = system_prompt
         self.on_transcript = on_transcript
@@ -118,7 +119,7 @@ class NovaSonic:
             "inferenceConfig": {"maxTokens": 10, "temperature": 0.1, "topP": 0.9},
         }
         response = self._decision_client.invoke_model(
-            modelId="us.amazon.nova-2-lite-v1:0",
+            modelId=config.lite_model_id(),
             body=json.dumps(body),
         )
         result = json.loads(response["body"].read())
