@@ -43,7 +43,9 @@ def state_dir(tmp_path, monkeypatch):
 
 
 def _write_heartbeat(age_s: float) -> None:
-    statedir.state_json_path().write_text(json.dumps({"updated": time.time() - age_s}))
+    statedir.state_json_path().write_text(
+        json.dumps({"updated": time.monotonic() - age_s})
+    )
 
 
 def _really_dead_pid() -> int:
