@@ -1,10 +1,14 @@
+# The broker is LOCALHOST-ONLY (config/mosquitto/mosquitto.conf binds
+# 127.0.0.1 on both listeners, which is what makes allow_anonymous safe). A
+# loopback-bound listener inside a bridge network is unreachable from a
+# published port or a sibling container, so both services run on the host
+# network instead and meet on the device's own loopback — the same
+# localhost:1883 the reachy-mini-cli runtime and the Nova harness use.
 services:
   mosquitto:
     image: eclipse-mosquitto:2
     container_name: nova-mosquitto
-    ports:
-      - "1883:1883"
-      - "9001:9001"
+    network_mode: host
     volumes:
       - ./config/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
       - mosquitto-data:/mosquitto/data
@@ -21,11 +25,12 @@ services:
       context: .
       dockerfile: docker/nervous-system/Dockerfile
     container_name: nova-nervous-system
+    network_mode: host
     depends_on:
       mosquitto:
         condition: service_healthy
     environment:
-      - MQTT_BROKER=mosquitto
+      - MQTT_BROKER=localhost
       - MQTT_PORT=1883
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
