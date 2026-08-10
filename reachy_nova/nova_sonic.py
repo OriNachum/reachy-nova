@@ -446,10 +446,10 @@ class NovaSonic:
                     if (
                         self._speaking
                         and self._last_audio_time
-                        and time.time() - self._last_audio_time > 10.0
+                        and time.time() - self._last_audio_time > 4.0
                     ):
                         logger.warning(
-                            "Speaking watchdog: no audio for 10s — clearing stuck speaking state"
+                            "Speaking watchdog: no audio for 4s — clearing stuck speaking state"
                         )
                         self._speaking = False
                         self._set_state("listening")
