@@ -196,3 +196,82 @@ rules:
     urgency: NOW
     llm_evaluate: false
     inject_template: "A new skill idea didn't pass its safety check: {reason}"
+
+  # --- Runtime bus events (reachy-mini-cli's symbolic runtime) --------------
+  # These arrive over MQTT as reachy/events/{source}/{type} and are keyed here
+  # by the same "source/type" pair (reachy_nova/harness/bus.py). {source} is
+  # the runtime block type and {type} its action — see the runtime feed half
+  # of reachy-mini-cli's docs/export-schema.md. Only the events that tell Nova
+  # something it cannot work out on its own carry an inject_template; the
+  # LOW/BACKGROUND ones are observed (dashboard/logs) and never spoken about.
+
+  sense/snapshot:
+    # The 50Hz engine's perception snapshot. NOT subscribed by default
+    # (NOVA_BUS_SOURCES defaults to rule,intent,motion): unfiltered it floods —
+    # upstream measured 187 cues in ~40s from this stream alone. Nova already
+    # has its own senses; this is the runtime's copy of them.
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  rule/fire:
+    # A deterministic reflex fired on the robot's body — something moved that
+    # Nova did not decide, so it needs to know it happened.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "Your body just reacted on its own — the '{rule}' reflex fired."
+
+  rule/suppress:
+    # A reflex was considered and held back (cooldown/rearming/inhibited).
+    # Bookkeeping, not news.
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  intent/declare:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  intent/update:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  intent/clear:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  intent/applied:
+    # A standing symbolic goal took effect in the runtime.
+    priority: NORMAL
+    urgency: DEFERRABLE
+    llm_evaluate: false
+    inject_template: "Your standing intention '{name}' is now in effect."
+
+  intent/blocked:
+    # The runtime refused a standing goal — a failure Nova must not miss,
+    # otherwise it keeps believing it asked for something that never landed.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "The runtime blocked your intention '{name}'."
+
+  motion/admit:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  motion/evict:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  motion/goto:
+    # Goto-lane lifecycle (admitted/done/cancelled). Movement Nova can feel
+    # through its own senses — logged, not narrated.
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
