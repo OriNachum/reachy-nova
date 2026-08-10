@@ -43,8 +43,10 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import logging
 import os
 import signal
+import sys
 import subprocess  # nosec B404 - passed through to unit.install_unit's fixed argv
 import threading
 from collections.abc import Callable, Iterable, Sequence
@@ -340,8 +342,26 @@ def _load_env_file(path: str) -> None:
     load_dotenv(path, override=False)
 
 
+def _configure_logging() -> None:
+    """INFO-level stderr logging so every [SENSE] line reaches journald.
+
+    Without a configured handler Python drops INFO records, which makes the
+    harness a silent cognition death — exactly what the observability
+    requirement forbids. Idempotent: an already-configured root is respected.
+    """
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+
+
 def cmd_run(env_file: str | None = None) -> int:
     """The ``run`` verb: refuse if we would fight a peer, else watch until stopped."""
+    _configure_logging()
     if env_file:
         _load_env_file(env_file)
     if statedir.embody_is_live():
