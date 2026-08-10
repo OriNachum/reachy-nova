@@ -83,10 +83,12 @@ def build_app() -> list[object]:
 
     sonic.on_tool_use = _on_tool_use
 
-    # cognition feed — what was said aloud
+    # cognition feed — what was said aloud; USER lines named for the journal
     def _on_transcript(role: str, text: str) -> None:
         if role == "ASSISTANT" and text.strip():
             feed.message(text)
+        elif role == "USER" and text.strip():
+            _stage("hear", "nova", "transcript", f"heard {text[:120]!r}")
 
     sonic.on_transcript = _on_transcript
 

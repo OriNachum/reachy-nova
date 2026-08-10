@@ -319,12 +319,17 @@ class SonicSpeaker:
 
         duration_s = len(samples) / self.sample_rate
         wav_bytes = _make_wav_bytes(samples, self.sample_rate)
+        # Arm BEFORE the post: play_sound returns when playback is triggered,
+        # not when sound leaves the speaker — arming after the HTTP round trip
+        # leaves the upload window plus the sink's start latency ungated, and
+        # the mic transcribes the robot's own tail (observed live: Nova held a
+        # conversation with its own echo).
+        self.gate.arm_for(duration_s)
         try:
             self.poster(self.base_url, wav_bytes, _UPLOAD_FILENAME)
         except Exception as err:
             self._mouth_loss(duration_s, err)
             return
-        self.gate.arm_for(duration_s)
         self.utterances_played += 1
         sensory_log.stage(
             STAGE_SPEAK, SOURCE, "play", f"played duration={duration_s:.2f}s"

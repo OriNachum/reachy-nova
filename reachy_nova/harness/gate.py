@@ -15,7 +15,7 @@ import time
 class EchoGate:
     """Thread-safe speaking window: armed for a playback duration + margin."""
 
-    def __init__(self, margin_s: float = 0.3):
+    def __init__(self, margin_s: float = 1.0):
         self.margin_s = margin_s
         self._until = 0.0
         self._lock = threading.Lock()
