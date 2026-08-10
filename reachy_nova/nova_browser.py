@@ -1,4 +1,11 @@
-"""Nova Act - Browser automation triggered by voice commands."""
+"""Nova Act - Browser automation triggered by voice commands.
+
+Gated behind ``NOVA_ACT_ENABLED`` (default off, see :func:`act_enabled`).
+When the flag is off, no code path in this module imports ``nova_act`` or
+``playwright`` — those imports are function-local (inside
+``_ensure_workflow``/``_execute_task``, on the enabled path only) precisely
+so that flag-off means zero import of either package.
+"""
 
 import base64
 import logging
@@ -8,9 +15,25 @@ import queue
 import time
 from collections.abc import Callable
 
+from . import sensory_log
+
 logger = logging.getLogger(__name__)
 
 WORKFLOW_MODEL_ID = "nova-act-latest"
+
+_TRUTHY_VALUES = {"1", "true", "yes", "on"}
+
+
+def act_enabled() -> bool:
+    """Whether Nova Act browser automation is enabled.
+
+    Reads the ``NOVA_ACT_ENABLED`` environment variable, default-off
+    (``"0"``). Truthy values (case-insensitive): ``1``, ``true``, ``yes``,
+    ``on``. Anything else — including an absent variable, ``"0"``,
+    ``"false"``, ``"no"``, ``"off"``, or an empty string — is off.
+    """
+    value = os.environ.get("NOVA_ACT_ENABLED", "0").strip().lower()
+    return value in _TRUTHY_VALUES
 
 
 class NovaBrowser:
@@ -22,7 +45,7 @@ class NovaBrowser:
         on_screenshot: Callable[[str], None] | None = None,
         on_state_change: Callable[[str], None] | None = None,
         on_progress: Callable[[str], None] | None = None,
-        headless: bool = False,
+        headless: bool = True,
         chrome_channel: str = "chromium",
     ):
         self.on_result = on_result
@@ -63,10 +86,19 @@ class NovaBrowser:
     def queue_task(self, instruction: str, url: str | None = None) -> None:
         """Queue a browser automation task (fire-and-forget).
 
+        No-op when ``NOVA_ACT_ENABLED`` is off (the default) — nothing
+        consumes the queue in that case since :meth:`start` never spins up
+        the worker thread.
+
         Args:
             instruction: Natural language instruction for what to do.
             url: Optional URL to navigate to first.
         """
+        if not act_enabled():
+            sensory_log.stage(
+                "act", "browser", "queue_task", "dropped reason=nova-act-disabled"
+            )
+            return
         self._task_queue.put({"instruction": instruction, "url": url})
 
     def execute(self, instruction: str, url: str | None = None) -> str:
@@ -81,6 +113,12 @@ class NovaBrowser:
         Returns:
             The result string from the browser task.
         """
+        if not act_enabled():
+            sensory_log.stage(
+                "act", "browser", "execute", "dropped reason=nova-act-disabled"
+            )
+            return "Browser automation is disabled (set NOVA_ACT_ENABLED=1 to enable)."
+
         done_event = threading.Event()
         result_holder: list[str] = []
 
@@ -232,7 +270,19 @@ class NovaBrowser:
         self._cleanup_workflow()
 
     def start(self, stop_event: threading.Event) -> None:
-        """Start the browser automation worker thread."""
+        """Start the browser automation worker thread.
+
+        No-op when ``NOVA_ACT_ENABLED`` is off (the default): no worker
+        thread is spun up, and — since ``_run_loop``/``_execute_task`` are
+        never reached — neither ``nova_act`` nor ``playwright`` is ever
+        imported.
+        """
+        if not act_enabled():
+            sensory_log.stage(
+                "act", "browser", "start", "dropped reason=nova-act-disabled"
+            )
+            logger.info("Nova Act disabled (NOVA_ACT_ENABLED=0); browser thread not started")
+            return
         self._thread = threading.Thread(
             target=self._run_loop, args=(stop_event,), name="nova-browser", daemon=True
         )
