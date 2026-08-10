@@ -210,6 +210,23 @@ def build_components(names: Iterable[str] = OPTIONAL_COMPONENTS) -> list[object]
     return components
 
 
+def _composed_components() -> list[object]:
+    """The real wired graph (app.build_app), degrading to bare components.
+
+    ``build_components`` starts whatever exists un-wired — enough to observe a
+    box, never enough to talk. The composition root is preferred; if it cannot
+    build (a missing heavy dependency, a bad env), the failure is named and the
+    harness still comes up in the degraded shape.
+    """
+    try:
+        from . import app
+
+        return app.build_app()
+    except Exception as err:  # noqa: BLE001 - degraded beats dead
+        _log("component", f"composition failed reason={err}; running degraded components")
+        return build_components()
+
+
 def _start_components(components: Sequence[object], stop_event: threading.Event) -> list[object]:
     started: list[object] = []
     for component in components:
@@ -337,7 +354,7 @@ def cmd_run(env_file: str | None = None) -> int:
     stop_event = threading.Event()
     restore = install_signal_handlers(stop_event)
     try:
-        run(build_components(), stop_event)
+        run(_composed_components(), stop_event)
     finally:
         restore()
         release_pid_file()

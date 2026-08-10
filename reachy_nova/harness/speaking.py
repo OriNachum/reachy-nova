@@ -330,6 +330,31 @@ class SonicSpeaker:
             STAGE_SPEAK, SOURCE, "play", f"played duration={duration_s:.2f}s"
         )
 
+    def preempt(self) -> None:
+        """Barge-in: drop the building buffer and every queued utterance, free the gate.
+
+        Wired to Sonic's ``on_interruption`` — the user spoke over the robot, so
+        anything not yet on the speaker must never play.
+        """
+        with self._buffer_lock:
+            self._buffer = []
+            self._buffer_samples = 0
+        cleared = 0
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+            self._queue.task_done()
+            cleared += 1
+        self.gate.clear()
+        sensory_log.stage(
+            STAGE_SPEAK,
+            SOURCE,
+            "preempt",
+            f"dropped reason=barge-in pending={cleared}",
+        )
+
     def _mouth_loss(self, duration_s: float, err: Exception) -> None:
         """Playback failed: route to the interruption path, never hang/retry."""
         self.playback_failures += 1
