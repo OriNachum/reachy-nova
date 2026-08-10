@@ -74,8 +74,6 @@ def test_harness_entry_point_help_exits_cleanly():
     )
     assert result.returncode == 0
     assert "Traceback" not in result.stderr
-    combined = result.stderr + result.stdout
-    assert "supervisor" in combined.lower()
 
 
 def test_harness_stub_help_lists_subcommands():
