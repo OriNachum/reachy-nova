@@ -87,7 +87,10 @@ def engine_is_live(now: float | None = None) -> bool:
         updated = float(payload["updated"])
     except (OSError, ValueError, KeyError, TypeError):
         return False
-    now = time.time() if now is None else now
+    # The engine stamps ``updated`` from time.monotonic() (verified on-device:
+    # state.json carries ~200023 while epoch is ~1.79e9) — compare on the same
+    # clock or a live engine reads as permanently absent.
+    now = time.monotonic() if now is None else now
     age = now - updated
     return -ENGINE_HEARTBEAT_SKEW_S <= age <= ENGINE_HEARTBEAT_TTL_S
 
