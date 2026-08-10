@@ -153,6 +153,25 @@ rules:
     llm_evaluate: false
     inject_template: "Things you know: {context}"
 
+  memory/context:
+    # The harness memory leg (reachy_nova/harness/memory_leg.py) routes every
+    # qq knowledge context here — NovaMemory.on_context never reaches
+    # sonic.inject_text directly. Background knowledge, not news: DEFERRABLE,
+    # so it rides along rather than interrupting.
+    priority: NORMAL
+    urgency: DEFERRABLE
+    llm_evaluate: false
+    inject_template: "Something you know: {text}"
+
+  memory/result:
+    # The answer to a memory query the leg dispatched (NovaMemory.on_result).
+    # Nova asked for this, so it is worth saying — but still only in the words
+    # this template renders.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You remember: {text}"
+
   # --- Emotion events ---
   emotions/wound_created:
     priority: HIGH
