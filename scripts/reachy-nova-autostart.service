@@ -1,0 +1,13 @@
+[Unit]
+Description=Auto-start reachy_nova app
+After=reachy-mini-daemon.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pollen
+ExecStart=/home/pollen/git/reachy-nova/scripts/autostart.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

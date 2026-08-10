@@ -9,7 +9,7 @@ wake_word:
   phrase: "hey reachy"
   snap_fallback: true
   openwakeword:
-    model: "hey_jarvis"
+    model: "alexa"
     threshold: 0.5
 
 features:

@@ -5,6 +5,7 @@ without requiring a GPU.
 """
 
 import logging
+import os
 
 import numpy as np
 
@@ -22,8 +23,13 @@ class OpenWakeWordDetector(WakeWordBase):
         import openwakeword
         from openwakeword.model import Model
 
-        openwakeword.utils.download_models()
-        self._model = Model(wakeword_models=[model_name])
+        # Resolve short name (e.g. "alexa") to full bundled .onnx path
+        model_path = model_name
+        for p in openwakeword.get_pretrained_model_paths():
+            if os.path.basename(p).startswith(model_name):
+                model_path = p
+                break
+        self._model = Model(wakeword_model_paths=[model_path])
         self._threshold = threshold
         self._model_name = model_name
         logger.info(f"[WakeWord-OWW] Loaded model {model_name!r}, threshold={threshold}")

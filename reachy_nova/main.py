@@ -722,7 +722,7 @@ class ReachyNova(ReachyMiniApp):
                 except Exception:
                     output_sr = 24000
 
-                VOLUME_GAIN = 1.5
+                VOLUME_GAIN = 5.0
                 SPEED_FACTOR = 1.05
 
                 for chunk in chunks:
