@@ -204,3 +204,34 @@ suggestion in
   Omni describes a shown object, a spoken request creates a standing rule that
   still fires after `reachy-nova-harness stop`; (3) pull wifi mid-conversation →
   runtime continues breathing/reacting, harness reconnects when back.
+
+### Device bring-up record (2026-08-10, executed over ssh pollen@192.168.1.162)
+
+- **Migration baseline (t1)**: reachy_nova `5f5c3a9` (spec/plan commit, branch
+  `wireless-harness` forked from it); reachy-mini-cli on-device was a stale
+  **0.29.0 pip install** over a `30ef881` (v0.47.0) checkout — the venv, not
+  the checkout, is what runs. On-device unpushed work preserved as branch
+  `raspberry-pi-fixes` (`be59d7c`, pushed to origin from spark; the device has
+  no GitHub auth).
+- **CLI upgrade**: checkout pulled to `8238c1a` (v0.48.0), `ensurepip` +
+  `pip install -e .` into its venv → `reachy-mini-cli 0.48.0`.
+- **Broker**: `mosquitto` installed via apt, `/etc/mosquitto/conf.d/local-only.conf`
+  = `listener 1883 127.0.0.1` + `allow_anonymous true`; enabled at boot;
+  verified `ss -tlnp` shows `127.0.0.1:1883` only.
+- **Engine probe** (before cutover): demo-mode stopped, foreground
+  `behavior engine run --max-ticks 600` → 600 ticks clean, `feel-alive`
+  owning head/antennas/body_yaw, live DoA on the bus, tee socket created,
+  retained `reachy/state/*` tree + `reachy/state/online true` published.
+- **Cutover**: `reachy-runtime.service` **hand-authored** (upstream
+  `units.py` text minus `Requires=reachy-daemon.service` — ReachyMiniOS runs
+  the SDK daemon as the system service `reachy-mini-daemon.service` on :8000,
+  so the CLI's user daemon unit would double-start it; deviation to file
+  upstream). `demo-mode` disabled, `runtime` enabled; heartbeat age 0.5s.
+  Unit backups in `~/unit-backups/`. Rollback = disable runtime, enable
+  demo-mode (unit file preserved).
+- **Runtime restart drill**: `systemctl --user restart reachy-runtime` →
+  active again with tee socket rebound and retained `online true` within 6s.
+- **Hardening P0**: on-device `.env` now `-rw-------` (chmod 600).
+- **Harness deps**: robot's reachy-nova venv is editable against
+  `~/git/reachy-nova` (branch switch = deploy);
+  `aws_sdk_bedrock_runtime`/paho/dotenv/yaml/numpy import clean.
