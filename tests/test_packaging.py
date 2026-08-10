@@ -53,27 +53,27 @@ def test_dependencies_are_unchanged():
         assert expected in deps
 
 
-def test_harness_stub_exits_cleanly_without_supervisor():
-    """``python -m reachy_nova.harness run`` must exit 1 with a one-line
-    message (not a traceback) while ``reachy_nova.harness.supervisor`` is
-    absent — a sibling task implements it.
+def test_harness_entry_point_help_exits_cleanly():
+    """``python -m reachy_nova.harness --help`` exits 0 with no traceback.
+
+    (The original stub-era test ran ``run`` expecting failure while the
+    supervisor was absent; the supervisor exists now, so ``run`` would start a
+    real harness — ``--help`` proves the entry point wiring instead.)
     """
-    env = {"PYTHONPATH": str(REPO_ROOT)}
     import os
 
     full_env = dict(os.environ)
-    full_env.update(env)
+    full_env["PYTHONPATH"] = str(REPO_ROOT)
     result = subprocess.run(
-        [sys.executable, "-m", "reachy_nova.harness", "run"],
+        [sys.executable, "-m", "reachy_nova.harness", "--help"],
         cwd=REPO_ROOT,
         env=full_env,
         capture_output=True,
         text=True,
         timeout=30,
     )
-    assert result.returncode == 1
+    assert result.returncode == 0
     assert "Traceback" not in result.stderr
-    assert "Traceback" not in result.stdout
     combined = result.stderr + result.stdout
     assert "supervisor" in combined.lower()
 
