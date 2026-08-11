@@ -28,12 +28,19 @@ from reachy_nova.harness.tools import (
     BROWSE_DISABLED_REASON,
     BROWSE_NOT_WIRED_REASON,
     DEGRADED_NOTE,
+    ENROLL_FACE_TARGET,
+    ENROLL_NAME_INVALID_REASON,
+    ENROLL_NAME_TOO_LONG_REASON,
+    ENROLL_NAME_UNPRINTABLE_REASON,
+    ENROLL_OP,
+    MAX_ENROLL_NAME_LEN,
     TOOL_SPECS,
     IntentTools,
 )
 
 # The exact tool set — each addition past the original six is a deliberate
-# widening, never incidental. ``browse`` (task t4) is the first.
+# widening, never incidental. ``browse`` (task t4) is the first, ``enroll_face``
+# (task t8) the second.
 EXPECTED_TOOLS = (
     "run_behavior",
     "declare_goal",
@@ -42,6 +49,7 @@ EXPECTED_TOOLS = (
     "goto",
     "create_rule",
     "browse",
+    "enroll_face",
 )
 
 #: ``<time.time_ns()>-<uuid4.hex>.json``
@@ -134,7 +142,9 @@ def spool_payloads():
     return [json.loads(p.read_text(encoding="utf-8")) for p in spooled()]
 
 
-#: One valid arguments dict per spool-backed tool.
+#: One valid arguments dict per spool-backed tool whose wire ``op`` equals its
+#: tool name. ``enroll_face`` is spool-backed too but rides the runtime's
+#: ``enroll`` op under a different tool name, so it gets its own section below.
 VALID_ARGS = {
     "run_behavior": {"name": "nod", "duration": 2.0},
     "declare_goal": {"goal": "feel-alive"},
@@ -609,3 +619,151 @@ def test_browse_logs_one_sense_line_on_refusal(tools, caplog, monkeypatch):
     (line,) = _sense_lines(caplog)
     assert "refused" in line
     assert "browsing is disabled" in line
+
+
+# --------------------------------------------------------------------------- #
+# enroll_face — rides the runtime's enroll seam over the intents spool (t8)    #
+# --------------------------------------------------------------------------- #
+#
+# The runtime (reachy-mini-cli) owns face recognition and the FaceStore; the
+# wire contract requested in agentculture/reachy-mini-cli#166 is one more op on
+# the SAME intents spool. These tests therefore assert two separable things:
+# the exact bytes we put on the spool (which is the whole ask of the issue), and
+# that whatever comes back — success, a typed refusal, an unknown-op refusal
+# from a runtime that predates the seam, or nothing at all — reaches the model
+# unchanged. Nothing here assumes the seam has shipped.
+
+
+ENROLL_ARGS = {"name": "Ori"}
+
+
+def test_enroll_face_tool_spec_takes_only_a_required_name():
+    (spec,) = [s for s in TOOL_SPECS if s["toolSpec"]["name"] == "enroll_face"]
+    schema = json.loads(spec["toolSpec"]["inputSchema"]["json"])
+    assert schema["required"] == ["name"]
+    assert set(schema["properties"]) == {"name"}
+    assert schema["properties"]["name"]["type"] == "string"
+
+
+def test_enroll_face_tool_spec_tells_nova_when_to_use_it():
+    (spec,) = [s for s in TOOL_SPECS if s["toolSpec"]["name"] == "enroll_face"]
+    description = spec["toolSpec"]["description"].lower()
+    # The description is the ONLY thing that makes the model reach for this on
+    # "I'm Ori" — it must name both halves of the trigger (being told a name,
+    # while a face is visible), not just describe enrollment mechanics.
+    assert "name" in description
+    assert "face" in description
+
+
+def test_enroll_face_spools_the_agreed_enroll_command(tools):
+    tools.execute("enroll_face", ENROLL_ARGS)
+    (payload,) = spool_payloads()
+    assert set(payload) == {"cmd_id", "op", "name", "face"}
+    assert payload["op"] == ENROLL_OP == "enroll"
+    assert payload["name"] == "Ori"
+    assert payload["face"] == ENROLL_FACE_TARGET == "current"
+
+
+def test_enroll_face_returns_the_engines_success_verbatim(tools):
+    answer = {"ok": True, "id": "face-7", "name": "Ori"}
+    with intents_engine(response=answer) as engine:
+        result = json.loads(tools.execute("enroll_face", ENROLL_ARGS))
+    assert result["ok"] is True
+    assert result["id"] == "face-7"
+    assert result["name"] == "Ori"
+    (seen,) = engine.seen
+    assert seen["op"] == "enroll"
+    assert seen["name"] == "Ori"
+    assert seen["face"] == "current"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "no-recent-unknown-face",
+        "vision-unavailable",
+        "invalid name",
+        # A runtime that predates the seam (issue #166 unshipped) answers with
+        # its standard unknown-op refusal — which must reach the model as a
+        # refusal, never as a success and never as a harness crash.
+        "unknown op 'enroll'",
+    ],
+)
+def test_enroll_face_surfaces_the_engines_typed_refusal(tools, error):
+    with intents_engine(response={"ok": False, "error": error}):
+        result = json.loads(tools.execute("enroll_face", ENROLL_ARGS))
+    assert result["ok"] is False
+    assert result["error"] == error
+
+
+def test_enroll_face_degrades_when_no_engine_confirms(tools):
+    """No seam, no engine, no answer — the not-confirmed shape, command retained."""
+    result = json.loads(tools.execute("enroll_face", ENROLL_ARGS))
+    assert result["ok"] is None
+    assert result["note"] == DEGRADED_NOTE
+    payloads = spool_payloads()
+    assert [p["cmd_id"] for p in payloads] == [result["submitted"]]
+    assert payloads[0]["op"] == "enroll"
+
+
+def test_enroll_face_strips_surrounding_whitespace(tools):
+    tools.execute("enroll_face", {"name": "  Ori  "})
+    (payload,) = spool_payloads()
+    assert payload["name"] == "Ori"
+
+
+def test_enroll_face_accepts_the_upper_name_length_bound(tools):
+    name = "o" * MAX_ENROLL_NAME_LEN
+    tools.execute("enroll_face", {"name": name})
+    (payload,) = spool_payloads()
+    assert payload["name"] == name
+
+
+REFUSED_ENROLL_CALLS = [
+    ({}, ENROLL_NAME_INVALID_REASON),
+    ({"name": ""}, ENROLL_NAME_INVALID_REASON),
+    ({"name": "   "}, ENROLL_NAME_INVALID_REASON),
+    ({"name": None}, ENROLL_NAME_INVALID_REASON),
+    ({"name": 5}, ENROLL_NAME_INVALID_REASON),
+    ({"name": ["Ori"]}, ENROLL_NAME_INVALID_REASON),
+    ({"name": "o" * (MAX_ENROLL_NAME_LEN + 1)}, ENROLL_NAME_TOO_LONG_REASON),
+    ({"name": "Ori\nDROP TABLE faces"}, ENROLL_NAME_UNPRINTABLE_REASON),
+    ({"name": "Ori\x00"}, ENROLL_NAME_UNPRINTABLE_REASON),
+]
+
+
+@pytest.mark.parametrize("args,reason", REFUSED_ENROLL_CALLS)
+def test_enroll_face_bad_names_are_refused_without_spooling(tools, args, reason):
+    result = json.loads(tools.execute("enroll_face", args))
+    assert result["ok"] is False
+    assert result["error"] == reason
+    # A pre-flight refusal never reaches the spool, so no engine can act on it.
+    assert spooled() == []
+
+
+def test_enroll_face_refusal_reasons_are_named_constants():
+    """Each pre-flight refusal is a distinct, importable, non-empty constant."""
+    reasons = (
+        ENROLL_NAME_INVALID_REASON,
+        ENROLL_NAME_TOO_LONG_REASON,
+        ENROLL_NAME_UNPRINTABLE_REASON,
+    )
+    assert all(isinstance(r, str) and r.strip() for r in reasons)
+    assert len(set(reasons)) == 3
+
+
+def test_enroll_face_logs_one_sense_line_on_confirmation(tools, caplog):
+    with caplog.at_level(logging.INFO, logger="nova.sensory"):
+        with intents_engine(response={"ok": True, "id": "face-7", "name": "Ori"}):
+            tools.execute("enroll_face", ENROLL_ARGS)
+    (line,) = _sense_lines(caplog)
+    assert "[SENSE stage=act source=nova event=enroll_face]" in line
+    assert "confirmed" in line
+
+
+def test_enroll_face_logs_one_sense_line_on_refusal(tools, caplog):
+    with caplog.at_level(logging.INFO, logger="nova.sensory"):
+        tools.execute("enroll_face", {"name": ""})
+    (line,) = _sense_lines(caplog)
+    assert "[SENSE stage=act source=nova event=enroll_face]" in line
+    assert "refused" in line

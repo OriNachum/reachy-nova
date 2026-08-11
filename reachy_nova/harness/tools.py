@@ -3,9 +3,9 @@
 The wireless harness has no in-process robot: the body is driven by the
 reachy-mini-cli behavior engine running on the Wireless, and the ONLY thing
 between Nova's voice model and that engine is a directory of JSON files. This
-module is that seam — six ``toolConfiguration`` entries whose handlers write a
-command into ``<state>/behavior/intents/commands/`` and read the engine's answer
-back out of ``<state>/behavior/intents/results/``.
+module is that seam — a published set of ``toolConfiguration`` entries whose
+handlers write a command into ``<state>/behavior/intents/commands/`` and read
+the engine's answer back out of ``<state>/behavior/intents/results/``.
 
 The one invariant worth stating plainly: **no tool call silently vanishes.**
 Every :meth:`IntentTools.execute` returns a JSON payload the model can read, in
@@ -39,6 +39,11 @@ What is deliberately NOT re-validated here
   The DURATION bound is the exception — it is re-checked because it is the one
   bound that decides how long a runaway command holds the body, and 10 s is
   published as part of this harness's own wire contract.
+* **Whether there is a face to enroll.** ``enroll_face`` names whichever face
+  the runtime is currently looking at; only the runtime has the camera, the
+  FaceStore and the recency window, so "is an unknown face in view?" comes back
+  as its own typed refusal. The NAME is checked here, because that argument is
+  the model's invention and it lands in a durable identity store.
 
 Nothing here imports ``reachy_mini`` or the ``reachy`` (reachy-mini-cli)
 package: file paths are the whole contract.
@@ -69,12 +74,15 @@ SET_INHIBITION = "set_inhibition"
 GOTO = "goto"
 CREATE_RULE = "create_rule"
 BROWSE = "browse"
+ENROLL_FACE = "enroll_face"
 
 #: The harness's ENTIRE action set, in publication order. Each addition past
 #: the original six is a deliberate widening of the blast radius, never an
 #: incidental one — ``browse`` (task t4) is the first: it drives
 #: :class:`~reachy_nova.nova_browser.NovaBrowser`, not the intents spool, and
-#: stays refused whenever ``NOVA_ACT_ENABLED`` is off.
+#: stays refused whenever ``NOVA_ACT_ENABLED`` is off. ``enroll_face`` (task t8)
+#: is the second: it is spool-backed like the original five, but writes a
+#: durable identity rather than a transient pose.
 ACTION_SET: tuple[str, ...] = (
     RUN_BEHAVIOR,
     DECLARE_GOAL,
@@ -83,6 +91,7 @@ ACTION_SET: tuple[str, ...] = (
     GOTO,
     CREATE_RULE,
     BROWSE,
+    ENROLL_FACE,
 )
 
 #: Seconds a tool call waits for the engine to confirm before degrading.
@@ -120,6 +129,39 @@ BROWSE_DISABLED_REASON = (
 #: Refusal reason when ``browse`` is called before a :class:`NovaBrowser`
 #: handle has been wired in (flag on, but ``IntentTools`` built without one).
 BROWSE_NOT_WIRED_REASON = "browser automation is enabled but not wired up yet"
+
+#: The intents-spool op behind the ``enroll_face`` tool. The tool name and the
+#: wire op deliberately differ: the tool is named for what Nova is doing
+#: (learning a face's name), the op for the runtime's own registry entry
+#: requested in agentculture/reachy-mini-cli#166.
+ENROLL_OP = "enroll"
+
+#: Which face the enroll command targets. ``"current"`` means "the face the
+#: runtime is looking at right now" — resolving WHICH face that is belongs to
+#: the runtime's FaceStore (it owns the temporary-face buffer and the
+#: recency window), never to this harness, which has no camera of its own.
+ENROLL_FACE_TARGET = "current"
+
+#: Longest name we will pass through. A name is a name; anything past this is
+#: either a mis-transcription of a whole sentence or someone trying to stuff
+#: the identity store, and either way the runtime should not have to judge it.
+MAX_ENROLL_NAME_LEN = 64
+
+#: Refusal when ``enroll_face`` is called with no usable name — missing, not a
+#: string, or nothing but whitespace.
+ENROLL_NAME_INVALID_REASON = (
+    "'name' must be the person's name as a non-empty string — ask them for it and try again"
+)
+
+#: Refusal when the "name" is far too long to be one.
+ENROLL_NAME_TOO_LONG_REASON = (
+    f"'name' must be at most {MAX_ENROLL_NAME_LEN} characters — that is a sentence, not a name"
+)
+
+#: Refusal when the name carries control characters (newlines, NULs). A name
+#: reaches a durable on-disk identity store, so the one thing worth checking
+#: locally is that it is text a person could actually be called.
+ENROLL_NAME_UNPRINTABLE_REASON = "'name' must contain only printable characters"
 
 
 class ToolRefused(ValueError):
@@ -346,6 +388,23 @@ TOOL_SPECS: list[dict] = [
             "required": ["instruction"],
         },
     ),
+    _spec(
+        ENROLL_FACE,
+        "Remember whose face you are looking at: when someone tells you their "
+        "name while you can see them ('I'm Ori'), call this with that name and "
+        "the robot stores their face under it, so it recognises and greets them "
+        "next time. Only use it for the person in front of you right now.",
+        {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The person's name, exactly as they said it.",
+                }
+            },
+            "required": ["name"],
+        },
+    ),
 ]
 
 
@@ -485,12 +544,41 @@ def _build_goto(args: Mapping) -> dict:
     return payload
 
 
+def _build_enroll_face(args: Mapping) -> dict:
+    """``enroll_face`` — name the face the runtime is currently looking at.
+
+    Everything that makes this hard lives in the runtime: which face is
+    "current", whether one was seen recently enough, whether the vision extra is
+    even installed. Those come back as the runtime's own typed refusals
+    (``no-recent-unknown-face``, ``vision-unavailable``, ...) and are surfaced
+    verbatim — re-deciding any of them here would be guessing at a camera this
+    process cannot see.
+
+    What IS judged locally is the one argument the model invented: the name it
+    heard. A name goes into a DURABLE identity store, so a mis-transcribed
+    sentence or a control-character-laden string is refused before the spool
+    write, where the model can read the refusal and simply ask again.
+    """
+    raw = args.get("name")
+    if not isinstance(raw, str):
+        raise ToolRefused(ENROLL_NAME_INVALID_REASON)
+    name = raw.strip()
+    if not name:
+        raise ToolRefused(ENROLL_NAME_INVALID_REASON)
+    if len(name) > MAX_ENROLL_NAME_LEN:
+        raise ToolRefused(ENROLL_NAME_TOO_LONG_REASON)
+    if not name.isprintable():
+        raise ToolRefused(ENROLL_NAME_UNPRINTABLE_REASON)
+    return {"op": ENROLL_OP, "name": name, "face": ENROLL_FACE_TARGET}
+
+
 _BUILDERS = {
     RUN_BEHAVIOR: _build_run_behavior,
     DECLARE_GOAL: _build_declare_goal,
     SET_MODE: _build_set_mode,
     SET_INHIBITION: _build_set_inhibition,
     GOTO: _build_goto,
+    ENROLL_FACE: _build_enroll_face,
 }
 
 
@@ -642,7 +730,7 @@ class IntentTools:
     def _browse(self, params: Mapping) -> dict:
         """``browse`` — hand a natural-language task to :class:`NovaBrowser`.
 
-        Not spool-backed: unlike the other five tools this drives a component
+        Not spool-backed: unlike the spool-backed tools this drives a component
         living in THIS process (Nova's own browser automation), not the
         Wireless behavior engine, so there is no command file to write.
 
