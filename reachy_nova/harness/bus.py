@@ -40,9 +40,12 @@ Two subscription rules are load-bearing
 1. **Cue filters live under ``reachy/events/`` only.** ``reachy/state/#`` is
    a RETAINED, last-value tree: subscribing to it for cues would replay the
    robot's last-known pose on every reconnect as if it had just happened.
-   :func:`topic_filters` cannot name that tree by construction. The one
-   retained topic this module *does* subscribe, ``reachy/state/online``, is
-   read as availability — it never becomes an inject.
+   :func:`topic_filters` cannot name that tree by construction. The two
+   retained topics this module *does* subscribe are read as STATE, never as
+   cues: ``reachy/state/online`` is availability, and ``reachy/state/clip``
+   (the clip rider's rolling-camera-clip announcement, t9's vision leg) is
+   cached and exposed via :meth:`NovaBus.clip_state` — neither ever becomes
+   an inject.
 2. **``sense`` is off by default.** Upstream measured the unfiltered sense
    stream flooding a consumer at 187 cues in ~40 s with zero rule fires in
    the mix (``reachy-mini-cli`` ``scripts/embody_bus_feed.py``). What Nova
@@ -118,6 +121,10 @@ DEFAULT_PORT = 1883
 EVENTS_PREFIX = "reachy/events/"
 #: The runtime's RETAINED availability topic (its own Last Will flips it).
 RUNTIME_ONLINE_TOPIC = "reachy/state/online"
+#: The clip rider's RETAINED clip-state topic (reachy-mini-cli
+#: ``reachy/behavior/clip_rider.py``). Read as state for the vision leg —
+#: cached, exposed via :meth:`NovaBus.clip_state`, never routed as a cue.
+CLIP_STATE_TOPIC = "reachy/state/clip"
 
 #: Env var overriding which runtime sources the harness subscribes.
 SOURCES_ENV = "NOVA_BUS_SOURCES"
@@ -264,10 +271,28 @@ def load_rules(path: str | Path | None = None) -> dict[str, Any]:
     return {"rules": rules, "default": default}
 
 
-def rule_for(rules_cfg: dict[str, Any], source: str, event_type: str) -> dict[str, Any]:
-    """The rules.yaml entry governing ``"<source>/<type>"``, or the default."""
-    key = f"{source}/{event_type}"
-    entry = (rules_cfg.get("rules") or {}).get(key)
+def rule_for(
+    rules_cfg: dict[str, Any],
+    source: str,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The rules.yaml entry governing ``"<source>/<type>"``, or the default.
+
+    When *payload* names a runtime rule (a ``rule/fire`` event's ``rule``
+    field), a per-rule override key ``"<source>/<type>:<rule>"`` wins over the
+    generic entry — how ``rule/fire:pat-acknowledge`` gets a sensory inject
+    ("someone is petting you") instead of the generic "a reflex fired". An
+    absent override falls straight back to the generic key.
+    """
+    rules = rules_cfg.get("rules") or {}
+    if isinstance(payload, dict):
+        rule_name = payload.get("rule")
+        if isinstance(rule_name, str) and rule_name:
+            override = rules.get(f"{source}/{event_type}:{rule_name}")
+            if isinstance(override, dict):
+                return override
+    entry = rules.get(f"{source}/{event_type}")
     if isinstance(entry, dict):
         return entry
     return rules_cfg.get("default") or {}
@@ -286,7 +311,7 @@ def route_event(
     over a ``defaultdict(str)``, so a field the runtime omitted renders empty
     instead of raising — a partial sentence beats a lost sense.
     """
-    rule = rule_for(rules_cfg, source, event_type)
+    rule = rule_for(rules_cfg, source, event_type, payload)
     template = rule.get("inject_template")
     if not template:
         return None, REASON_NO_TEMPLATE
@@ -358,6 +383,10 @@ class NovaBus:
         self._connected = False
         self._runtime_online = False
         self._stopped = False
+        # Retained reachy/state/clip cache — the vision leg's read seam.
+        self._clip_lock = threading.Lock()
+        self._clip_state: dict[str, Any] | None = None
+        self._clip_available: bool | None = None
 
     # -- read-only status ---------------------------------------------------
 
@@ -370,6 +399,16 @@ class NovaBus:
     def runtime_online(self) -> bool:
         """Is the symbolic runtime publishing? (retained ``reachy/state/online``)"""
         return self._runtime_online
+
+    def clip_state(self) -> dict[str, Any] | None:
+        """The latest retained ``reachy/state/clip`` payload, or ``None``.
+
+        Returns a copy, so a caller can never mutate the cache under the paho
+        thread. This is the ``get_clip_state`` the vision leg is wired with —
+        state read on demand, never a cue.
+        """
+        with self._clip_lock:
+            return None if self._clip_state is None else dict(self._clip_state)
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -451,6 +490,7 @@ class NovaBus:
             for topic in topic_filters(self.sources):
                 client.subscribe(topic, QOS)
             client.subscribe(RUNTIME_ONLINE_TOPIC, QOS)
+            client.subscribe(CLIP_STATE_TOPIC, QOS)
             client.publish(HARNESS_STATE_TOPIC, harness_state_payload("online"), QOS, True)
         except Exception as err:
             sensory_log.stage(STAGE_BUS, SOURCE, "connect", f"subscribe failed: {err}")
@@ -489,6 +529,10 @@ class NovaBus:
 
         if topic == RUNTIME_ONLINE_TOPIC:
             self._handle_runtime_online(raw)
+            return
+
+        if topic == CLIP_STATE_TOPIC:
+            self._handle_clip_state(raw)
             return
 
         parsed_topic = parse_event_topic(topic)
@@ -534,7 +578,7 @@ class NovaBus:
             sensory_log.stage(STAGE_ROUTE, SOURCE, key, f"dropped reason={reason}")
             return
 
-        rule = rule_for(self.rules, source, event_type)
+        rule = rule_for(self.rules, source, event_type, payload)
         sensory_log.stage(
             STAGE_INJECT,
             SOURCE,
@@ -547,6 +591,38 @@ class NovaBus:
         except Exception as err:
             logger.warning("bus: inject callback failed: %s", err, exc_info=True)
             sensory_log.stage(STAGE_INJECT, SOURCE, key, f"dropped reason=inject-failed: {err}")
+
+    def _handle_clip_state(self, raw: bytes | str) -> None:
+        """Cache the retained clip payload for :meth:`clip_state`. Never a cue.
+
+        A bad payload is a named drop that keeps the last good state (the
+        vision leg's own guards re-check the file the payload names). The
+        ``available`` flag is latched so a rider that republishes the same
+        verdict costs one line per TRANSITION, not one per retained replay.
+        """
+        try:
+            payload = json.loads(raw.decode() if isinstance(raw, bytes) else str(raw))
+        except (ValueError, UnicodeDecodeError) as err:
+            sensory_log.stage(
+                STAGE_BUS, SOURCE, "clip-state", f"dropped reason={REASON_BAD_PAYLOAD}: {err}"
+            )
+            return
+        if not isinstance(payload, dict):
+            sensory_log.stage(
+                STAGE_BUS, SOURCE, "clip-state", f"dropped reason={REASON_BAD_PAYLOAD}"
+            )
+            return
+        with self._clip_lock:
+            self._clip_state = payload
+        available = bool(payload.get("available"))
+        if available != self._clip_available:
+            self._clip_available = available
+            detail = (
+                f"clip available at {payload.get('path')}"
+                if available
+                else f"clip unavailable reason={payload.get('reason')}"
+            )
+            sensory_log.stage(STAGE_BUS, SOURCE, "clip-state", detail)
 
     def _handle_runtime_online(self, raw: bytes | str) -> None:
         text = (raw.decode() if isinstance(raw, bytes) else str(raw)).strip().lower()

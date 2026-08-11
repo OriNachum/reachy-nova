@@ -135,6 +135,7 @@ def test_wifi_flap_full_arc_disconnect_replay_hygiene_and_recovery(caplog) -> No
         "reachy/events/face/#",
         "reachy/events/vision/#",
         bus.RUNTIME_ONLINE_TOPIC,
+        bus.CLIP_STATE_TOPIC,
     }
     assert len(online_state_publishes(client)) == 1
     assert online_state_publishes(client)[0][2] is True  # retained

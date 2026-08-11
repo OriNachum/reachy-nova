@@ -241,6 +241,31 @@ rules:
     llm_evaluate: false
     inject_template: "Your body just reacted on its own — the '{rule}' reflex fired."
 
+  # Per-rule rule/fire overrides (reachy_nova/harness/bus.py rule_for): a key
+  # "rule/fire:<rule-id>" wins over the generic rule/fire entry for that one
+  # runtime rule, falling back to it for every other rule id. This is how a
+  # known reflex gets a SENSORY inject instead of the generic mechanical one.
+
+  "rule/fire:pat-acknowledge":
+    # The runtime's shipped touch reflex (default_rules.toml). LIVE FINDING
+    # 2026-08-12: discrete reachy/events/pat/* topics do not exist on-device —
+    # touch reaches Nova as this rule's fire, so this is THE pat sense today.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You feel someone petting you — your body is already leaning into it."
+
+  "rule/fire:nova-face-noticed":
+    # The harness's own standing overlay rule (installed at startup by
+    # reachy_nova/harness/app.py ensure_face_rule): the face cue has no shipped
+    # runtime rule, so without this fire a recognised face never crosses the
+    # bus. The rule/fire payload names the rule, not the person — identity
+    # stays with the runtime's own face store.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You notice a familiar face — someone you recognize just came into view."
+
   rule/suppress:
     # A reflex was considered and held back (cooldown/rearming/inhibited).
     # Bookkeeping, not news.
