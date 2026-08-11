@@ -210,7 +210,7 @@ def test_agentcore_surface_routes_execute_to_the_hosted_session(monkeypatch):
 
     class _Result:
         success = True
-        response = "The answer is 42."
+        parsed_response = "The answer is 42."
 
     monkeypatch.setattr(
         browser, "_act_on_agentcore", lambda instr, url: calls.append((instr, url)) or _Result()

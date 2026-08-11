@@ -209,7 +209,10 @@ class NovaBrowser:
                 tty=False,
             ) as nova:
                 self._emit_progress(f"Working on: {instruction}...")
-                return nova.act(instruction, max_steps=15)
+                # act_get, not act: a voice browse request is almost always a
+                # question, and in this SDK the model's answer only comes back
+                # through act_get's parsed_response (ActResult carries none).
+                return nova.act_get(instruction, max_steps=15)
 
     def _execute_task(self, task: dict) -> str:
         """Execute a single browser task."""
@@ -257,10 +260,13 @@ class NovaBrowser:
                     result_text = f"Could not complete: {instruction}"
             # The agent's actual answer beats a status line: a voice request
             # like "search the web for X" is only served if what it FOUND is
-            # what gets spoken.
-            answer = str(getattr(result, "response", "") or "").strip()
-            if answer:
-                result_text = answer
+            # what gets spoken. act_get carries it as parsed_response; older
+            # SDK results carried response.
+            for attr in ("parsed_response", "response"):
+                value = getattr(result, attr, None)
+                if value is not None and str(value).strip():
+                    result_text = str(value).strip()
+                    break
 
             self.last_result = result_text
             self.history.append({
