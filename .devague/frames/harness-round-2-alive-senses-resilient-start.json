@@ -4,7 +4,7 @@
   "schema_version": 5,
   "status": "exported",
   "created": "2026-08-11T20:49:24Z",
-  "updated": "2026-08-11T21:00:09Z",
+  "updated": "2026-08-11T21:06:50Z",
   "claims": [
     {
       "id": "c1",
@@ -362,6 +362,126 @@
       "links": [],
       "instruction": "",
       "revisions": []
+    },
+    {
+      "id": "c22",
+      "kind": "requirement",
+      "text": "Sonic gets a cause-agnostic response-liveness watchdog alongside the clock-step detector: if injects/audio keep flowing but zero response events arrive for a bounded window, the session force-restarts \u2014 the 2026-08-11 zombie produced no error at all, and the clock detector only covers that one cause",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h16",
+          "text": "a synthetic zombie (responses muted while injects continue) triggers exactly one forced session restart within the watchdog window, in a unit test",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c23",
+      "kind": "requirement",
+      "text": "device observability is repaired as part of the round: journald on the device finds no journal files (diagnosis worked only via the in-memory _PID ring); persistent storage with a hard size cap (e.g. SystemMaxUse=64M) is required so acceptance evidence and post-mortems survive a reboot",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h17",
+          "text": "after a device reboot, journalctl --user -u reachy-nova-harness shows pre-reboot lines, and total journal disk use stays under the configured cap",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c24",
+      "kind": "requirement",
+      "text": "disk headroom is a checked precondition, not an assumption: the device root is 93% full (972M free, probe 2026-08-12) and this round wants cv2, chromium, and rolling clips \u2014 the bring-up task frees space first and fails loudly if headroom is insufficient",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h18",
+          "text": "the bring-up step records df before/after: install completes with >=10% root free, and the runtime's control loop holds ~50Hz with vision senses live",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c25",
+      "kind": "requirement",
+      "text": "demo/runtime exclusivity is upstreamed to reachy-mini-cli's unit templates (issue to their agent): reachy/cli/_commands/service.py enable|install rewrites the presence unit files, so device-local hardening is clobbered by the next service verb \u2014 the Conflicts= pair and manual-only demo must come from the templates themselves",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h19",
+          "text": "a fresh 'reachy service enable runtime' from the patched CLI yields units where demo-mode cannot auto-run and Conflicts= pairs both presence units \u2014 no device-local edits needed",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c26",
+      "kind": "assumption",
+      "text": "the runtime's sound-reactive rules (look-toward-sound, rms moving-floor) tolerate harness speaker playback without self-orienting or floor poisoning \u2014 the runtime has no knowledge of harness playback windows, and tonight's floor=inf flood shows the moving-floor gate can be poisoned",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [
+        {
+          "id": "q1",
+          "text": "does look-toward-sound orient toward the robot's own speaker during harness playback, and can the moving-floor gate be poisoned again (floor=inf) by a clock step or long silence?",
+          "resolved": false,
+          "blocking": false,
+          "resolution": ""
+        }
+      ],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c27",
+      "kind": "decision",
+      "text": "browse gating: open this round, face-gated later (user decision, q3)",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c28",
+      "kind": "decision",
+      "text": "forced Sonic restarts start clean \u2014 no context recap (user decision, q4)",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
     }
   ],
   "open_vagueness": [
@@ -387,6 +507,33 @@
       "id": "v3",
       "text": "exact discrete MQTT topic names for pat/face events (reachy/events/<source>/<type>) \u2014 confirm on first live pat/face after the vision extra lands",
       "kind": "unknown_nonblocking",
+      "claim_id": null,
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v4",
+      "text": "XVF3800 AEC robustness across speaker volumes and rooms \u2014 verified in one session at one volume; barge-in default-off gate relies on it",
+      "kind": "unknown_nonblocking",
+      "claim_id": null,
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v5",
+      "text": "two-unit dynamics with barge-in on: robot A interrupting robot B could livelock a robot-to-robot conversation \u2014 observe live before tuning",
+      "kind": "unknown_nonblocking",
+      "claim_id": null,
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v6",
+      "text": "face-gating the browse tool on a recognized enrolled face",
+      "kind": "follow_up",
       "claim_id": null,
       "resolved": false,
       "resolution": "",
@@ -485,6 +632,64 @@
       "seeds": [
         "c12"
       ]
+    },
+    {
+      "id": "s12",
+      "surface": "challenge pass / failure-mode lens: nova_sonic.py session loop",
+      "finding": "the 2026-08-11 zombie raised no error; clock-step detection is cause-specific, so a liveness watchdog is the containment for unknown zombie causes",
+      "seeds": [
+        "c22"
+      ]
+    },
+    {
+      "id": "s13",
+      "surface": "challenge pass / observability lens: device journald (probe 2026-08-12)",
+      "finding": "journalctl reports 'No journal files were found' for user and system scope; only the in-memory _PID ring was readable; /etc/systemd/journald.conf is all-defaults",
+      "seeds": [
+        "c23"
+      ]
+    },
+    {
+      "id": "s14",
+      "surface": "challenge pass / operations+capacity lens: device disk/RAM (probe 2026-08-12)",
+      "finding": "root 93% full with 972M free, RAM 3.8G/2.5G free \u2014 cv2 + chromium + rolling clips do not fit without cleanup; RAM is workable but tight with chromium",
+      "seeds": [
+        "c24"
+      ]
+    },
+    {
+      "id": "s15",
+      "surface": "challenge pass / lifecycle lens: reachy-mini-cli service.py + service/units.py",
+      "finding": "enable|install rewrite the presence units from templates and purge retired units \u2014 device-local unit hardening is not durable; the intent registry is the documented extension point for a future enroll command kind",
+      "seeds": [
+        "c25"
+      ]
+    },
+    {
+      "id": "s16",
+      "surface": "challenge pass / adjacent-systems lens: runtime rms/orient rules vs harness playback",
+      "finding": "the runtime has no knowledge of harness playback windows; 2026-08-11 journal showed look-toward-sound cooldown floods and a moving-floor gate stuck open at floor=inf after the clock step",
+      "seeds": [
+        "c26"
+      ]
+    },
+    {
+      "id": "s17",
+      "surface": "challenge pass / security lens: voice-triggered browse tool",
+      "finding": "browse would be triggerable by any voice in the room; the retired app gated admin actions on a recognized face \u2014 gating is a user decision (q3)",
+      "seeds": []
+    },
+    {
+      "id": "s18",
+      "surface": "challenge pass / reversibility lens: gate policy + units",
+      "finding": "clean pass: NOVA_ECHO_GATE env flip is the rollback for barge-in, unit backups exist in ~/unit-backups, autostart mask is reversible with unmask \u2014 containment already in the spec (c5/c6)",
+      "seeds": []
+    },
+    {
+      "id": "s19",
+      "surface": "challenge pass / concurrency lens: harness threading + same-file tool tasks",
+      "finding": "clean pass at spec level: existing callback/thread patterns unchanged; the real concurrency risk is build-time (tools.py/app.py shared by several tasks) and lands plan-side as file-disjointness sequencing",
+      "seeds": []
     }
   ],
   "lapses": []

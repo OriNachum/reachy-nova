@@ -1,0 +1,223 @@
+{
+  "slug": "harness-round-2-alive-senses-resilient-start",
+  "title": "harness round 2: alive senses + resilient start",
+  "frame_slug": "harness-round-2-alive-senses-resilient-start",
+  "schema_version": 4,
+  "status": "drafting",
+  "created": "2026-08-11T21:00:37Z",
+  "updated": "2026-08-11T21:00:37Z",
+  "targets": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "Wireless harness round 2: resilient auto-start (clock-jump-proof Sonic, no competing auto-run), working barge-in, pat + face + tracking senses routed into Nova, and Nova Act browsing as a tool",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h8",
+      "kind": "honesty",
+      "text": "all five c21 acceptance signals pass live on the wireless unit",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c2",
+      "kind": "requirement",
+      "text": "nova_sonic.py detects a wall-clock step (drift between time.time() and time.monotonic() beyond ~60s) and forces a Sonic session restart \u2014 the 2026-08-11 boot showed an NTP +14h step leaving a zombie Bedrock stream: injections flowed, zero responses, no error, until a manual harness restart",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h1",
+      "kind": "honesty",
+      "text": "a forced clock step on the device (or a simulated one in tests) triggers exactly one Sonic session restart and the next spoken utterance gets a reply",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c3",
+      "kind": "requirement",
+      "text": "boot-time exclusivity is encoded in the repo, not just hand-applied on the device: harness/unit.py's rendered units (and an install doc/script for the hand-authored reachy-runtime.service) carry Conflicts=reachy-demo-mode.service, demo-mode stays manual-only (no [Install]), and the old ReachyMiniApp reachy-nova-autostart.service stays masked",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h2",
+      "kind": "honesty",
+      "text": "a fresh render/install from the repo reproduces tonight's exclusivity: demo-mode cannot be enabled by preset, and starting it stops the runtime (Conflicts both ways)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c4",
+      "kind": "requirement",
+      "text": "barge-in works by fixing gate policy, not adding barge-in code: nova_sonic.py already has _handle_barge_in (USER transcript while _speaking -> Nova Lite decision -> on_interruption -> speaker.preempt, wired in harness/app.py); it never fires because hearing.py drops every mic chunk while the EchoGate is armed, so Sonic is deaf during its own speech",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h3",
+      "kind": "honesty",
+      "text": "with the gate policy off, speaking over the robot mid-utterance reaches Sonic as a USER transcript and _handle_barge_in fires \u2014 observable as a preempt in the journal",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c5",
+      "kind": "requirement",
+      "text": "the echo gate becomes a policy (env-selectable, e.g. NOVA_ECHO_GATE=off|half-duplex, default off on the wireless): XVF3800 hardware AEC was verified active live on 2026-08-10 \u2014 gate.py's docstring premise 'no verified hardware AEC (spec c19)' is now disproven for this device",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h4",
+      "kind": "honesty",
+      "text": "with hearing suppression off on the wireless, the robot does not converse with its own echo (the 2026-08-10 echo-loop regression stays fixed, now by hardware AEC alone)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c6",
+      "kind": "boundary",
+      "text": "EchoGate stays: speaking.py also uses it for one-speaker-at-a-time playback windowing (0.48.0 has no speaker arbitration), and half-duplex must remain selectable for devices without hardware AEC \u2014 hearing suppression and playback serialization get decoupled, not deleted",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h9",
+      "kind": "honesty",
+      "text": "with hearing suppression off, utterances still play one at a time (no overlapping playback), and setting NOVA_ECHO_GATE=half-duplex restores the old suppression behavior",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c9",
+      "kind": "boundary",
+      "text": "tracking behavior (orienting to sound/faces, feel-alive motion) stays in the runtime (orient.py, feel_alive.py); the harness never runs its own tracking loop \u2014 it receives events and may command goto via the existing intent tools. The old-app tracking.py and face_recognition.py are NOT ported; test_harness_boundary.py's AST gate (harness never imports reachy_mini) holds",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h10",
+      "kind": "honesty",
+      "text": "test_harness_boundary.py still passes after the round: no harness module imports reachy_mini or runs a tracking loop",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c10",
+      "kind": "requirement",
+      "text": "Nova Act browsing surfaces as a Sonic tool: nova_browser.py already exists flag-gated (NOVA_ACT_ENABLED, default off, lazy imports \u2014 nova_act/playwright never imported when off); the harness adds a browse tool to TOOL_SPECS wired to the NovaBrowser queue in app.py, with progress emitted back via inject",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h5",
+      "kind": "honesty",
+      "text": "with NOVA_ACT_ENABLED unset nothing imports nova_act/playwright (boundary test), and with it set a spoken browse request produces a queued task and a spoken result",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c12",
+      "kind": "requirement",
+      "text": "the device CLI venv gets the [vision] extra installed: live reachy/state/senses on 2026-08-11 shows face and clip both unavailable with reason=vision-extra-absent (cv2 missing), while pat is available:true and frame_available:true \u2014 one install unblocks both the face sense and the clip rider",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h6",
+      "kind": "honesty",
+      "text": "after installing the [vision] extra on the device, reachy/state/senses reports face available:true and reachy/state/clip carries a real clip path",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c16",
+      "kind": "requirement",
+      "text": "conversational face learning rides FaceStore's existing temporary-face seam (remember_temporary -> temp_id -> enroll(name, embedding) in reachy/vision/face_store.py): the harness gets an enroll_face tool Sonic can call when someone introduces themselves; if the runtime exposes no enrollment intent, that seam is requested via a reachy-mini-cli issue rather than the harness writing face_store files directly",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h7",
+      "kind": "honesty",
+      "text": "saying 'I'm <name>' to an unknown face results in a face_store identity the runtime greets by name on the next sighting, via a sanctioned runtime seam (intent or CLI), never by the harness writing face_store files",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c17",
+      "kind": "audience",
+      "text": "Ori and anyone sharing a room with the two Reachy Mini units \u2014 plus the harness itself as the consumer of the runtime's senses",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h11",
+      "kind": "honesty",
+      "text": "acceptance is judged by people in the room interacting naturally (speech, touch, presence) \u2014 no SSH, dashboard, or debug tooling involved in the happy path",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c18",
+      "kind": "after_state",
+      "text": "the robot comes up alive from any cold boot with no manual restarts and nothing else able to seize it; you can talk over it and it stops to listen; it feels pats, recognizes and learns faces, sees through the camera clip, and can browse the web on request",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h12",
+      "kind": "honesty",
+      "text": "an overnight unplugged robot answers the first spoken sentence after power-on with no human intervention beyond the power switch",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c19",
+      "kind": "before_state",
+      "text": "today a cold boot after a long power-off leaves a zombie Sonic stream until someone restarts the harness; the robot is deaf while it speaks (no barge-in); pats and faces are sensed by the runtime but never reach Nova; the camera and face senses are dead for a missing cv2; browsing exists as dormant flag-gated code",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h13",
+      "kind": "honesty",
+      "text": "each before-state fact is journal-cited: the 2026-08-11 zombie stream, gate suppression in hearing.py, vision-extra-absent in reachy/state/senses, NOVA_ACT_ENABLED default off",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c20",
+      "kind": "why_it_matters",
+      "text": "a companion robot that must be manually revived, talks over you, and ignores touch is a demo, not a companion \u2014 this round closes the gap between senses the runtime already has and the mind that should feel them",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h14",
+      "kind": "honesty",
+      "text": "after the round, a first-time visitor can hold a natural interrupted conversation and get a touch reaction without being told any special rules",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c21",
+      "kind": "success_signal",
+      "text": "live acceptance on the wireless: (1) power-off overnight, power-on, robot answers speech with zero SSH; (2) interrupting it mid-sentence makes it stop and respond; (3) a pat gets a spoken/gesture reaction; (4) it greets an enrolled face by name and learns a new name by voice; (5) 'search the web for X' returns a spoken answer",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h15",
+      "kind": "honesty",
+      "text": "each signal is demonstrated live and recorded in the scope doc's acceptance section, not simulated",
+      "deferred": false,
+      "deferred_reason": ""
+    }
+  ],
+  "tasks": [],
+  "risks": []
+}

@@ -32,6 +32,14 @@
   - honesty: after installing the \[vision\] extra on the device, reachy/state/senses reports face available:true and reachy/state/clip carries a real clip path
 - conversational face learning rides FaceStore's existing temporary-face seam (`remember_temporary` -> `temp_id` -> enroll(name, embedding) in reachy/vision/`face_store.py`): the harness gets an `enroll_face` tool Sonic can call when someone introduces themselves; if the runtime exposes no enrollment intent, that seam is requested via a reachy-mini-cli issue rather than the harness writing `face_store` files directly
   - honesty: saying 'I'm <name>' to an unknown face results in a `face_store` identity the runtime greets by name on the next sighting, via a sanctioned runtime seam (intent or CLI), never by the harness writing `face_store` files
+- Sonic gets a cause-agnostic response-liveness watchdog alongside the clock-step detector: if injects/audio keep flowing but zero response events arrive for a bounded window, the session force-restarts — the 2026-08-11 zombie produced no error at all, and the clock detector only covers that one cause
+  - honesty: a synthetic zombie (responses muted while injects continue) triggers exactly one forced session restart within the watchdog window, in a unit test
+- device observability is repaired as part of the round: journald on the device finds no journal files (diagnosis worked only via the in-memory `_PID` ring); persistent storage with a hard size cap (e.g. SystemMaxUse=64M) is required so acceptance evidence and post-mortems survive a reboot
+  - honesty: after a device reboot, journalctl --user -u reachy-nova-harness shows pre-reboot lines, and total journal disk use stays under the configured cap
+- disk headroom is a checked precondition, not an assumption: the device root is 93% full (972M free, probe 2026-08-12) and this round wants cv2, chromium, and rolling clips — the bring-up task frees space first and fails loudly if headroom is insufficient
+  - honesty: the bring-up step records df before/after: install completes with >=10% root free, and the runtime's control loop holds ~50Hz with vision senses live
+- demo/runtime exclusivity is upstreamed to reachy-mini-cli's unit templates (issue to their agent): reachy/cli/`_commands`/service.py enable|install rewrites the presence unit files, so device-local hardening is clobbered by the next service verb — the Conflicts= pair and manual-only demo must come from the templates themselves
+  - honesty: a fresh 'reachy service enable runtime' from the patched CLI yields units where demo-mode cannot auto-run and Conflicts= pairs both presence units — no device-local edits needed
 
 ## Honesty conditions
 
@@ -58,6 +66,7 @@
 - patting is a wiring job, not a port: reachy-mini-cli already ships `pat_sense.py` / `pet_reaction.py` / motion/pat\*.py with availability verdicts (`sense_availability.py` carries pat + `pat_event` vocabularies); the harness adds the pat source to `NOVA_BUS_SOURCES` and rules.yaml routes so Sonic hears 'you are being petted'
 - face recognition is runtime-owned too: `face_sense.py` + vision/face.py + `face_store.py` exist in reachy-mini-cli; issue #120 says the face sense needs the \[vision\] extra installed in the device venv, with availability published to reachy/state — the harness leg is bus routing + injection, plus verifying the extra is installed on-device
 - the vision leg reads the runtime's camera clip rider: `clip_rider.py` overwrite-in-place clip path is published on retained reachy/state/clip, and `nova_omni.py`'s understand() already takes a rolling clip + still + context — no new camera ownership anywhere
+- the runtime's sound-reactive rules (look-toward-sound, rms moving-floor) tolerate harness speaker playback without self-orienting or floor poisoning — the runtime has no knowledge of harness playback windows, and tonight's floor=inf flood shows the moving-floor gate can be poisoned
 
 ## Scope exploration
 
@@ -83,16 +92,38 @@
   - seeds: `c11`
 - `s11` — `live MQTT bus (mosquitto_sub on-device, 2026-08-11)`: retained reachy/state/senses: pat available:true, `frame_available`:true, face+clip unavailable reason=vision-extra-absent; cv2 import fails in the CLI venv; 10s event sample shows only reachy/events/sense/snapshot (~27/s) — discrete pat/face event topic names still to be confirmed on a first live pat
   - seeds: `c12`
+- `s12` — `challenge pass / failure-mode lens: nova_sonic.py session loop`: the 2026-08-11 zombie raised no error; clock-step detection is cause-specific, so a liveness watchdog is the containment for unknown zombie causes
+  - seeds: `c22`
+- `s13` — `challenge pass / observability lens: device journald (probe 2026-08-12)`: journalctl reports 'No journal files were found' for user and system scope; only the in-memory `_PID` ring was readable; /etc/systemd/journald.conf is all-defaults
+  - seeds: `c23`
+- `s14` — `challenge pass / operations+capacity lens: device disk/RAM (probe 2026-08-12)`: root 93% full with 972M free, RAM 3.8G/2.5G free — cv2 + chromium + rolling clips do not fit without cleanup; RAM is workable but tight with chromium
+  - seeds: `c24`
+- `s15` — `challenge pass / lifecycle lens: reachy-mini-cli service.py + service/units.py`: enable|install rewrite the presence units from templates and purge retired units — device-local unit hardening is not durable; the intent registry is the documented extension point for a future enroll command kind
+  - seeds: `c25`
+- `s16` — `challenge pass / adjacent-systems lens: runtime rms/orient rules vs harness playback`: the runtime has no knowledge of harness playback windows; 2026-08-11 journal showed look-toward-sound cooldown floods and a moving-floor gate stuck open at floor=inf after the clock step
+  - seeds: `c26`
+- `s17` — `challenge pass / security lens: voice-triggered browse tool`: browse would be triggerable by any voice in the room; the retired app gated admin actions on a recognized face — gating is a user decision (q3)
+- `s18` — `challenge pass / reversibility lens: gate policy + units`: clean pass: `NOVA_ECHO_GATE` env flip is the rollback for barge-in, unit backups exist in ~/unit-backups, autostart mask is reversible with unmask — containment already in the spec (c5/c6)
+- `s19` — `challenge pass / concurrency lens: harness threading + same-file tool tasks`: clean pass at spec level: existing callback/thread patterns unchanged; the real concurrency risk is build-time (tools.py/app.py shared by several tasks) and lands plan-side as file-disjointness sequencing
 
 ## Decisions
 
 - browser execution: on-device Nova Act confirmed; AgentCore-hosted browser to be verified as the preferred surface (user decision, q1)
 - face learning is BOTH ways (user amendment to q2): one-time CLI enrollment into the runtime's `face_store`, AND Nova learns names from conversation — an unknown face seen now can be named by voice ('I'm Ori') and becomes a stored identity
+- browse gating: open this round, face-gated later (user decision, q3)
+- forced Sonic restarts start clean — no context recap (user decision, q4)
+
+## Hard questions
+
+- does look-toward-sound orient toward the robot's own speaker during harness playback, and can the moving-floor gate be poisoned again (floor=inf) by a clock step or long silence?
 
 ## Open parks
 
 - [unknown_nonblocking] whether nova-act supports Bedrock AgentCore Browser as a remote execution surface from the harness — verify during implementation; local chromium is the fallback
 - [unknown_nonblocking] exact discrete MQTT topic names for pat/face events (reachy/events/<source>/<type>) — confirm on first live pat/face after the vision extra lands
+- [unknown_nonblocking] XVF3800 AEC robustness across speaker volumes and rooms — verified in one session at one volume; barge-in default-off gate relies on it
+- [unknown_nonblocking] two-unit dynamics with barge-in on: robot A interrupting robot B could livelock a robot-to-robot conversation — observe live before tuning
+- [follow_up] face-gating the browse tool on a recognized enrolled face
 
 ## Resolved vagueness
 
