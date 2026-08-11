@@ -209,6 +209,14 @@ def build_app() -> list[object]:
         browser=browser,
         on_browse_progress=sonic.inject_text if browser is not None else None,
     )
+    if browser is not None:
+        # The browse tool's own result is just the "queued" acknowledgment —
+        # the ANSWER arrives minutes later on the worker thread, and reaches
+        # the conversation only through this callback.
+        def _on_browse_result(text: str) -> None:
+            sonic.inject_text(f"Your web browsing finished. Tell the user what you found: {text}")
+
+        browser.on_result = _on_browse_result
 
     # act leg — tool calls run off Sonic's response thread, result posted back
     def _on_tool_use(tool_name: str, tool_use_id: str, params: dict) -> None:

@@ -302,3 +302,18 @@ def test_user_transcript_with_no_playback_window_does_not_preempt():
     speaker.stopper = stops.append
     sonic.on_transcript("USER", "hello there")
     assert stops == []
+
+
+def test_browser_result_callback_reaches_the_conversation(monkeypatch):
+    """The answer from a finished browse must inject — the tool result itself
+    is only the 'queued' acknowledgment."""
+    monkeypatch.setenv("NOVA_ACT_ENABLED", "1")
+    components = app.build_app()
+    sonic = components[0]
+    injected = []
+    sonic.inject_text = injected.append
+    browser = next(c for c in components if type(c).__name__ == "BrowserComponent")
+    inner = getattr(browser, "browser", None) or getattr(browser, "_browser")
+    assert inner.on_result is not None
+    inner.on_result("The answer is 42.")
+    assert len(injected) == 1 and "The answer is 42." in injected[0]
