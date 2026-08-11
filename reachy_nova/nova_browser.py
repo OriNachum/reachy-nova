@@ -24,6 +24,21 @@ WORKFLOW_MODEL_ID = "nova-act-latest"
 _TRUTHY_VALUES = {"1", "true", "yes", "on"}
 
 
+#: Where the browser itself runs (``NOVA_ACT_BROWSER``): ``local`` launches
+#: playwright chromium on this machine; ``agentcore`` connects NovaAct over CDP
+#: to a Bedrock AgentCore hosted browser session (no chromium on the robot —
+#: the user decision recorded as deviation d5). Anything unrecognized is local.
+SURFACE_ENV = "NOVA_ACT_BROWSER"
+SURFACE_LOCAL = "local"
+SURFACE_AGENTCORE = "agentcore"
+
+
+def browser_surface() -> str:
+    """The configured execution surface, resolved at call time."""
+    value = os.environ.get(SURFACE_ENV, SURFACE_LOCAL).strip().lower()
+    return SURFACE_AGENTCORE if value == SURFACE_AGENTCORE else SURFACE_LOCAL
+
+
 def act_enabled() -> bool:
     """Whether Nova Act browser automation is enabled.
 
@@ -169,10 +184,35 @@ class NovaBrowser:
                 pass
             self._workflow = None
 
-    def _execute_task(self, task: dict) -> str:
-        """Execute a single browser task."""
+    def _act_on_agentcore(self, instruction: str, url: str | None):
+        """Run one act() against a Bedrock AgentCore hosted browser (per-task session).
+
+        The browser runs in AWS, NovaAct connects over CDP
+        (``browser_session(region) -> generate_ws_headers()``, per the ACBT
+        quickstart) — no chromium on this machine. Sessions are per-task on
+        purpose: hosted sessions time out, and a fresh one per voice request
+        beats holding a zombie across the robot's idle hours.
+        """
+        from bedrock_agentcore.tools.browser_client import browser_session
         from nova_act import NovaAct
 
+        region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+        self._ensure_workflow()
+        self._emit_progress("Starting a cloud browser session...")
+        with browser_session(region) as client:
+            ws_url, headers = client.generate_ws_headers()
+            with NovaAct(
+                cdp_endpoint_url=ws_url,
+                cdp_headers=headers,
+                workflow=self._workflow,
+                starting_page=url or "https://www.google.com",
+                tty=False,
+            ) as nova:
+                self._emit_progress(f"Working on: {instruction}...")
+                return nova.act(instruction, max_steps=15)
+
+    def _execute_task(self, task: dict) -> str:
+        """Execute a single browser task."""
         instruction = task["instruction"]
         url = task.get("url", "https://www.google.com")
         done_event = task.get("_done_event")
@@ -182,24 +222,29 @@ class NovaBrowser:
 
         try:
             self._emit_progress("Opening browser...")
-            self._ensure_workflow()
+            if browser_surface() == SURFACE_AGENTCORE:
+                result = self._act_on_agentcore(instruction, url)
+            else:
+                from nova_act import NovaAct
 
-            if self._nova is None:
-                self._nova = NovaAct(
-                    starting_page=url or "https://www.google.com",
-                    headless=self.headless,
-                    chrome_channel=self.chrome_channel,
-                    workflow=self._workflow,
-                    tty=False,
-                )
-                self._nova.start()
-                self._emit_progress(f"Navigating to {url or 'Google'}...")
-            elif url:
-                self._emit_progress(f"Navigating to {url}...")
-                self._nova.go_to_url(url)
+                self._ensure_workflow()
 
-            self._emit_progress(f"Working on: {instruction}...")
-            result = self._nova.act(instruction, max_steps=15)
+                if self._nova is None:
+                    self._nova = NovaAct(
+                        starting_page=url or "https://www.google.com",
+                        headless=self.headless,
+                        chrome_channel=self.chrome_channel,
+                        workflow=self._workflow,
+                        tty=False,
+                    )
+                    self._nova.start()
+                    self._emit_progress(f"Navigating to {url or 'Google'}...")
+                elif url:
+                    self._emit_progress(f"Navigating to {url}...")
+                    self._nova.go_to_url(url)
+
+                self._emit_progress(f"Working on: {instruction}...")
+                result = self._nova.act(instruction, max_steps=15)
 
             self._emit_progress("Done! Reading results...")
             self._capture_screenshot()
@@ -210,6 +255,12 @@ class NovaBrowser:
                     result_text = f"Completed: {instruction}"
                 else:
                     result_text = f"Could not complete: {instruction}"
+            # The agent's actual answer beats a status line: a voice request
+            # like "search the web for X" is only served if what it FOUND is
+            # what gets spoken.
+            answer = str(getattr(result, "response", "") or "").strip()
+            if answer:
+                result_text = answer
 
             self.last_result = result_text
             self.history.append({

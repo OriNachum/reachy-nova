@@ -176,3 +176,55 @@ class TestFlagOnTakesEnabledPathWithoutRealImport:
         monkeypatch.setenv("NOVA_ACT_ENABLED", "true")
         assert act_enabled() is True
         _assert_no_nova_act_or_playwright_imported()
+
+
+# --------------------------------------------------------------------------- #
+# Execution surface (NOVA_ACT_BROWSER) — deviation d5: AgentCore first        #
+# --------------------------------------------------------------------------- #
+
+
+def test_browser_surface_defaults_to_local(monkeypatch):
+    from reachy_nova import nova_browser
+
+    monkeypatch.delenv("NOVA_ACT_BROWSER", raising=False)
+    assert nova_browser.browser_surface() == "local"
+    monkeypatch.setenv("NOVA_ACT_BROWSER", "nonsense")
+    assert nova_browser.browser_surface() == "local"
+
+
+def test_browser_surface_agentcore(monkeypatch):
+    from reachy_nova import nova_browser
+
+    monkeypatch.setenv("NOVA_ACT_BROWSER", " AgentCore ")
+    assert nova_browser.browser_surface() == "agentcore"
+
+
+def test_agentcore_surface_routes_execute_to_the_hosted_session(monkeypatch):
+    """On the agentcore surface, _execute_task never touches nova_act locally —
+    the whole act runs through _act_on_agentcore (mocked here)."""
+    from reachy_nova.nova_browser import NovaBrowser
+
+    monkeypatch.setenv("NOVA_ACT_BROWSER", "agentcore")
+    browser = NovaBrowser()
+    calls = []
+
+    class _Result:
+        success = True
+        response = "The answer is 42."
+
+    monkeypatch.setattr(
+        browser, "_act_on_agentcore", lambda instr, url: calls.append((instr, url)) or _Result()
+    )
+    spoken = []
+    browser.on_result = spoken.append
+    text = browser._execute_task({"instruction": "find the answer", "url": None})
+    assert calls == [("find the answer", None)]
+    assert text == "The answer is 42."
+    assert spoken == ["The answer is 42."]
+    assert import_forbidden_absent()
+
+
+def import_forbidden_absent():
+    import sys
+
+    return "nova_act" not in sys.modules and "playwright" not in sys.modules
