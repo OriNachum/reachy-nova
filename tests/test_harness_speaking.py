@@ -428,3 +428,30 @@ def test_queued_and_played_sense_lines_carry_duration(stop_event, caplog):
     finally:
         stop_event.set()
         speaker.stop()
+
+
+# --------------------------------------------------------------------------- #
+# preempt — the barge-in cut (stop_sound + purge + gate clear)                #
+# --------------------------------------------------------------------------- #
+
+
+def test_preempt_stops_the_playing_sound_via_the_stopper():
+    gate = EchoGate()
+    stops: list[str] = []
+    speaker = SonicSpeaker(gate=gate, poster=RecordingPoster(), stopper=stops.append)
+    gate.arm_for(5.0)
+    speaker.preempt()
+    assert stops == [speaker.base_url]
+    assert not gate.active
+
+
+def test_preempt_survives_a_stopper_that_raises():
+    gate = EchoGate()
+
+    def bad_stopper(base_url: str) -> None:
+        raise OSError("daemon away")
+
+    speaker = SonicSpeaker(gate=gate, poster=RecordingPoster(), stopper=bad_stopper)
+    gate.arm_for(5.0)
+    speaker.preempt()  # must not raise
+    assert not gate.active

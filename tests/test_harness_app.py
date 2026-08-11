@@ -198,6 +198,9 @@ def test_face_rule_matches_the_engine_grammar():
     assert entry["id"] == "nova-face-noticed"
     assert entry["when"] == {"field": "face", "op": "is_true"}
     assert entry["run"] == "nod"
+    # duration_s is load-bearing: the engine refuses a looping behavior with no
+    # duration (seen live 2026-08-11 — the whole overlay reload was rejected).
+    assert entry["duration_s"] == 2.0
     assert entry["cooldown_s"] == 30.0  # the runtime's own face re-announce cooldown
 
 
@@ -271,3 +274,31 @@ def test_ensure_face_rule_never_raises_on_an_unwritable_overlay(monkeypatch, cap
         "component absent name=face-rule reason=synthetic refusal" in m
         for m in _messages(caplog)
     )
+
+
+# --------------------------------------------------------------------------- #
+# Playback-aware barge-in (user speech while the gate window is armed)        #
+# --------------------------------------------------------------------------- #
+
+
+def test_user_transcript_during_playback_preempts_the_speaker():
+    """Talking over the robot's audible voice cuts it — not just its queue."""
+    components = app.build_app()
+    sonic = components[0]
+    speaker = components[1]
+    stops = []
+    speaker.stopper = stops.append
+    speaker.gate.arm_for(10.0)  # a playback window is running
+    sonic.on_transcript("USER", "stop talking")
+    assert stops == [speaker.base_url]
+    assert not speaker.gate.active
+
+
+def test_user_transcript_with_no_playback_window_does_not_preempt():
+    components = app.build_app()
+    sonic = components[0]
+    speaker = components[1]
+    stops = []
+    speaker.stopper = stops.append
+    sonic.on_transcript("USER", "hello there")
+    assert stops == []

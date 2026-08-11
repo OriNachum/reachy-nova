@@ -76,10 +76,15 @@ FACE_RULE_ID = "nova-face-noticed"
 #: (``face_sense.DEFAULT_REANNOUNCE_COOLDOWN``) — ``cooldown_s`` matches it so
 #: the rule can never fire faster than the cue that feeds it. ``nod`` is the
 #: engine's own library acknowledgement gesture.
+#: ``duration_s`` is load-bearing: ``nod`` is a looping behavior with no
+#: default duration, and the engine REFUSES a rule that would let a looping
+#: behavior hold its channel forever (seen live 2026-08-11: the reload was
+#: rejected with "carries no duration_s" and the whole overlay kept last-good).
 FACE_RULE: dict = {
     "id": FACE_RULE_ID,
     "when": {"field": "face", "op": "is_true"},
     "run": "nod",
+    "duration_s": 2.0,
     "cooldown_s": 30.0,
 }
 
@@ -225,6 +230,14 @@ def build_app() -> list[object]:
             feed.message(text)
         elif role == "USER" and text.strip():
             _stage("hear", "nova", "transcript", f"heard {text[:120]!r}")
+            # Playback-aware barge-in: Sonic's own interruption path only runs
+            # while it is GENERATING, but the audible playback happens after
+            # (upload + play on the daemon). A user transcript while the gate
+            # window is armed means they are talking over the robot's actual
+            # voice — cut it (stop_sound + purge) rather than talking on.
+            if gate.active:
+                _stage("speak", "nova", "barge-in", "user spoke over playback — preempting")
+                speaker.preempt()
 
     sonic.on_transcript = _on_transcript
 

@@ -59,6 +59,7 @@ DEFAULT_BASE_URL = "http://localhost:8000"
 BASE_URL_ENV = "NOVA_DAEMON_URL"
 _UPLOAD_PATH = "/api/media/sounds/upload"
 _PLAY_PATH = "/api/media/play_sound"
+_STOP_PATH = "/api/media/stop_sound"
 _UPLOAD_FILENAME = "tts_synth.wav"
 _HTTP_TIMEOUT_S = 10.0
 
@@ -125,6 +126,17 @@ def default_poster(base_url: str, wav_bytes: bytes, filename: str) -> None:
     _post(f"{base}{_PLAY_PATH}", play_body, "application/json", _HTTP_TIMEOUT_S)
 
 
+def default_stopper(base_url: str) -> None:
+    """Stop whatever the daemon speaker is playing right now (barge-in cut).
+
+    ``POST /api/media/stop_sound`` exists on the deployed daemon (verified in
+    its openapi 2026-08-12). Raises on HTTP/network failure — ``preempt()``
+    treats a failed stop as best-effort and keeps going.
+    """
+    base = base_url.rstrip("/")
+    _post(f"{base}{_STOP_PATH}", b"{}", "application/json", _HTTP_TIMEOUT_S)
+
+
 # --------------------------------------------------------------------------- #
 # SonicSpeaker                                                                #
 # --------------------------------------------------------------------------- #
@@ -169,11 +181,13 @@ class SonicSpeaker:
         on_playback_failure: Callable[[], None] | None = None,
         max_buffer_s: float = 15.0,
         queue_size: int = 8,
+        stopper: Callable[[str], None] | None = None,
     ) -> None:
         self.gate = gate
         self.sample_rate = sample_rate
         self.base_url = base_url or os.environ.get(BASE_URL_ENV, DEFAULT_BASE_URL)
         self.poster = poster or default_poster
+        self.stopper = stopper or default_stopper
         self.on_playback_failure = on_playback_failure
         self.max_buffer_s = max_buffer_s
         self.queue_size = queue_size
@@ -336,10 +350,13 @@ class SonicSpeaker:
         )
 
     def preempt(self) -> None:
-        """Barge-in: drop the building buffer and every queued utterance, free the gate.
+        """Barge-in: cut the playing sound, drop everything queued, free the gate.
 
-        Wired to Sonic's ``on_interruption`` — the user spoke over the robot, so
-        anything not yet on the speaker must never play.
+        Wired to Sonic's ``on_interruption`` AND to user-speech-during-playback
+        (``app.py``) — the user spoke over the robot, so the sound on the
+        speaker stops now (``stopper`` → ``POST /api/media/stop_sound``) and
+        anything not yet playing must never play. The stop is best-effort: a
+        daemon that cannot stop still gets its queue purged and gate cleared.
         """
         with self._buffer_lock:
             self._buffer = []
@@ -352,12 +369,17 @@ class SonicSpeaker:
                 break
             self._queue.task_done()
             cleared += 1
+        stopped = True
+        try:
+            self.stopper(self.base_url)
+        except Exception:  # noqa: BLE001 - best-effort; the purge already happened
+            stopped = False
         self.gate.clear()
         sensory_log.stage(
             STAGE_SPEAK,
             SOURCE,
             "preempt",
-            f"dropped reason=barge-in pending={cleared}",
+            f"dropped reason=barge-in pending={cleared} stopped={stopped}",
         )
 
     def _mouth_loss(self, duration_s: float, err: Exception) -> None:
