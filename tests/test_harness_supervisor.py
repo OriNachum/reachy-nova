@@ -321,3 +321,47 @@ def test_run_starts_the_loop_when_nothing_else_is_live(state_dir, monkeypatch):
     assert isinstance(started["stop_event"], threading.Event)
     # The PID file is released on a clean exit.
     assert not statedir.harness_pid_path().exists()
+
+
+# --------------------------------------------------------------------------- #
+# PR #6 review fixes (qodo): atomic pid claim + no-components refusal          #
+# --------------------------------------------------------------------------- #
+
+
+def test_acquire_pid_file_is_an_atomic_exclusive_create(tmp_path, monkeypatch):
+    """The claim goes through O_CREAT|O_EXCL — a pre-existing live-sibling file
+    refuses without being rewritten."""
+    monkeypatch.setenv("REACHY_STATE_DIR", str(tmp_path))
+    import os as _os
+
+    path = supervisor.statedir.harness_pid_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # A live sibling: our own pid but claimed to be another process that is
+    # alive and is a harness.
+    path.write_text("12345", encoding="utf-8")
+    monkeypatch.setattr(supervisor, "_is_alive", lambda pid: True)
+    monkeypatch.setattr(supervisor, "_is_our_harness", lambda pid: True)
+    assert supervisor.acquire_pid_file() is False
+    assert path.read_text() == "12345"  # the sibling's file is untouched
+
+
+def test_acquire_pid_file_reclaims_a_stale_claim_atomically(tmp_path, monkeypatch):
+    monkeypatch.setenv("REACHY_STATE_DIR", str(tmp_path))
+    path = supervisor.statedir.harness_pid_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("99999999", encoding="utf-8")
+    monkeypatch.setattr(supervisor, "_is_alive", lambda pid: False)
+    assert supervisor.acquire_pid_file() is True
+    assert path.read_text() == str(supervisor.os.getpid())
+
+
+def test_cmd_run_refuses_when_no_components_compose(tmp_path, monkeypatch):
+    """Composition + fallback both empty -> EXIT_NO_COMPONENTS, never an inert
+    harness that systemd believes is healthy."""
+    monkeypatch.setenv("REACHY_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(supervisor.statedir, "embody_is_live", lambda: False)
+    monkeypatch.setattr(supervisor, "_composed_components", lambda: [])
+    rc = supervisor.cmd_run()
+    assert rc == supervisor.EXIT_NO_COMPONENTS
+    # the pid file is released so the retry can claim it
+    assert supervisor.read_pid() is None

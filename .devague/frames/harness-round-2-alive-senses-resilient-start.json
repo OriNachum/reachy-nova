@@ -4,7 +4,7 @@
   "schema_version": 5,
   "status": "exported",
   "created": "2026-08-11T20:49:24Z",
-  "updated": "2026-08-11T21:06:50Z",
+  "updated": "2026-08-11T21:42:50Z",
   "claims": [
     {
       "id": "c1",
@@ -508,8 +508,8 @@
       "text": "exact discrete MQTT topic names for pat/face events (reachy/events/<source>/<type>) \u2014 confirm on first live pat/face after the vision extra lands",
       "kind": "unknown_nonblocking",
       "claim_id": null,
-      "resolved": false,
-      "resolution": "",
+      "resolved": true,
+      "resolution": "confirmed 2026-08-12 from CLI source + live bus: discrete reachy/events/pat|face/* topics do NOT exist \u2014 sense-block events all collapse to sense/snapshot; pat crosses MQTT as rule/fire of the deployed pat-acknowledge rule (payload carries {rule}, already routed+templated by the harness); face has NO default rule on its cue, so the harness must install a nova- overlay rule (t10) for face identity to reach Nova; t7's provisional pat/face/vision rules.yaml keys are inert and can be repurposed or pruned in t10",
       "resolution_claim_id": null
     },
     {

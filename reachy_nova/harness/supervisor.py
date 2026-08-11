@@ -61,6 +61,9 @@ EXIT_OK = 0
 EXIT_ALREADY_RUNNING = 2
 #: The ``agent embody`` layer is live — we would fight it over audio + spool.
 EXIT_EMBODY_LIVE = 3
+#: Composition AND the degraded fallback both produced zero components — a
+#: harness with nothing to run must fail (systemd restarts it), not sit inert.
+EXIT_NO_COMPONENTS = 4
 
 #: How often the watch loop re-reads the engine heartbeat.
 DEFAULT_POLL_INTERVAL = 2.0
@@ -146,20 +149,39 @@ def read_pid() -> int | None:
 def acquire_pid_file() -> bool:
     """Claim the harness PID file. ``False`` means a live sibling holds it.
 
-    A stale file (dead PID) or a live PID that is NOT a harness (PID reuse) is
-    reclaimed and named in the log; only a genuine live sibling refuses, and in
-    that case the sibling's file is left untouched.
+    The claim is ATOMIC (``O_CREAT | O_EXCL``): two concurrent starts race the
+    kernel, not a read-then-write window, so exactly one wins. A stale file
+    (dead PID, or a live PID that is NOT a harness — PID reuse) is reclaimed
+    and named in the log; the reclaim unlinks and retries the atomic create
+    once, so losing that second race also refuses cleanly. Only a genuine live
+    sibling refuses with its file left untouched.
     """
     path = statedir.harness_pid_path()
-    existing = read_pid()
-    if existing is not None and existing != os.getpid():
-        if _is_alive(existing) and _is_our_harness(existing):
-            _log("start", f"refused reason=already-running pid={existing}")
-            return False
-        _log("start", f"reclaimed stale pid={existing}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(str(os.getpid()), encoding="utf-8")
-    return True
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            existing = read_pid()
+            if (
+                existing is not None
+                and existing != os.getpid()
+                and _is_alive(existing)
+                and _is_our_harness(existing)
+            ):
+                _log("start", f"refused reason=already-running pid={existing}")
+                return False
+            _log("start", f"reclaimed stale pid={existing}")
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(str(os.getpid()))
+        return True
+    _log("start", "refused reason=already-running (lost the reclaim race)")
+    return False
 
 
 def release_pid_file() -> None:
@@ -371,10 +393,17 @@ def cmd_run(env_file: str | None = None) -> int:
         return EXIT_EMBODY_LIVE
     if not acquire_pid_file():
         return EXIT_ALREADY_RUNNING
+    components = _composed_components()
+    if not components:
+        # An inert harness looks alive to systemd while doing nothing at all —
+        # the one shape worse than dead. Fail loudly and let Restart= retry.
+        _log("start", "refused reason=no-components (composition and fallback both empty)")
+        release_pid_file()
+        return EXIT_NO_COMPONENTS
     stop_event = threading.Event()
     restore = install_signal_handlers(stop_event)
     try:
-        run(_composed_components(), stop_event)
+        run(components, stop_event)
     finally:
         restore()
         release_pid_file()

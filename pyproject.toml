@@ -31,6 +31,7 @@ keywords = ["reachy-mini-app"]
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
+    "pytest-xdist>=3.5.0",
 ]
 
 [project.scripts]
