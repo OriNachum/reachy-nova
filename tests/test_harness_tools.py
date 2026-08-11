@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sys
 import threading
 import time
 
@@ -24,12 +25,15 @@ import pytest
 
 from reachy_nova.harness import statedir
 from reachy_nova.harness.tools import (
+    BROWSE_DISABLED_REASON,
+    BROWSE_NOT_WIRED_REASON,
     DEGRADED_NOTE,
     TOOL_SPECS,
     IntentTools,
 )
 
-# The exact tool set — a seventh tool is a deliberate widening, never incidental.
+# The exact tool set — each addition past the original six is a deliberate
+# widening, never incidental. ``browse`` (task t4) is the first.
 EXPECTED_TOOLS = (
     "run_behavior",
     "declare_goal",
@@ -37,6 +41,7 @@ EXPECTED_TOOLS = (
     "set_inhibition",
     "goto",
     "create_rule",
+    "browse",
 )
 
 #: ``<time.time_ns()>-<uuid4.hex>.json``
@@ -144,7 +149,7 @@ VALID_ARGS = {
 # --------------------------------------------------------------------------- #
 
 
-def test_tool_specs_are_exactly_the_six_tools():
+def test_tool_specs_are_exactly_the_expected_tools():
     names = tuple(spec["toolSpec"]["name"] for spec in TOOL_SPECS)
     assert names == EXPECTED_TOOLS
 
@@ -471,3 +476,136 @@ def test_await_timeout_is_bounded(state_dir):
     started = time.monotonic()
     tools.execute("set_mode", {"mode": "calm"})
     assert time.monotonic() - started < 1.0
+
+
+# --------------------------------------------------------------------------- #
+# browse — drives NovaBrowser directly, not the intents spool (task t4)       #
+# --------------------------------------------------------------------------- #
+
+
+class FakeBrowser:
+    """A minimal ``queue_task``/``on_progress`` double.
+
+    Proves ``IntentTools`` drives NovaBrowser's own interface without ever
+    needing a real (nova_act/playwright-backed) instance in these tests.
+    """
+
+    def __init__(self):
+        self.queued: list[tuple[str, str | None]] = []
+        self.on_progress = None
+
+    def queue_task(self, instruction, url=None):
+        self.queued.append((instruction, url))
+
+
+def test_importing_tools_does_not_import_nova_act_or_playwright():
+    # reachy_nova.harness.tools is already imported (module-level, above);
+    # confirm that alone never dragged in nova_act/playwright. tools.py only
+    # takes nova_browser's flag-checking act_enabled() — never a code path
+    # that imports the automation libraries themselves.
+    assert "nova_act" not in sys.modules
+    assert "playwright" not in sys.modules
+
+
+def test_browse_tool_spec_requires_instruction():
+    (spec,) = [s for s in TOOL_SPECS if s["toolSpec"]["name"] == "browse"]
+    schema = json.loads(spec["toolSpec"]["inputSchema"]["json"])
+    assert schema["required"] == ["instruction"]
+    assert set(schema["properties"]) == {"instruction", "url"}
+
+
+def test_browse_is_refused_when_nova_act_is_disabled(tools, monkeypatch):
+    monkeypatch.delenv("NOVA_ACT_ENABLED", raising=False)
+    result = json.loads(tools.execute("browse", {"instruction": "find a recipe"}))
+    assert result["ok"] is False
+    assert result["error"] == BROWSE_DISABLED_REASON
+    assert spooled() == []
+
+
+def test_browse_is_refused_when_enabled_but_no_browser_wired(state_dir, monkeypatch):
+    monkeypatch.setenv("NOVA_ACT_ENABLED", "1")
+    tools = IntentTools(await_timeout=0.05)
+    result = json.loads(tools.execute("browse", {"instruction": "find a recipe"}))
+    assert result["ok"] is False
+    assert result["error"] == BROWSE_NOT_WIRED_REASON
+
+
+def test_browse_queues_the_instruction_when_enabled_and_wired(state_dir, monkeypatch):
+    monkeypatch.setenv("NOVA_ACT_ENABLED", "1")
+    browser = FakeBrowser()
+    tools = IntentTools(await_timeout=0.05, browser=browser)
+
+    result = json.loads(
+        tools.execute(
+            "browse", {"instruction": "find a recipe", "url": "https://example.com"}
+        )
+    )
+
+    assert result == {
+        "ok": True,
+        "queued": True,
+        "instruction": "find a recipe",
+        "url": "https://example.com",
+    }
+    assert browser.queued == [("find a recipe", "https://example.com")]
+    # Never spooled — browse talks to NovaBrowser directly, not the engine.
+    assert spooled() == []
+
+
+def test_browse_queues_without_a_url(state_dir, monkeypatch):
+    monkeypatch.setenv("NOVA_ACT_ENABLED", "yes")
+    browser = FakeBrowser()
+    tools = IntentTools(await_timeout=0.05, browser=browser)
+
+    result = json.loads(tools.execute("browse", {"instruction": "find a recipe"}))
+
+    assert result["ok"] is True
+    assert result["url"] is None
+    assert browser.queued == [("find a recipe", None)]
+
+
+def test_browse_progress_callback_is_invocable(state_dir, monkeypatch):
+    monkeypatch.setenv("NOVA_ACT_ENABLED", "1")
+    browser = FakeBrowser()
+    seen = []
+    tools = IntentTools(await_timeout=0.05, browser=browser, on_browse_progress=seen.append)
+
+    # IntentTools wires the callback onto the browser handle at construction —
+    # simulate NovaBrowser itself invoking it mid-task. (Bound methods aren't
+    # identity-stable across attribute access, so compare by equality.)
+    assert browser.on_progress == seen.append
+    browser.on_progress("Opening browser...")
+    assert seen == ["Opening browser..."]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {},
+        {"instruction": ""},
+        {"instruction": "   "},
+        {"instruction": 5},
+        {"instruction": "go", "url": 5},
+    ],
+)
+def test_browse_bad_arguments_are_refused_without_touching_the_browser(
+    state_dir, monkeypatch, args
+):
+    monkeypatch.setenv("NOVA_ACT_ENABLED", "1")
+    browser = FakeBrowser()
+    tools = IntentTools(await_timeout=0.05, browser=browser)
+
+    result = json.loads(tools.execute("browse", args))
+
+    assert result["ok"] is False
+    assert result["error"]
+    assert browser.queued == []
+
+
+def test_browse_logs_one_sense_line_on_refusal(tools, caplog, monkeypatch):
+    monkeypatch.delenv("NOVA_ACT_ENABLED", raising=False)
+    with caplog.at_level(logging.INFO, logger="nova.sensory"):
+        tools.execute("browse", {"instruction": "find a recipe"})
+    (line,) = _sense_lines(caplog)
+    assert "refused" in line
+    assert "browsing is disabled" in line
