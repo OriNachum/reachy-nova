@@ -24,6 +24,22 @@ reloads the user manager — and stops there. It never ``enable``s and never
 ``start``s: turning the harness on is an explicit operator act, so that
 installing the unit during a package upgrade can never quietly start a second
 audio consumer on a robot that is already talking through something else.
+
+This module also carries **repo-reproducible templates for the two presence
+units** it does not own (``reachy-runtime.service`` / ``reachy-demo-mode.service``
+— upstream in reachy-mini-cli): :func:`runtime_unit_text` and
+:func:`demo_mode_unit_text`. They exist here, alongside the harness's own
+template, because the mutual-exclusion hardening between them (each
+``Conflicts=`` the other, so systemd itself refuses to run both presence
+loops against the same body at once) was hand-applied live on the device and
+would otherwise silently regress on the next reinstall. ``reachy-demo-mode.service``
+carries **no ``[Install]`` section at all** — it is reachable only via an
+explicit ``systemctl --user start``, never via ``enable``, because a demo loop
+that could come up unattended at boot is exactly the second presence this
+hardening exists to rule out. ``scripts/install-device-units.sh`` writes all
+three, enables the runtime and the harness (never the demo unit), masks the
+legacy system-level ``reachy-nova-autostart.service``, and applies a bounded
+journald persistence drop-in — see that script's header for the full list.
 """
 
 from __future__ import annotations
@@ -41,7 +57,24 @@ HARNESS_UNIT = "reachy-nova-harness.service"
 #: this package must never import ``reachy`` or ``reachy_mini``).
 RUNTIME_UNIT = "reachy-runtime.service"
 
+#: The OTHER presence unit (owned by reachy-mini-cli): a manual-only demo loop
+#: that drives the same body as RUNTIME_UNIT. The two Conflicts= each other
+#: (see :func:`runtime_unit_text` / :func:`demo_mode_unit_text`) so systemd
+#: itself refuses to run both at once, rather than relying on an operator to
+#: remember not to.
+DEMO_UNIT = "reachy-demo-mode.service"
+
+#: The legacy system-level unit (the old ReachyMiniApp autostart). Superseded
+#: by RUNTIME_UNIT + HARNESS_UNIT; install masks it so a stale preset-enabled
+#: unit from a prior install can never wake up at boot and fight the new
+#: pair for the same audio/motor resources.
+AUTOSTART_UNIT = "reachy-nova-autostart.service"
+
 DESCRIPTION = "Reachy Nova harness (on-device AI peripheral over the symbolic runtime)"
+
+RUNTIME_DESCRIPTION = "Reachy Mini CLI symbolic runtime (presence loop)"
+
+DEMO_DESCRIPTION = "Reachy Mini CLI demo mode (manual-only presence loop)"
 
 
 def _unit_arg(value: str) -> str:
@@ -100,6 +133,88 @@ def harness_unit_text(
         "\n"
         "[Install]\n"
         "WantedBy=default.target\n"
+    )
+
+
+def runtime_exec_start(python: str | None = None) -> str:
+    """``ExecStart`` for the runtime: ``<cli-venv python> -m reachy behavior engine run``.
+
+    *python* is the reachy-mini-cli venv's interpreter, not this harness's
+    own — it is a DIFFERENT venv, so unlike :func:`harness_exec_start` there
+    is no sensible same-process default; callers (the install script) must
+    supply the real path. The ``_default_python`` fallback exists only so
+    the renderer stays callable/testable with no arguments, mirroring the
+    parameterization style of the harness renderer above.
+    """
+    py = python or _default_python()
+    return f"{_unit_arg(py)} -m reachy behavior engine run"
+
+
+def runtime_unit_text(python: str | None = None) -> str:
+    """Render ``reachy-runtime.service`` — the symbolic runtime presence unit.
+
+    ``Conflicts=reachy-demo-mode.service`` is the hand-applied hardening this
+    renders reproducibly: the runtime and the demo loop both drive the body,
+    and systemd Conflicts= is a semver-of-behaviour guarantee (starting one
+    stops the other) that no amount of operator discipline gives you for
+    free. Ordered ``After=network-online.target`` and enabled (``[Install]``)
+    since the runtime is the presence a fresh boot should come up into.
+    """
+    return (
+        "[Unit]\n"
+        f"Description={RUNTIME_DESCRIPTION}\n"
+        "After=network-online.target\n"
+        f"Conflicts={DEMO_UNIT}\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"ExecStart={runtime_exec_start(python)}\n"
+        "Restart=on-failure\n"
+        "RestartSec=5\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=default.target\n"
+    )
+
+
+def demo_mode_exec_start(python: str | None = None) -> str:
+    """``ExecStart`` for demo mode: ``<cli-venv python> -m reachy demo-mode run --config %h/...``.
+
+    ``%h`` is a systemd specifier (the invoking user's home directory), not a
+    path this renderer resolves — it must reach the unit file literally so
+    systemd expands it per-user at activation time, so it is written outside
+    :func:`_unit_arg`'s ``%``-doubling (which is for literal ``%`` characters
+    inside a path, not specifiers we want systemd itself to interpret).
+    """
+    py = python or _default_python()
+    return f"{_unit_arg(py)} -m reachy demo-mode run --config %h/.config/reachy/demo-mode.json"
+
+
+def demo_mode_unit_text(python: str | None = None) -> str:
+    """Render ``reachy-demo-mode.service`` — manual-only, never at boot.
+
+    Two deliberate omissions encode the hardening:
+
+    * **no ``[Install]`` section at all** — with nothing ``WantedBy=``
+      anything, ``systemctl --user enable`` has nothing to link and the unit
+      can only ever be started explicitly (``systemctl --user start``). A
+      demo loop that could come up unattended at boot is a second presence
+      fighting the runtime for the same body, which is exactly what this
+      hardening exists to prevent.
+    * ``Conflicts=reachy-runtime.service`` — the other half of the mutual
+      exclusion in :func:`runtime_unit_text`: whichever of the two starts,
+      systemd stops the other first.
+    """
+    return (
+        "[Unit]\n"
+        f"Description={DEMO_DESCRIPTION}\n"
+        f"Conflicts={RUNTIME_UNIT}\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        f"ExecStart={demo_mode_exec_start(python)}\n"
+        "Restart=on-failure\n"
+        "RestartSec=5\n"
     )
 
 
