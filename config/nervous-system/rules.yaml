@@ -294,3 +294,61 @@ rules:
     priority: LOW
     urgency: BACKGROUND
     llm_evaluate: false
+
+  # --- Runtime pat/face/vision events (t7) ----------------------------------
+  # Discrete touch/sight senses published by reachy-mini-cli under their own
+  # block types (reachy/events/pat/#, reachy/events/face/#,
+  # reachy/events/vision/#) — as opposed to the continuous pat/face fields
+  # already riding inside sense/snapshot above. IMPORTANT CAVEAT: these exact
+  # topic/type names are NOT YET LIVE-CONFIRMED on the device (pat sense is
+  # live, face waits on the vision extra) — a later task confirms and adjusts
+  # this block, a config-only change, once the wire names are pinned down.
+  # The tracking/pat_level1(2) and face/face_recognized entries above are
+  # Nova's OWN reflex/engine senses and are unrelated to this block.
+
+  pat/level1:
+    # A light touch — the runtime's discrete pat block, one step up from the
+    # antenna-driven reflex Nova already handles in-process.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You feel someone patting you gently."
+
+  pat/level2:
+    # A firmer or sustained touch — same discrete block, stronger contact.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You feel someone patting you more firmly now."
+
+  pat/detected:
+    # A touch event with no level distinction the runtime bothered to make.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You feel someone touching you."
+
+  face/recognized:
+    # The runtime's own discrete face block, payload {id, name, score} — the
+    # same shape as tracking/face_recognized and face/face_recognized above,
+    # just published over the runtime's bus instead of Nova's own engine.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You notice {name} is here."
+
+  face/unknown:
+    # A face was detected but not matched to anyone Nova knows.
+    priority: LOW
+    urgency: DEFERRABLE
+    llm_evaluate: false
+    inject_template: "You notice someone you don't recognize."
+
+  vision/description:
+    # The runtime's own discrete scene-description block — distinct from
+    # vision/vision_description above (Nova's own Nova 2 Lite frame
+    # analysis), same shape.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: true
+    inject_template: "Right now you see: {description}"

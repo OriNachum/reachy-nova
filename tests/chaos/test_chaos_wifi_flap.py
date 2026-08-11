@@ -131,6 +131,9 @@ def test_wifi_flap_full_arc_disconnect_replay_hygiene_and_recovery(caplog) -> No
         "reachy/events/rule/#",
         "reachy/events/intent/#",
         "reachy/events/motion/#",
+        "reachy/events/pat/#",
+        "reachy/events/face/#",
+        "reachy/events/vision/#",
         bus.RUNTIME_ONLINE_TOPIC,
     }
     assert len(online_state_publishes(client)) == 1

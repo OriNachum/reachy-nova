@@ -162,8 +162,18 @@ def test_broker_url_reads_reachy_mqtt_url_with_a_loopback_default(monkeypatch):
 def test_resolve_sources_defaults_to_decisions_and_drops_the_sense_flood(monkeypatch):
     """Upstream measured 187 cues/40 s from `sense` alone — off by default."""
     monkeypatch.delenv("NOVA_BUS_SOURCES", raising=False)
-    assert bus.resolve_sources(None) == ("rule", "intent", "motion")
+    assert bus.resolve_sources(None) == ("rule", "intent", "motion", "pat", "face", "vision")
     assert "sense" not in bus.resolve_sources(None)
+
+
+def test_topic_filters_include_pat_face_vision_by_default(monkeypatch):
+    """t7: pat/face/vision are discrete senses, not the high-rate snapshot —
+    they're on by default alongside rule/intent/motion."""
+    monkeypatch.delenv("NOVA_BUS_SOURCES", raising=False)
+    filters = bus.topic_filters(bus.resolve_sources(None))
+    assert "reachy/events/pat/#" in filters
+    assert "reachy/events/face/#" in filters
+    assert "reachy/events/vision/#" in filters
 
 
 def test_resolve_sources_parses_a_comma_list_and_drops_blanks():
@@ -209,6 +219,12 @@ def test_rules_yaml_covers_the_runtime_bus_namespace(real_rules):
         "intent/blocked",
         "motion/goto",
         "sense/snapshot",
+        "pat/level1",
+        "pat/level2",
+        "pat/detected",
+        "face/recognized",
+        "face/unknown",
+        "vision/description",
     ):
         assert key in rules, f"rules.yaml is missing runtime pair {key}"
         assert "priority" in rules[key]
@@ -259,6 +275,47 @@ def test_route_event_priority_of_returns_the_matched_rule_metadata(real_rules):
     assert fire["priority"] == "NORMAL"
     fallback = bus.rule_for(real_rules, "quantum", "entangle")
     assert fallback == real_rules["default"]
+
+
+# --------------------------------------------------------------------------- #
+# t7 — pat/face/vision runtime senses                                         #
+# --------------------------------------------------------------------------- #
+
+
+def test_route_event_pat_level1_names_the_touch(real_rules):
+    text, reason = bus.route_event(real_rules, "pat", "level1", {"level": 1})
+    assert reason == bus.REASON_INJECT
+    assert text and "pat" in text.lower()
+
+
+def test_route_event_pat_level2_names_the_touch(real_rules):
+    text, reason = bus.route_event(real_rules, "pat", "level2", {"level": 2})
+    assert reason == bus.REASON_INJECT
+    assert text and "pat" in text.lower()
+
+
+def test_route_event_face_recognized_names_who_was_seen(real_rules):
+    text, reason = bus.route_event(real_rules, "face", "recognized", {"name": "Ori"})
+    assert reason == bus.REASON_INJECT
+    assert text and "Ori" in text
+
+
+def test_route_event_vision_description_names_what_was_seen(real_rules):
+    text, reason = bus.route_event(real_rules, "vision", "description", {"description": "a red mug"})
+    assert reason == bus.REASON_INJECT
+    assert text and "red mug" in text
+
+
+def test_route_event_unknown_pat_type_falls_back_to_the_default_rule(real_rules):
+    text, reason = bus.route_event(real_rules, "pat", "mystery", {})
+    assert text is None
+    assert reason == bus.REASON_NO_TEMPLATE
+
+
+def test_route_event_unknown_face_type_falls_back_to_the_default_rule(real_rules):
+    text, reason = bus.route_event(real_rules, "face", "mystery", {})
+    assert text is None
+    assert reason == bus.REASON_NO_TEMPLATE
 
 
 # --------------------------------------------------------------------------- #
@@ -318,6 +375,59 @@ def test_on_message_sense_snapshot_is_observed_but_never_injected():
     )
     assert rec.injects == []
     assert len(rec.events) == 1
+
+
+def test_on_message_routes_a_pat_event_to_an_inject_naming_the_touch():
+    """Acceptance: a pat event pushed through NovaBus produces a Sonic inject
+    whose text names the touch."""
+    rec = Recorder()
+    nb = make_bus(rec, sources="pat")
+    nb.on_message(
+        None,
+        None,
+        fake_msg("reachy/events/pat/level1", {"t": "pat", "ts": 1.0, "level": 1}),
+    )
+    assert len(rec.injects) == 1
+    assert "pat" in rec.injects[0].lower()
+    assert rec.events and rec.events[0]["source"] == "pat"
+
+
+def test_on_message_routes_a_face_recognized_event_naming_who_was_seen():
+    rec = Recorder()
+    nb = make_bus(rec, sources="face")
+    nb.on_message(
+        None,
+        None,
+        fake_msg("reachy/events/face/recognized", {"t": "face", "ts": 1.0, "name": "Ori"}),
+    )
+    assert len(rec.injects) == 1
+    assert "Ori" in rec.injects[0]
+
+
+def test_on_message_unknown_pat_type_is_a_named_drop_not_an_inject(caplog):
+    rec = Recorder()
+    nb = make_bus(rec, sources="pat")
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        nb.on_message(
+            None,
+            None,
+            fake_msg("reachy/events/pat/mystery", {"t": "pat", "ts": 1.0}),
+        )
+    assert rec.injects == []
+    assert any(f"reason={bus.REASON_NO_TEMPLATE}" in r.getMessage() for r in caplog.records)
+
+
+def test_on_message_unknown_face_type_is_a_named_drop_not_an_inject(caplog):
+    rec = Recorder()
+    nb = make_bus(rec, sources="face")
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        nb.on_message(
+            None,
+            None,
+            fake_msg("reachy/events/face/mystery", {"t": "face", "ts": 1.0}),
+        )
+    assert rec.injects == []
+    assert any(f"reason={bus.REASON_NO_TEMPLATE}" in r.getMessage() for r in caplog.records)
 
 
 def test_on_message_skips_an_unknown_block_type_gracefully():
@@ -399,6 +509,9 @@ def test_start_sets_the_last_will_subscribes_events_and_publishes_online(monkeyp
         "reachy/events/rule/#",
         "reachy/events/intent/#",
         "reachy/events/motion/#",
+        "reachy/events/pat/#",
+        "reachy/events/face/#",
+        "reachy/events/vision/#",
         bus.RUNTIME_ONLINE_TOPIC,
     }
     online = [p for p in client.published if p[0] == bus.HARNESS_STATE_TOPIC]

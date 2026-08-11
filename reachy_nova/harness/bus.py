@@ -14,10 +14,20 @@ The wire contract (verified against reachy-mini-cli 0.48.0,
   warns and falls back — a typo must degrade the bus, never stop the harness.
 - **Events**: ``reachy/events/{source}/{type}``, QoS 0, **not retained**.
   ``{source}`` is the runtime block type (``sense``/``rule``/``intent``/
-  ``motion``) and ``{type}`` is that block's action — ``rule/fire``,
+  ``motion``, plus the discrete ``pat``/``face``/``vision`` senses — see
+  below) and ``{type}`` is that block's action — ``rule/fire``,
   ``rule/suppress``, ``intent/{declare,update,clear,applied,blocked}``,
   ``motion/{admit,evict,goto}``; a ``sense`` snapshot carries no action and
   publishes as ``sense/snapshot``.
+- **Discrete pat/face/vision senses (t7)**: alongside the continuous
+  ``sense/snapshot`` fields of the same name, the runtime is expected to
+  publish discrete events under their own block types — ``pat/level1``,
+  ``pat/level2``, ``pat/detected``, ``face/recognized``, ``face/unknown``,
+  ``vision/description`` — routed through the same
+  ``config/nervous-system/rules.yaml``. The exact topic/type names are
+  **not yet live-confirmed** on the device (pat is live, face waits on the
+  vision extra); a later task confirms and adjusts ``rules.yaml`` — a
+  config-only change, nothing here.
 - **Retained state**: ``reachy/state/{key}`` plus ``reachy/state/online``
   (``true``/``false``, backed by the runtime's own Last Will).
 - **Payloads**: compact JSON, ``t`` and ``ts`` first. An unknown ``t`` is
@@ -112,9 +122,13 @@ RUNTIME_ONLINE_TOPIC = "reachy/state/online"
 #: Env var overriding which runtime sources the harness subscribes.
 SOURCES_ENV = "NOVA_BUS_SOURCES"
 #: Decisions, not perception — see the module docstring on the sense flood.
-DEFAULT_SOURCES = "rule,intent,motion"
+#: ``pat``/``face``/``vision`` are discrete senses (t7), not the high-rate
+#: ``sense/snapshot`` stream, so they are safe to subscribe by default.
+DEFAULT_SOURCES = "rule,intent,motion,pat,face,vision"
 #: Runtime block types this harness understands; anything else is skipped.
-KNOWN_BLOCK_TYPES = frozenset({"sense", "rule", "intent", "motion"})
+#: ``pat``/``face``/``vision`` mirror the runtime's discrete touch/sight
+#: senses (t7) — exact topic names are provisional, see the module docstring.
+KNOWN_BLOCK_TYPES = frozenset({"sense", "rule", "intent", "motion", "pat", "face", "vision"})
 
 #: The harness's OWN retained availability topic (Nova's namespace, not the
 #: runtime's — the two never share a tree).
