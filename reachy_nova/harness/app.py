@@ -2,7 +2,12 @@
 
 ``build_app()`` assembles the full harness graph and returns the component
 list the supervisor runs. Nothing here starts threads or touches the network —
-construction is wiring only, so it is fully testable off-robot.
+construction is wiring only, so it is fully testable off-robot. The ONE
+deliberate side effect is :func:`ensure_face_rule`: the standing
+``nova-face-noticed`` overlay rule is (re)written into the runtime's rules
+overlay at startup, because without it the face cue never crosses the bus at
+all (see the function's docstring); it degrades to a named component-absent
+line when no runtime state dir exists on this box.
 
 The graph::
 
@@ -11,8 +16,17 @@ The graph::
     sonic.on_interruption ──► speaker.preempt()          (barge-in / mouth loss)
     sonic.on_tool_use ─thread─► IntentTools.execute ──► sonic.send_tool_result
     bus reachy/events/# ──rules.yaml──► sonic.inject_text (throttled inside)
+    bus reachy/state/clip ──VisionLeg──NovaOmni──► sonic.inject_text
+    NovaBrowser.on_progress ──► sonic.inject_text        (browse tool, flag-gated)
     memory (qq) ──MemoryLeg──rules.yaml──► sonic.inject_text
     sonic.on_transcript(ASSISTANT) ──► CognitionFeed.message  (NDJSON, stdout)
+
+Optional legs degrade, never crash: the browser exists only when
+``NOVA_ACT_ENABLED`` is on, the vision leg only when ``NOVA_OMNI_MODEL_ID`` is
+set (the Omni preview is model-config-gated) AND the bus built (it supplies the
+retained clip state). Every absent leg emits the standard
+``component absent name=<leg> reason=<why>`` senselog line, so "we started
+without seeing" is visible rather than inferred.
 """
 
 from __future__ import annotations
@@ -20,10 +34,13 @@ from __future__ import annotations
 import threading
 
 from .. import config
+from ..nova_browser import act_enabled
 from ..sensory_log import stage as _stage
+from . import statedir
 from .cognition_feed import CognitionFeed
-from .gate import EchoGate
+from .gate import EchoGate, resolve_policy
 from .hearing import TeeHearing
+from .rules_overlay import upsert_rule
 from .speaking import SonicSpeaker
 from .tools import TOOL_SPECS, IntentTools
 
@@ -41,6 +58,106 @@ HARNESS_SYSTEM_PROMPT = (
     "body did not respond."
 )
 
+# --------------------------------------------------------------------------- #
+# The standing face rule (t10)                                                 #
+# --------------------------------------------------------------------------- #
+
+#: LIVE FINDING (on-device, 2026-08-12): discrete ``reachy/events/face/*``
+#: topics do not exist in the runtime — sense-block events collapse into the
+#: (never-subscribed) ``sense/snapshot`` stream, and only RULE FIRES cross the
+#: bus as discrete events. The runtime ships no default rule on the face cue,
+#: so without this standing overlay rule a recognised face never reaches Nova.
+FACE_RULE_ID = "nova-face-noticed"
+
+#: The rule itself, in the engine's own grammar (reachy-mini-cli
+#: ``reachy/behavior/rules.py``): ``face`` latches the recognised name for one
+#: tick (``is_true`` = "a named face was recognised this tick"), and the
+#: runtime's own per-name re-announce cooldown is 30 s
+#: (``face_sense.DEFAULT_REANNOUNCE_COOLDOWN``) — ``cooldown_s`` matches it so
+#: the rule can never fire faster than the cue that feeds it. ``nod`` is the
+#: engine's own library acknowledgement gesture.
+FACE_RULE: dict = {
+    "id": FACE_RULE_ID,
+    "when": {"field": "face", "op": "is_true"},
+    "run": "nod",
+    "cooldown_s": 30.0,
+}
+
+#: Seconds :func:`ensure_face_rule` waits for the engine's reload verdict when
+#: the overlay actually changed (an unchanged overlay submits no reload).
+FACE_RULE_RELOAD_TIMEOUT = 1.0
+
+
+def ensure_face_rule(*, reload_timeout: float | None = None) -> bool:
+    """Ensure the standing ``nova-face-noticed`` rule is in the rules overlay.
+
+    Runs at composition time, once per startup. Total — every failure resolves
+    to the standard ``component absent name=face-rule`` line, never a crash:
+
+    * no runtime state dir on this box (a dev machine, a partial install) —
+      the overlay is not even created, because a rules file with no engine to
+      read it is litter;
+    * a refused rule or unwritable overlay — named with the error verbatim.
+
+    On success the (idempotent) upsert's verdict is logged: a second startup
+    finds the rule already present, writes nothing and submits no reload.
+    """
+    timeout = FACE_RULE_RELOAD_TIMEOUT if reload_timeout is None else reload_timeout
+    try:
+        behavior_dir = statedir.behavior_dir()
+        if not behavior_dir.is_dir():
+            _stage(
+                "supervise",
+                "nova",
+                "component",
+                f"component absent name=face-rule reason=statedir-absent dir={behavior_dir}",
+            )
+            return False
+        changed, verdict = upsert_rule(dict(FACE_RULE), reload_timeout=timeout)
+    except Exception as err:  # noqa: BLE001 - a rules problem must not stop the voice
+        _stage("supervise", "nova", "component", f"component absent name=face-rule reason={err}")
+        return False
+    _stage(
+        "supervise",
+        "nova",
+        "face-rule",
+        f"standing rule ensured id={FACE_RULE_ID} changed={changed} verdict={verdict}",
+    )
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# Browser lifecycle adapter                                                    #
+# --------------------------------------------------------------------------- #
+
+
+class BrowserComponent:
+    """Adapts :class:`~reachy_nova.nova_browser.NovaBrowser` to the supervisor.
+
+    ``NovaBrowser.start(stop_event)`` spins its worker thread and that thread
+    already watches the supervisor's ``stop_event``; the supervisor's ``stop()``
+    contract is therefore a bounded join, not a second signal. The underlying
+    browser stays reachable as ``.browser`` (the handle ``IntentTools`` drives).
+    """
+
+    name = "browser"
+
+    def __init__(self, browser: object) -> None:
+        self.browser = browser
+
+    def start(self, stop_event: threading.Event) -> None:
+        self.browser.start(stop_event)  # type: ignore[attr-defined]
+
+    def stop(self, timeout: float = 2.0) -> None:
+        thread = getattr(self.browser, "_thread", None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+
+
+# --------------------------------------------------------------------------- #
+# The composition root                                                         #
+# --------------------------------------------------------------------------- #
+
 
 def build_app() -> list[object]:
     """Construct and wire every harness component; return them in start order."""
@@ -48,7 +165,6 @@ def build_app() -> list[object]:
 
     gate = EchoGate()
     feed = CognitionFeed()
-    intents = IntentTools()
 
     speaker = SonicSpeaker(gate=gate)
 
@@ -68,6 +184,26 @@ def build_app() -> list[object]:
         speaker.on_state_change(state)
 
     sonic.on_state_change = _on_state_change
+
+    # act leg (browse) — a real browser exists only when Nova Act is enabled;
+    # its progress narration goes through inject_text like every other sense.
+    browser = None
+    if act_enabled():
+        try:
+            from ..nova_browser import NovaBrowser
+
+            browser = NovaBrowser()
+        except Exception as err:  # noqa: BLE001
+            _stage("supervise", "nova", "component", f"component absent name=browser reason={err}")
+    else:
+        _stage(
+            "supervise", "nova", "component", "component absent name=browser reason=act-disabled"
+        )
+
+    intents = IntentTools(
+        browser=browser,
+        on_browse_progress=sonic.inject_text if browser is not None else None,
+    )
 
     # act leg — tool calls run off Sonic's response thread, result posted back
     def _on_tool_use(tool_name: str, tool_use_id: str, params: dict) -> None:
@@ -92,18 +228,49 @@ def build_app() -> list[object]:
 
     sonic.on_transcript = _on_transcript
 
-    # hear leg
-    hearing = TeeHearing(feed=sonic.feed_audio, gate=gate)
+    # hear leg — the echo-gate policy is wired EXPLICITLY (resolve_policy reads
+    # $NOVA_ECHO_GATE, default off) so the wiring is assertable, not ambient.
+    hearing = TeeHearing(
+        feed=sonic.feed_audio, gate=gate, echo_gate_policy=resolve_policy()
+    )
 
     components: list[object] = [sonic, speaker, hearing]
 
     # read leg — bus is optional-degraded: no broker means named drops, not death
+    bus_component = None
     try:
         from .bus import NovaBus
 
-        components.append(NovaBus(on_inject=sonic.inject_text))
+        bus_component = NovaBus(on_inject=sonic.inject_text)
+        components.append(bus_component)
     except Exception as err:  # noqa: BLE001
         _stage("supervise", "nova", "component", f"component absent name=bus reason={err}")
+
+    if browser is not None:
+        components.append(BrowserComponent(browser))
+
+    # vision leg — Omni is model-config-gated (empty id = preview not enabled)
+    # and the bus supplies the retained reachy/state/clip payload it reads.
+    if not config.omni_model_id():
+        _stage(
+            "supervise", "nova", "component", "component absent name=vision reason=omni-model-unset"
+        )
+    elif bus_component is None:
+        _stage("supervise", "nova", "component", "component absent name=vision reason=no-bus")
+    else:
+        try:
+            from ..nova_omni import NovaOmni
+            from .vision_leg import VisionLeg
+
+            components.append(
+                VisionLeg(
+                    get_clip_state=bus_component.clip_state,
+                    understand=NovaOmni(),
+                    on_answer=sonic.inject_text,
+                )
+            )
+        except Exception as err:  # noqa: BLE001
+            _stage("supervise", "nova", "component", f"component absent name=vision reason={err}")
 
     # memory leg — optional: qq backends may not exist on this box
     try:
@@ -113,5 +280,8 @@ def build_app() -> list[object]:
         MemoryLeg(NovaMemory(), on_inject=sonic.inject_text).attach()
     except Exception as err:  # noqa: BLE001
         _stage("supervise", "nova", "component", f"component absent name=memory reason={err}")
+
+    # standing reflexes — the face cue crosses the bus only through this rule
+    ensure_face_rule()
 
     return components

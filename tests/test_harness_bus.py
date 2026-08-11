@@ -483,6 +483,132 @@ def test_on_message_is_exception_safe_when_the_inject_callback_raises():
 
 
 # --------------------------------------------------------------------------- #
+# Retained clip state (t10 — the vision leg's read seam)                       #
+# --------------------------------------------------------------------------- #
+
+_CLIP_AVAILABLE = {
+    "available": True,
+    "reason": None,
+    "path": "/tmp/clip.mp4",
+    "ts": 1718362800.0,
+    "duration_s": 4.0,
+    "frame_count": 60,
+}
+
+_CLIP_UNAVAILABLE = {
+    "available": False,
+    "reason": "vision-extra-absent",
+    "path": None,
+    "ts": 1718362801.0,
+    "duration_s": None,
+    "frame_count": 0,
+}
+
+
+def test_clip_state_starts_none_and_caches_the_retained_payload():
+    rec = Recorder()
+    nb = make_bus(rec)
+    assert nb.clip_state() is None
+    nb.on_message(None, None, fake_msg(bus.CLIP_STATE_TOPIC, _CLIP_AVAILABLE))
+    state = nb.clip_state()
+    assert state is not None
+    assert state["available"] is True
+    assert state["path"] == "/tmp/clip.mp4"
+    # State, never a cue: no inject, no raw-event tap.
+    assert rec.injects == []
+    assert rec.events == []
+
+
+def test_clip_state_returns_a_copy_not_the_cache():
+    nb = make_bus(Recorder())
+    nb.on_message(None, None, fake_msg(bus.CLIP_STATE_TOPIC, _CLIP_AVAILABLE))
+    state = nb.clip_state()
+    state["path"] = "/mutated"
+    assert nb.clip_state()["path"] == "/tmp/clip.mp4"
+
+
+def test_clip_state_bad_payload_is_a_named_drop_that_keeps_the_last_good(caplog):
+    nb = make_bus(Recorder())
+    nb.on_message(None, None, fake_msg(bus.CLIP_STATE_TOPIC, _CLIP_AVAILABLE))
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        nb.on_message(None, None, fake_msg(bus.CLIP_STATE_TOPIC, b"not json"))
+        nb.on_message(None, None, fake_msg(bus.CLIP_STATE_TOPIC, b'["a", "list"]'))
+    assert any(
+        f"reason={bus.REASON_BAD_PAYLOAD}" in r.getMessage() for r in caplog.records
+    )
+    assert nb.clip_state()["path"] == "/tmp/clip.mp4"  # last good survives
+
+
+def test_clip_state_availability_transitions_log_once_each(caplog):
+    nb = make_bus(Recorder())
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        nb.on_message(None, None, fake_msg(bus.CLIP_STATE_TOPIC, _CLIP_UNAVAILABLE))
+        nb.on_message(None, None, fake_msg(bus.CLIP_STATE_TOPIC, _CLIP_UNAVAILABLE))
+        nb.on_message(None, None, fake_msg(bus.CLIP_STATE_TOPIC, _CLIP_AVAILABLE))
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if "event=clip-state" in r.getMessage() and "dropped" not in r.getMessage()
+    ]
+    assert len(lines) == 2  # one per TRANSITION, not one per retained replay
+    assert "unavailable" in lines[0] and "vision-extra-absent" in lines[0]
+    assert "available" in lines[1] and "/tmp/clip.mp4" in lines[1]
+
+
+# --------------------------------------------------------------------------- #
+# Per-rule rule/fire overrides (t10)                                           #
+# --------------------------------------------------------------------------- #
+
+
+def test_rule_for_per_rule_override_key_wins_and_falls_back():
+    cfg = {
+        "rules": {
+            "rule/fire": {"priority": "NORMAL", "inject_template": "generic {rule}"},
+            "rule/fire:pat-acknowledge": {
+                "priority": "HIGH",
+                "inject_template": "someone pets you",
+            },
+        },
+        "default": {"priority": "LOW"},
+    }
+    override = bus.rule_for(cfg, "rule", "fire", {"rule": "pat-acknowledge"})
+    assert override["inject_template"] == "someone pets you"
+    fallback = bus.rule_for(cfg, "rule", "fire", {"rule": "anything-else"})
+    assert fallback["inject_template"] == "generic {rule}"
+    # No payload / no rule name — the generic entry, exactly as before.
+    assert bus.rule_for(cfg, "rule", "fire")["inject_template"] == "generic {rule}"
+    assert bus.rule_for(cfg, "rule", "fire", {"rule": ""})["inject_template"] == "generic {rule}"
+
+
+def test_route_event_rule_fire_pat_acknowledge_reads_as_touch(real_rules):
+    """The deployed pat path: pat reaches Nova as pat-acknowledge's rule/fire."""
+    text, reason = bus.route_event(
+        real_rules, "rule", "fire", {"t": "rule", "rule": "pat-acknowledge"}
+    )
+    assert reason == bus.REASON_INJECT
+    assert "pet" in text.lower()
+    assert "reflex fired" not in text  # the sensory override, not the generic line
+
+
+def test_route_event_rule_fire_nova_face_noticed_reads_as_sight(real_rules):
+    """The harness's standing face rule: its fire is the face sense on the bus."""
+    text, reason = bus.route_event(
+        real_rules, "rule", "fire", {"t": "rule", "rule": "nova-face-noticed"}
+    )
+    assert reason == bus.REASON_INJECT
+    assert "face" in text.lower()
+    assert "reflex fired" not in text
+
+
+def test_route_event_rule_fire_unknown_rule_keeps_the_generic_template(real_rules):
+    text, reason = bus.route_event(
+        real_rules, "rule", "fire", {"t": "rule", "rule": "look-toward-sound"}
+    )
+    assert reason == bus.REASON_INJECT
+    assert "look-toward-sound" in text and "reflex" in text
+
+
+# --------------------------------------------------------------------------- #
 # Lifecycle with an injected client (still no broker)                          #
 # --------------------------------------------------------------------------- #
 
@@ -513,6 +639,7 @@ def test_start_sets_the_last_will_subscribes_events_and_publishes_online(monkeyp
         "reachy/events/face/#",
         "reachy/events/vision/#",
         bus.RUNTIME_ONLINE_TOPIC,
+        bus.CLIP_STATE_TOPIC,
     }
     online = [p for p in client.published if p[0] == bus.HARNESS_STATE_TOPIC]
     assert online and json.loads(online[-1][1])["status"] == "online"
