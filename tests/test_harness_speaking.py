@@ -22,7 +22,7 @@ import wave
 import numpy as np
 import pytest
 
-from reachy_nova.harness.gate import EchoGate
+from reachy_nova.harness.gate import ECHO_GATE_ENV, EchoGate
 from reachy_nova.harness.speaking import SonicSpeaker
 
 SAMPLE_RATE = 24000
@@ -241,11 +241,25 @@ def test_on_playback_failure_exception_does_not_kill_worker(stop_event):
 
 
 # --------------------------------------------------------------------------- #
-# 3. One-speaker discipline: second utterance waits for the first's window.   #
+# 3. One-speaker discipline: second utterance waits for the first's window,   #
+#    under every NOVA_ECHO_GATE policy (the policy is hearing-side only).     #
 # --------------------------------------------------------------------------- #
 
 
-def test_second_utterance_waits_for_first_gate_window(stop_event):
+@pytest.mark.parametrize("policy", [None, "off", "half-duplex", "nonsense"])
+def test_second_utterance_waits_for_first_gate_window(stop_event, monkeypatch, policy):
+    """One speaker at a time, under EVERY hearing policy.
+
+    ``NOVA_ECHO_GATE`` (t2) selects only what the HEARING leg does with the
+    window — overlapping playback mixes at the device (reachy-mini-cli 0.48.0
+    has no speaker arbitration), so the speaking leg's use of the gate is not
+    policy-selectable and must be identical in all four cases below.
+    """
+    if policy is None:
+        monkeypatch.delenv(ECHO_GATE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(ECHO_GATE_ENV, policy)
+
     gate = EchoGate(margin_s=0.05)
     poster = RecordingPoster()
     speaker = SonicSpeaker(gate, sample_rate=SAMPLE_RATE, poster=poster)
@@ -260,6 +274,39 @@ def test_second_utterance_waits_for_first_gate_window(stop_event):
         assert t_b - t_a >= 0.15
         # And B's own window is armed after it plays.
         assert gate.remaining() > 0.0
+    finally:
+        stop_event.set()
+        speaker.stop()
+
+
+@pytest.mark.parametrize("policy", [None, "off", "half-duplex"])
+def test_the_gate_is_armed_before_the_post_under_every_policy(
+    stop_event, monkeypatch, policy
+):
+    """The window opens BEFORE the upload, whatever the hearing leg does with it.
+
+    ``play_sound`` returns when playback is *triggered*, not when the sound has
+    left the speaker, so arming after the HTTP round trip would leave the
+    upload window ungated — and the speaking leg's one-at-a-time wait reads
+    exactly this window.
+    """
+    if policy is None:
+        monkeypatch.delenv(ECHO_GATE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(ECHO_GATE_ENV, policy)
+
+    gate = EchoGate(margin_s=0.05)
+    armed_at_post: list[bool] = []
+
+    def poster(base_url: str, wav_bytes: bytes, filename: str) -> None:
+        armed_at_post.append(gate.active)
+
+    speaker = SonicSpeaker(gate, sample_rate=SAMPLE_RATE, poster=poster)
+    speaker.start(stop_event)
+    try:
+        speak_utterance(speaker, [make_chunk(2400)])  # 0.1 s
+        assert wait_until(lambda: bool(armed_at_post))
+        assert armed_at_post == [True]
     finally:
         stop_event.set()
         speaker.stop()

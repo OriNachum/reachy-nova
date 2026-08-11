@@ -24,6 +24,8 @@ from __future__ import annotations
 import sys
 import types
 
+import pytest
+
 # Hardware-heavy or often-absent-on-dev-machines top-level packages.
 _HEAVY_OR_ABSENT_MODULES = ("reachy_mini", "nemo", "cv2", "boto3", "paho")
 
@@ -34,3 +36,15 @@ for _module_name in _HEAVY_OR_ABSENT_MODULES:
         __import__(_module_name)
     except ImportError:
         sys.modules[_module_name] = types.SimpleNamespace()  # type: ignore[assignment]
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_echo_gate_policy(monkeypatch):
+    """Never inherit the developer's own ``NOVA_ECHO_GATE`` (see ``gate.py``).
+
+    The hearing leg's suppression is env-selected, so a shell that exports the
+    policy would otherwise flip the DEFAULT under every test that does not set
+    it. Tests that care set it themselves — ``monkeypatch.setenv`` in the test
+    body still wins over this deletion.
+    """
+    monkeypatch.delenv("NOVA_ECHO_GATE", raising=False)

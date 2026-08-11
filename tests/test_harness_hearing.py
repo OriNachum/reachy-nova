@@ -1,4 +1,4 @@
-"""Audio-tee client + echo-safe half-duplex gate (task t7).
+"""Audio-tee client + the echo-gate POLICY (task t7; policy split in t2).
 
 Everything here runs against a **fake tee server**: a real ``AF_UNIX``
 ``SOCK_STREAM`` listener in ``tmp_path`` that speaks reachy-mini-cli 0.48.0's
@@ -19,8 +19,12 @@ Four properties are load-bearing and each has a test below:
    because an off-by-one there shifts the whole stream silently;
 3. ``samplerate: null`` (a cold media holder) is a NAMED drop plus a
    reconnect, never a guessed rate;
-4. while the echo gate is armed the mic chunks are dropped, counted, and
-   summarised in ONE line when the gate clears — not one line per chunk.
+4. the echo gate is read under a POLICY (``NOVA_ECHO_GATE``): under the
+   default ``off`` the mic keeps feeding Sonic while the robot speaks (that is
+   what barge-in needs, and the XVF3800's hardware AEC was verified active on
+   this capture path live on 2026-08-10), while under ``half-duplex`` the
+   chunks are dropped, counted, and summarised in ONE line when the gate
+   clears — not one line per chunk.
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ import numpy as np
 import pytest
 
 from reachy_nova.audio_pipeline import preprocess_mic_audio
+from reachy_nova.harness import gate as gate_mod
 from reachy_nova.harness import hearing
 from reachy_nova.harness.gate import EchoGate
 
@@ -464,8 +469,114 @@ def test_a_non_json_first_line_is_refused(tee_path: Path, caplog) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 4. The echo gate                                                             #
+# 4. The echo gate, under its POLICY (NOVA_ECHO_GATE — see gate.py)            #
 # --------------------------------------------------------------------------- #
+
+
+def test_the_default_hearing_policy_is_off(monkeypatch) -> None:
+    monkeypatch.delenv(gate_mod.ECHO_GATE_ENV, raising=False)
+    hear = hearing.TeeHearing(feed=lambda chunk: None, gate=EchoGate())
+    assert hear.echo_gate_policy == "off"
+    assert hear.suppresses_while_speaking is False
+
+
+def test_the_env_selects_the_half_duplex_policy(monkeypatch) -> None:
+    monkeypatch.setenv(gate_mod.ECHO_GATE_ENV, "half-duplex")
+    hear = hearing.TeeHearing(feed=lambda chunk: None, gate=EchoGate())
+    assert hear.echo_gate_policy == "half-duplex"
+    assert hear.suppresses_while_speaking is True
+
+
+def test_an_unrecognised_env_policy_falls_back_to_off(monkeypatch) -> None:
+    monkeypatch.setenv(gate_mod.ECHO_GATE_ENV, "sort-of-duplex")
+    hear = hearing.TeeHearing(feed=lambda chunk: None, gate=EchoGate())
+    assert hear.echo_gate_policy == "off"
+
+
+def test_the_constructor_argument_beats_the_env(monkeypatch) -> None:
+    monkeypatch.setenv(gate_mod.ECHO_GATE_ENV, "half-duplex")
+    hear = hearing.TeeHearing(
+        feed=lambda chunk: None, gate=EchoGate(), echo_gate_policy="off"
+    )
+    assert hear.echo_gate_policy == "off"
+
+
+def test_the_off_policy_keeps_feeding_while_the_gate_is_armed(
+    tee_path: Path, caplog
+) -> None:
+    """The default: the robot hears itself being spoken over — that IS barge-in.
+
+    The XVF3800's hardware AEC was verified active on this capture path live on
+    2026-08-10, so suppressing the mic for the whole playback window only made
+    the robot deaf while speaking.
+    """
+    caplog.set_level(logging.INFO, logger="nova.sensory")
+    gate = EchoGate(margin_s=0.0)
+    gate.arm_for(60.0)  # armed across the WHOLE burst
+
+    server = FakeTee(tee_path, payload=np.full(1600 * 5, 0.4, dtype=np.float32))
+    rec = Recorder()
+    hear, stop = start_hearing(
+        feed=rec,
+        gate=gate,
+        chunk_ms=100,
+        socket_path=tee_path,
+        target_sr=16000,
+        echo_gate_policy="off",
+    )
+    try:
+        assert wait_for(lambda: rec.count >= 5), f"only {rec.count} chunks reached Sonic"
+    finally:
+        stop.set()
+        hear.stop()
+        server.close()
+
+    assert gate.active, "the speaking window must still be open (speaking leg's job)"
+    assert hear.chunks_gated == 0
+    assert hear.chunks_fed >= 5
+    assert np.allclose(rec.chunks[0], 0.4)
+    # Nothing is being gated, so the hearing leg says nothing about the gate.
+    assert [m for m in hear_lines(caplog) if "event=gate" in m] == []
+
+
+def test_the_off_policy_is_what_an_unset_env_gives_the_reader(
+    tee_path: Path, monkeypatch
+) -> None:
+    """Same proof, but through the env default rather than an explicit argument."""
+    monkeypatch.delenv(gate_mod.ECHO_GATE_ENV, raising=False)
+    gate = EchoGate(margin_s=0.0)
+    gate.arm_for(60.0)
+    server = FakeTee(tee_path, payload=np.full(1600 * 3, 0.4, dtype=np.float32))
+    rec = Recorder()
+    hear, stop = start_hearing(
+        feed=rec, gate=gate, chunk_ms=100, socket_path=tee_path, target_sr=16000
+    )
+    try:
+        assert wait_for(lambda: rec.count >= 3), f"only {rec.count} chunks reached Sonic"
+    finally:
+        stop.set()
+        hear.stop()
+        server.close()
+    assert hear.chunks_gated == 0
+
+
+def test_half_duplex_from_the_env_suppresses_the_feed(tee_path: Path, monkeypatch) -> None:
+    """The opt-in policy is reachable by env alone — one flip, no code change."""
+    monkeypatch.setenv(gate_mod.ECHO_GATE_ENV, "half-duplex")
+    gate = EchoGate(margin_s=0.0)
+    gate.arm_for(60.0)
+    server = FakeTee(tee_path, payload=np.full(1600 * 3, 0.4, dtype=np.float32))
+    rec = Recorder()
+    hear, stop = start_hearing(
+        feed=rec, gate=gate, chunk_ms=100, socket_path=tee_path, target_sr=16000
+    )
+    try:
+        assert wait_for(lambda: hear.chunks_gated >= 3), f"gated {hear.chunks_gated}"
+        assert rec.count == 0, "half-duplex did not suppress the feed"
+    finally:
+        stop.set()
+        hear.stop()
+        server.close()
 
 
 def test_chunks_are_dropped_while_the_gate_is_armed_and_summarised_once(
@@ -478,7 +589,12 @@ def test_chunks_are_dropped_while_the_gate_is_armed_and_summarised_once(
     server = FakeTee(tee_path, payload=np.full(1600 * 5, 0.4, dtype=np.float32))
     rec = Recorder()
     hear, stop = start_hearing(
-        feed=rec, gate=gate, chunk_ms=100, socket_path=tee_path, target_sr=16000
+        feed=rec,
+        gate=gate,
+        chunk_ms=100,
+        socket_path=tee_path,
+        target_sr=16000,
+        echo_gate_policy="half-duplex",
     )
     try:
         assert wait_for(lambda: hear.chunks_gated >= 5), f"gated {hear.chunks_gated}"

@@ -1,4 +1,4 @@
-"""Audio-tee client — the harness's ear, with an echo-safe half-duplex gate.
+"""Audio-tee client — the harness's ear, with a policy-selected echo gate.
 
 The wireless Reachy Mini's microphone belongs to the reachy-mini-cli runtime,
 not to us. The runtime publishes what it hears on an ``AF_UNIX``
@@ -32,13 +32,27 @@ Four consequences shape everything below:
   resting state of a peripheral, not an error: reconnect with backoff, report
   it once (latched), never crash the thread.
 
-Half-duplex gate
+Echo-gate policy
 ----------------
-The wireless capture path has no verified hardware AEC, so while the robot is
-speaking the mic feed to Sonic is suppressed rather than echoed back at it
-(``gate.EchoGate``, armed by the speaking leg). A gate window costs exactly
-two log lines — one when it opens, one summarising the suppressed chunks when
-it clears — never one line per 100 ms chunk.
+The speaking leg arms a window around every playback (``gate.EchoGate``); what
+the EAR does with that window is a policy, ``NOVA_ECHO_GATE``
+(:func:`reachy_nova.harness.gate.resolve_policy`), resolved once at
+construction:
+
+* ``off`` — the DEFAULT. Chunks keep flowing to Sonic while the robot speaks.
+  On **2026-08-10** the XVF3800's hardware AEC was verified ACTIVE live on this
+  capture path (during playback the robot's own speaker barely registers on the
+  mic: human speech RMS ~0.09 against a ~0.002 floor), so the echo Sonic would
+  otherwise hear is already cancelled in hardware — and hearing WHILE speaking
+  is the precondition for barge-in, which cannot fire on a mic that is muted
+  for the whole utterance.
+* ``half-duplex`` — the opt-in for hardware whose AEC is absent or unproven
+  (and the documented rollback). Every chunk inside the window is dropped,
+  counted, and summarised in ONE line when the window clears; a gate window
+  costs exactly two log lines, never one per 100 ms chunk.
+
+The speaking leg's own use of the gate — one utterance at a time — is
+unaffected by this policy in either direction.
 """
 
 from __future__ import annotations
@@ -56,7 +70,7 @@ import numpy as np
 from reachy_nova import sensory_log
 from reachy_nova.audio_pipeline import preprocess_mic_audio
 from reachy_nova.harness import statedir
-from reachy_nova.harness.gate import EchoGate
+from reachy_nova.harness.gate import POLICY_HALF_DUPLEX, EchoGate, resolve_policy
 
 logger = logging.getLogger(__name__)
 
@@ -137,8 +151,17 @@ class TeeHearing:
         is ``sonic.feed_audio`` in the harness. An exception from it is a
         NAMED drop, never a dead reader thread.
     gate:
-        The half-duplex :class:`~reachy_nova.harness.gate.EchoGate`. While it
-        is active every chunk is dropped (counted, summarised once).
+        The speaking window (:class:`~reachy_nova.harness.gate.EchoGate`),
+        armed by the speaking leg. What this reader does with it is
+        ``echo_gate_policy``'s business.
+    echo_gate_policy:
+        ``"off"`` (default) or ``"half-duplex"``; resolved from
+        ``$NOVA_ECHO_GATE`` when not given, and anything unrecognised resolves
+        to ``"off"``. Under ``half-duplex`` every chunk landing inside the
+        window is dropped (counted, summarised once); under ``off`` the gate is
+        not consulted at all and the mic keeps feeding Sonic while the robot
+        speaks — see the module docstring for the 2026-08-10 AEC verification
+        that makes that the default.
     chunk_ms:
         Chunk size in milliseconds of AUDIO, computed at the header's
         announced rate — so a 100 ms chunk stays 100 ms whatever the mic runs
@@ -159,6 +182,7 @@ class TeeHearing:
         socket_path: Path | str | None = None,
         target_sr: int = DEFAULT_TARGET_SR,
         *,
+        echo_gate_policy: str | None = None,
         recv_bytes: int = DEFAULT_RECV_BYTES,
         connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
         read_timeout_s: float = DEFAULT_READ_TIMEOUT_S,
@@ -168,6 +192,9 @@ class TeeHearing:
     ) -> None:
         self.feed = feed
         self.gate = gate
+        #: Resolved ONCE, here: the reader thread never re-reads the process
+        #: environment mid-flight, so the policy cannot change under a session.
+        self.echo_gate_policy = resolve_policy(echo_gate_policy)
         self.chunk_ms = int(chunk_ms)
         self.target_sr = int(target_sr)
         self.socket_path = (
@@ -203,6 +230,17 @@ class TeeHearing:
         self._gate_suppressed = 0
         self._gate_suppressed_ms = 0.0
 
+    # -- policy ------------------------------------------------------------
+
+    @property
+    def suppresses_while_speaking(self) -> bool:
+        """Does this reader drop mic chunks inside a playback window?
+
+        True only under ``half-duplex``. The status surface asks this rather
+        than string-matching the policy name.
+        """
+        return self.echo_gate_policy == POLICY_HALF_DUPLEX
+
     # -- lifecycle ---------------------------------------------------------
 
     def start(self, stop_event: threading.Event) -> None:
@@ -227,6 +265,18 @@ class TeeHearing:
     # -- the reader loop ---------------------------------------------------
 
     def _run(self) -> None:
+        # Say ONCE which ear policy is live: "why did the robot not hear me
+        # while it was talking" is otherwise unanswerable from the logs.
+        self._sense(
+            "policy",
+            f"echo gate policy={self.echo_gate_policy} ("
+            + (
+                "the mic feed is dropped while the robot speaks"
+                if self.suppresses_while_speaking
+                else "hearing while speaking; hardware AEC verified live 2026-08-10"
+            )
+            + ")",
+        )
         backoff = self._backoff_min_s
         while not self._should_stop():
             sock = self._connect()
@@ -403,10 +453,11 @@ class TeeHearing:
         while len(pending) >= chunk_bytes:
             raw = pending[:chunk_bytes]
             del pending[:chunk_bytes]
-            if self.gate.active:
-                self._suppress(chunk_bytes, rate)
-                continue
-            self._flush_gate_summary()
+            if self.suppresses_while_speaking:
+                if self.gate.active:
+                    self._suppress(chunk_bytes, rate)
+                    continue
+                self._flush_gate_summary()
             samples = np.frombuffer(raw, dtype=TEE_SAMPLE_DTYPE).astype(np.float32)
             chunk = preprocess_mic_audio(samples, rate, self.target_sr)
             try:
