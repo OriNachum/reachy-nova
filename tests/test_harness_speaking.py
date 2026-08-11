@@ -455,3 +455,45 @@ def test_preempt_survives_a_stopper_that_raises():
     gate.arm_for(5.0)
     speaker.preempt()  # must not raise
     assert not gate.active
+
+
+def test_an_utterance_already_in_the_workers_hands_is_dropped_by_preempt(stop_event):
+    """The live 23:15 race: preempt purged the queue but the worker had already
+    dequeued the utterance and was waiting on the gate window — clearing the
+    gate RELEASED it to play right after the cut. The epoch check drops it."""
+    gate = EchoGate(margin_s=0.0)
+    poster = RecordingPoster()
+    speaker = SonicSpeaker(gate=gate, poster=poster, stopper=lambda base: None)
+    speaker.start(stop_event)
+    try:
+        gate.arm_for(0.6)  # a previous playback window holds the worker
+        speaker._queue.put(np.zeros(2400, dtype=np.float32))
+        time.sleep(0.15)  # worker dequeues and sits in the gate wait
+        speaker.preempt()
+        time.sleep(0.8)  # well past the original window
+        assert poster.calls == []
+        assert speaker.utterances_played == 0
+    finally:
+        speaker.stop()
+
+
+def test_a_preempt_landing_during_the_post_cuts_the_sound_again(stop_event):
+    gate = EchoGate(margin_s=0.0)
+    stops: list[str] = []
+
+    speaker = SonicSpeaker(gate=gate, poster=None, stopper=stops.append)
+
+    def preempting_poster(base_url, wav_bytes, filename):
+        speaker.preempt()  # the barge-in lands mid-upload
+
+    speaker.poster = preempting_poster
+    speaker.start(stop_event)
+    try:
+        speaker._queue.put(np.zeros(2400, dtype=np.float32))
+        time.sleep(0.4)
+        # one stop from the preempt itself + one from the post-post epoch check
+        assert len(stops) == 2
+        assert speaker.utterances_played == 0
+        assert not gate.active
+    finally:
+        speaker.stop()

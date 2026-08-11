@@ -195,6 +195,14 @@ class SonicSpeaker:
         self.utterances_played = 0
         self.playback_failures = 0
 
+        #: Bumped by every preempt(). The worker snapshots it when it dequeues
+        #: an utterance and re-checks before (and after) posting: an utterance
+        #: that was in the worker's hands when the barge-in landed must never
+        #: play — purging the queue alone misses it, and clearing the gate
+        #: actually RELEASES it (observed live 2026-08-11 23:15: 'preempt ...
+        #: stopped=True' followed by 'played duration=5.76s' the same second).
+        self._preempt_epoch = 0
+
         self._queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=queue_size)
         self._buffer: list[np.ndarray] = []
         self._buffer_samples = 0
@@ -322,6 +330,7 @@ class SonicSpeaker:
                 self._queue.task_done()
 
     def _play_one(self, samples: np.ndarray) -> None:
+        epoch = self._preempt_epoch
         # One-speaker discipline: wait out any previous playback window.
         while not self._stopping():
             remaining = self.gate.remaining()
@@ -329,6 +338,12 @@ class SonicSpeaker:
                 break
             self._local_stop.wait(min(remaining, _POLL_S))
         if self._stopping():
+            return
+        if self._preempt_epoch != epoch:
+            # A barge-in landed while this utterance sat in the worker's hands.
+            sensory_log.stage(
+                STAGE_SPEAK, SOURCE, "play", "dropped reason=preempted (stale utterance)"
+            )
             return
 
         duration_s = len(samples) / self.sample_rate
@@ -344,6 +359,18 @@ class SonicSpeaker:
         except Exception as err:
             self._mouth_loss(duration_s, err)
             return
+        if self._preempt_epoch != epoch:
+            # The barge-in landed during the upload/play round trip: the sound
+            # just started against the user's interruption. Cut it again.
+            try:
+                self.stopper(self.base_url)
+            except Exception:  # noqa: BLE001 - best-effort
+                pass
+            self.gate.clear()
+            sensory_log.stage(
+                STAGE_SPEAK, SOURCE, "play", "dropped reason=preempted (cut after post)"
+            )
+            return
         self.utterances_played += 1
         sensory_log.stage(
             STAGE_SPEAK, SOURCE, "play", f"played duration={duration_s:.2f}s"
@@ -358,6 +385,7 @@ class SonicSpeaker:
         anything not yet playing must never play. The stop is best-effort: a
         daemon that cannot stop still gets its queue purged and gate cleared.
         """
+        self._preempt_epoch += 1
         with self._buffer_lock:
             self._buffer = []
             self._buffer_samples = 0
