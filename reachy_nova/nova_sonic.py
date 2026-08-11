@@ -32,6 +32,30 @@ OUTPUT_SAMPLE_RATE = 24000
 CHUNK_DURATION_MS = 100
 INPUT_CHUNK_SIZE = int(INPUT_SAMPLE_RATE * CHUNK_DURATION_MS / 1000)
 
+# Resilience watchdogs (see _check_clock_step / _check_response_liveness).
+# The robot has no RTC: it can boot with a stale clock and have NTP step time
+# forward by hours while a Bedrock stream is already open.  A stepped clock
+# turns that stream into a zombie — sends keep succeeding, no response event
+# ever comes back, and nothing raises — so it must be detected, not waited on.
+CLOCK_STEP_THRESHOLD_S = 60.0
+DEFAULT_LIVENESS_S = 180.0
+
+
+def _liveness_window() -> float:
+    """Seconds of response silence (with input flowing) that means "zombie".
+
+    Read at call time so ``load_dotenv()`` order never matters; a missing,
+    unparseable or non-positive ``NOVA_SONIC_LIVENESS_S`` falls back to the
+    default rather than disabling the watchdog.
+    """
+    import os
+
+    try:
+        value = float(os.environ.get("NOVA_SONIC_LIVENESS_S", ""))
+    except (TypeError, ValueError):
+        return DEFAULT_LIVENESS_S
+    return value if value > 0 else DEFAULT_LIVENESS_S
+
 
 class NovaSonic:
     """Manages a bidirectional voice conversation with Nova Sonic."""
@@ -93,6 +117,16 @@ class NovaSonic:
         # hang, lost contentEnd) must not pin the speaking guard forever.
         self._last_audio_time = 0.0
 
+        # Resilience watchdog bookkeeping — armed once per session start by
+        # _arm_watchdogs(), so a forced restart always re-arms both of them.
+        self._session_clock_offset: float | None = None
+        self._clock_step_seen = False
+        self._last_response_mono: float | None = None
+        self._input_since_response = False
+        self._liveness_stall_seen = False
+        # Why the current restart was forced (None = the stream simply died).
+        self._forced_restart_reason: str | None = None
+
         self.state = "idle"  # idle, listening, thinking, speaking
         self.last_user_text = ""
         self.last_assistant_text = ""
@@ -104,6 +138,76 @@ class NovaSonic:
                 self.on_state_change(state)
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Resilience watchdogs
+    # ------------------------------------------------------------------
+
+    def _arm_watchdogs(self, wall: float, mono: float) -> None:
+        """Capture the baselines both resilience watchdogs compare against.
+
+        Called once per session start (including every restart), so each fresh
+        session gets a fresh clock baseline and a fresh liveness deadline, and
+        a cause that already fired can fire again on a later session.
+        """
+        self._session_clock_offset = wall - mono
+        self._clock_step_seen = False
+        self._last_response_mono = mono
+        self._input_since_response = False
+        self._liveness_stall_seen = False
+
+    def _note_input_sent(self) -> None:
+        """Record that we pushed something (audio or text) into the stream."""
+        self._input_since_response = True
+
+    def _note_response_event(self, mono: float | None = None) -> None:
+        """Record a sign of life from Bedrock — resets the liveness deadline."""
+        self._last_response_mono = time.monotonic() if mono is None else mono
+        self._input_since_response = False
+
+    def _check_clock_step(self, wall: float, mono: float) -> bool:
+        """True (once) when the wall clock was stepped under a live session.
+
+        ``time.time() - time.monotonic()`` is constant while time merely
+        passes; it only moves when something *sets* the wall clock (NTP on a
+        Pi with no RTC).  The open Bedrock stream does not survive that, so
+        the caller must restart the session.
+        """
+        if self._clock_step_seen or self._session_clock_offset is None:
+            return False
+        delta = (wall - mono) - self._session_clock_offset
+        if abs(delta) <= CLOCK_STEP_THRESHOLD_S:
+            return False
+        self._clock_step_seen = True
+        logger.warning(
+            f"Clock step detected: wall clock moved {delta:+.0f}s relative to "
+            f"monotonic since session start (threshold {CLOCK_STEP_THRESHOLD_S:.0f}s) "
+            "— the open Bedrock stream is likely a zombie, forcing a restart"
+        )
+        return True
+
+    def _check_response_liveness(self, mono: float) -> bool:
+        """True (once) when input keeps flowing but Bedrock has gone silent.
+
+        Silence alone is normal — a quiet room sends nothing and gets nothing
+        back.  Silence *while we are still sending* is the zombie signature
+        from the clock-step incident: injects accepted, zero response events,
+        no error ever raised.
+        """
+        if self._liveness_stall_seen or not self._input_since_response:
+            return False
+        if self._last_response_mono is None:
+            return False
+        silent_for = mono - self._last_response_mono
+        window = _liveness_window()
+        if silent_for <= window:
+            return False
+        self._liveness_stall_seen = True
+        logger.warning(
+            f"Response liveness watchdog: input sent but no Bedrock response event "
+            f"for {silent_for:.0f}s (limit {window:.0f}s) — forcing a session restart"
+        )
+        return True
 
     def _should_interrupt(self, user_text: str, assistant_text: str) -> bool:
         """Ask Nova 2 Lite whether the user's speech warrants interrupting the robot."""
@@ -272,6 +376,9 @@ class NovaSonic:
         # Throttle injects — new session needs a quiet-start period.
         self._last_inject_time = time.time()
 
+        # Arm the clock-step / response-liveness watchdogs against THIS session.
+        self._arm_watchdogs(time.time(), time.monotonic())
+
         # Session fully configured — now accept audio/inject traffic
         self._active = True
         self._set_state("listening")
@@ -289,6 +396,7 @@ class NovaSonic:
                         consecutive_errors = 0
                         continue
                     consecutive_errors = 0
+                    self._note_response_event()  # sign of life — liveness OK
 
                     data = json.loads(result.value.bytes_.decode("utf-8"))
                     event = data.get("event", {})
@@ -440,6 +548,20 @@ class NovaSonic:
             try:
                 # Wait until stop requested OR response loop dies
                 while not self._should_stop(stop_event) and not response_task.done():
+                    # Resilience watchdogs: a stepped wall clock or a stream
+                    # that swallows input without ever answering both leave a
+                    # perfectly healthy-looking task behind, so neither shows
+                    # up as response_task.done(). Break out and let the normal
+                    # restart path below rebuild the session from scratch.
+                    if self._check_clock_step(time.time(), time.monotonic()):
+                        self._forced_restart_reason = "Clock step forced a restart"
+                        break
+                    if self._check_response_liveness(time.monotonic()):
+                        self._forced_restart_reason = (
+                            "Response liveness stall forced a restart"
+                        )
+                        break
+
                     # Speaking watchdog: a stalled generation (no audio for 10s
                     # while _speaking) would otherwise pin the inject guard
                     # forever and hold the speaker's utterance buffer hostage.
@@ -467,10 +589,14 @@ class NovaSonic:
             if self._should_stop(stop_event):
                 break
 
-            # Stream died — prepare for restart
+            # Stream died (or a watchdog forced it) — prepare for restart.
+            # Either way the restart is CLEAN: fresh client, fresh UUIDs,
+            # system prompt only. No conversation recap is replayed.
             self._session_gen += 1  # invalidate any queued coroutines
             self._set_state("idle")
-            logger.warning("Bedrock stream died — restarting session in 3s")
+            reason = self._forced_restart_reason or "Bedrock stream died"
+            self._forced_restart_reason = None
+            logger.warning(f"{reason} — restarting session in 3s")
 
             # Force fresh client — old client may hold stale connection state
             self._client = None
@@ -554,6 +680,7 @@ class NovaSonic:
             asyncio.run_coroutine_threadsafe(
                 self._send_audio_chunk(pcm), self._loop
             )
+            self._note_input_sent()  # liveness watchdog: we pushed input
         except Exception as e:
             logger.warning(f"feed_audio scheduling failed: {e}")
 
@@ -627,6 +754,7 @@ class NovaSonic:
 
         try:
             asyncio.run_coroutine_threadsafe(_inject(), self._loop)
+            self._note_input_sent()  # liveness watchdog: we pushed input
         except Exception as e:
             logger.warning(f"inject_text scheduling failed: {e}")
 
