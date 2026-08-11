@@ -39,6 +39,23 @@ def browser_surface() -> str:
     return SURFACE_AGENTCORE if value == SURFACE_AGENTCORE else SURFACE_LOCAL
 
 
+#: Per-act browser actuation budget (``NOVA_ACT_MAX_STEPS``, default the SDK's
+#: own 30). The old hard-coded 15 failed a plain Google weather search live
+#: ("Exceeded max steps 15 without return", 2026-08-12 00:06).
+MAX_STEPS_ENV = "NOVA_ACT_MAX_STEPS"
+DEFAULT_MAX_STEPS = 30
+
+
+def act_max_steps() -> int:
+    """The per-act step budget, resolved at call time; bad values fall back."""
+    raw = os.environ.get(MAX_STEPS_ENV, "")
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_STEPS
+    return value if value > 0 else DEFAULT_MAX_STEPS
+
+
 def act_enabled() -> bool:
     """Whether Nova Act browser automation is enabled.
 
@@ -212,7 +229,7 @@ class NovaBrowser:
                 # act_get, not act: a voice browse request is almost always a
                 # question, and in this SDK the model's answer only comes back
                 # through act_get's parsed_response (ActResult carries none).
-                return nova.act_get(instruction, max_steps=15)
+                return nova.act_get(instruction, max_steps=act_max_steps())
 
     def _execute_task(self, task: dict) -> str:
         """Execute a single browser task."""
@@ -247,7 +264,7 @@ class NovaBrowser:
                     self._nova.go_to_url(url)
 
                 self._emit_progress(f"Working on: {instruction}...")
-                result = self._nova.act(instruction, max_steps=15)
+                result = self._nova.act(instruction, max_steps=act_max_steps())
 
             self._emit_progress("Done! Reading results...")
             self._capture_screenshot()

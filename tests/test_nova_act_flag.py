@@ -228,3 +228,15 @@ def import_forbidden_absent():
     import sys
 
     return "nova_act" not in sys.modules and "playwright" not in sys.modules
+
+
+def test_act_max_steps_default_and_env(monkeypatch):
+    from reachy_nova import nova_browser
+
+    monkeypatch.delenv("NOVA_ACT_MAX_STEPS", raising=False)
+    assert nova_browser.act_max_steps() == 30
+    monkeypatch.setenv("NOVA_ACT_MAX_STEPS", "45")
+    assert nova_browser.act_max_steps() == 45
+    for bad in ("0", "-3", "many"):
+        monkeypatch.setenv("NOVA_ACT_MAX_STEPS", bad)
+        assert nova_browser.act_max_steps() == 30
