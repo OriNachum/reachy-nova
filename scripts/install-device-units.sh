@@ -67,7 +67,15 @@ print(unit.demo_mode_unit_text(python='$CLI_PYTHON'), end='')
 " > "$UNIT_DIR/reachy-demo-mode.service"
 
 log "installing reachy-nova-harness.service via the existing install-unit CLI"
-"$NOVA_PYTHON" -m reachy_nova.harness install-unit
+# --env-file is load-bearing on the device: the harness reads AWS credentials
+# and model config from the repo's .env, not from environment.d drop-ins.
+NOVA_ENV_FILE="${NOVA_ENV_FILE:-$HOME/git/reachy-nova/.env}"
+if [ -f "$NOVA_ENV_FILE" ]; then
+  "$NOVA_PYTHON" -m reachy_nova.harness install-unit --env-file "$NOVA_ENV_FILE"
+else
+  warn "no env file at $NOVA_ENV_FILE — installing without --env-file"
+  "$NOVA_PYTHON" -m reachy_nova.harness install-unit
+fi
 
 log "systemctl --user daemon-reload"
 systemctl --user daemon-reload
