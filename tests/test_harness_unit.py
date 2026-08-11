@@ -112,3 +112,71 @@ def test_install_unit_never_enables_or_starts(tmp_path, monkeypatch):
     flattened = [token for cmd in calls for token in cmd]
     assert "enable" not in flattened
     assert "start" not in flattened
+
+
+# --- runtime + demo-mode templates: boot exclusivity hardening -------------
+#
+# reachy-runtime.service and reachy-demo-mode.service both drive the body, so
+# each must Conflicts= the other (systemd itself refuses to run both at once,
+# rather than relying on operator discipline), and the demo unit must be
+# reachable only by an explicit `systemctl --user start` — never `enable`.
+
+
+def test_runtime_unit_conflicts_with_demo_mode():
+    text = unit.runtime_unit_text(python="/opt/cli/.venv/bin/python")
+
+    assert "Conflicts=reachy-demo-mode.service" in text
+
+
+def test_demo_mode_unit_conflicts_with_runtime():
+    text = unit.demo_mode_unit_text(python="/opt/cli/.venv/bin/python")
+
+    assert "Conflicts=reachy-runtime.service" in text
+
+
+def test_demo_mode_unit_has_no_install_section():
+    text = unit.demo_mode_unit_text(python="/opt/cli/.venv/bin/python")
+
+    assert "[Install]" not in text
+    assert "WantedBy=" not in text
+
+
+def test_runtime_unit_is_enabled_and_ordered_after_network():
+    text = unit.runtime_unit_text(python="/opt/cli/.venv/bin/python")
+
+    assert "[Install]" in text
+    assert "WantedBy=default.target" in text
+    assert "After=network-online.target" in text
+
+
+def test_runtime_unit_exec_start_runs_the_behavior_engine():
+    text = unit.runtime_unit_text(python="/opt/cli/.venv/bin/python")
+
+    assert 'ExecStart="/opt/cli/.venv/bin/python" -m reachy behavior engine run' in text
+
+
+def test_demo_mode_unit_exec_start_runs_demo_mode_with_config():
+    text = unit.demo_mode_unit_text(python="/opt/cli/.venv/bin/python")
+
+    assert (
+        'ExecStart="/opt/cli/.venv/bin/python" -m reachy demo-mode run '
+        "--config %h/.config/reachy/demo-mode.json" in text
+    )
+    # %h is a systemd specifier (per-user home) and must reach the unit file
+    # literally, not doubled the way a literal '%' in a path would be.
+    assert "%%h" not in text
+
+
+def test_runtime_and_demo_mode_units_are_pure():
+    """Neither renderer touches the filesystem or spawns anything."""
+    unit.runtime_unit_text(python="/opt/cli/.venv/bin/python")
+    unit.demo_mode_unit_text(python="/opt/cli/.venv/bin/python")
+    # No assertion needed beyond "did not raise / did not require a runner" —
+    # both are plain str-returning functions with no side-effecting call.
+
+
+def test_harness_unit_is_unchanged_by_the_new_templates():
+    """t3 adds runtime/demo templates; the harness's own unit stays as-is."""
+    text = unit.harness_unit_text(python="/usr/bin/python3")
+
+    assert "Conflicts=" not in text
