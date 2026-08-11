@@ -50,12 +50,13 @@ import json
 import os
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from reachy_nova import sensory_log
 from reachy_nova.harness import statedir
 from reachy_nova.harness.rules_overlay import RuleRefused, upsert_rule
+from reachy_nova.nova_browser import act_enabled
 
 # --------------------------------------------------------------------------- #
 # Names + constants                                                           #
@@ -67,9 +68,13 @@ SET_MODE = "set_mode"
 SET_INHIBITION = "set_inhibition"
 GOTO = "goto"
 CREATE_RULE = "create_rule"
+BROWSE = "browse"
 
-#: The harness's ENTIRE action set, in publication order. A seventh tool is a
-#: deliberate widening of the blast radius, never an incidental one.
+#: The harness's ENTIRE action set, in publication order. Each addition past
+#: the original six is a deliberate widening of the blast radius, never an
+#: incidental one — ``browse`` (task t4) is the first: it drives
+#: :class:`~reachy_nova.nova_browser.NovaBrowser`, not the intents spool, and
+#: stays refused whenever ``NOVA_ACT_ENABLED`` is off.
 ACTION_SET: tuple[str, ...] = (
     RUN_BEHAVIOR,
     DECLARE_GOAL,
@@ -77,6 +82,7 @@ ACTION_SET: tuple[str, ...] = (
     SET_INHIBITION,
     GOTO,
     CREATE_RULE,
+    BROWSE,
 )
 
 #: Seconds a tool call waits for the engine to confirm before degrading.
@@ -104,6 +110,16 @@ _GOTO_FIELDS = frozenset({"label", "head", "antennas", "body_yaw", "duration", "
 #: action the voice model took.
 SENSE_STAGE = "act"
 SENSE_SOURCE = "nova"
+
+#: Refusal reason when ``browse`` is called with Nova Act off (the default).
+#: Named so the model can tell "disabled" apart from a bad-argument refusal.
+BROWSE_DISABLED_REASON = (
+    "browsing is disabled — set NOVA_ACT_ENABLED=1 to enable Nova Act browser automation"
+)
+
+#: Refusal reason when ``browse`` is called before a :class:`NovaBrowser`
+#: handle has been wired in (flag on, but ``IntentTools`` built without one).
+BROWSE_NOT_WIRED_REASON = "browser automation is enabled but not wired up yet"
 
 
 class ToolRefused(ValueError):
@@ -310,6 +326,26 @@ TOOL_SPECS: list[dict] = [
             "required": ["id", "when", "run"],
         },
     ),
+    _spec(
+        BROWSE,
+        "Browse the web: give it a natural-language task and, optionally, a page "
+        "to start from, and it works a browser to do it in the background while "
+        "you keep talking. Only available when browsing is enabled.",
+        {
+            "type": "object",
+            "properties": {
+                "instruction": {
+                    "type": "string",
+                    "description": "Natural-language task for the browser to carry out.",
+                },
+                "url": {
+                    "type": "string",
+                    "description": "Optional starting page. Omit to start from the default.",
+                },
+            },
+            "required": ["instruction"],
+        },
+    ),
 ]
 
 
@@ -478,10 +514,22 @@ class IntentTools:
         commands_dir: Path | str | None = None,
         results_dir: Path | str | None = None,
         await_timeout: float = DEFAULT_AWAIT_TIMEOUT,
+        browser: object | None = None,
+        on_browse_progress: Callable[[str], None] | None = None,
     ) -> None:
         self._commands_dir = Path(commands_dir) if commands_dir is not None else None
         self._results_dir = Path(results_dir) if results_dir is not None else None
         self.await_timeout = float(await_timeout)
+        # ``browse`` (task t4) drives a NovaBrowser handle directly rather than
+        # the intents spool — that handle is injected here (tests pass a fake;
+        # production wiring, when act_enabled(), happens in app.py). Wiring the
+        # progress callback here — rather than on every ``browse`` call — keeps
+        # it a one-time hookup, matching how NovaBrowser's other callbacks are
+        # set once at construction.
+        self._browser = browser
+        self._on_browse_progress = on_browse_progress
+        if browser is not None and on_browse_progress is not None:
+            browser.on_progress = on_browse_progress
 
     # -- paths ------------------------------------------------------------- #
 
@@ -565,6 +613,8 @@ class IntentTools:
             raise ToolRefused(f"arguments for {tool_name!r} must be an object (got {params!r})")
         if tool_name == CREATE_RULE:
             return self._create_rule(params)
+        if tool_name == BROWSE:
+            return self._browse(params)
         return self.submit_and_await(_BUILDERS[tool_name](params))
 
     def _create_rule(self, params: Mapping) -> dict:
@@ -588,6 +638,33 @@ class IntentTools:
             result["ok"] = False
             result["error"] = f"{verdict} — the previously loaded rules stay active"
         return result
+
+    def _browse(self, params: Mapping) -> dict:
+        """``browse`` — hand a natural-language task to :class:`NovaBrowser`.
+
+        Not spool-backed: unlike the other five tools this drives a component
+        living in THIS process (Nova's own browser automation), not the
+        Wireless behavior engine, so there is no command file to write.
+
+        Refused — before ever touching ``self._browser`` — when
+        :func:`~reachy_nova.nova_browser.act_enabled` is off (the default; see
+        module docstring) or when no browser handle was wired in. Both are
+        pre-flight :class:`ToolRefused`, so neither imports ``nova_act`` or
+        ``playwright``: that stays entirely inside ``NovaBrowser`` itself, on
+        its own enabled-only code paths.
+        """
+        instruction = params.get("instruction")
+        if not isinstance(instruction, str) or not instruction.strip():
+            raise ToolRefused(f"'instruction' must be a non-empty string (got {instruction!r})")
+        url = params.get("url")
+        if url is not None and not isinstance(url, str):
+            raise ToolRefused(f"'url' must be a string or omitted (got {url!r})")
+        if not act_enabled():
+            raise ToolRefused(BROWSE_DISABLED_REASON)
+        if self._browser is None:
+            raise ToolRefused(BROWSE_NOT_WIRED_REASON)
+        self._browser.queue_task(instruction, url)
+        return {"ok": True, "queued": True, "instruction": instruction, "url": url}
 
 
 # --------------------------------------------------------------------------- #
