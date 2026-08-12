@@ -204,3 +204,90 @@ suggestion in
   Omni describes a shown object, a spoken request creates a standing rule that
   still fires after `reachy-nova-harness stop`; (3) pull wifi mid-conversation →
   runtime continues breathing/reacting, harness reconnects when back.
+
+### Device bring-up record (2026-08-10, executed over ssh pollen@192.168.1.162)
+
+- **Migration baseline (t1)**: reachy_nova `5f5c3a9` (spec/plan commit, branch
+  `wireless-harness` forked from it); reachy-mini-cli on-device was a stale
+  **0.29.0 pip install** over a `30ef881` (v0.47.0) checkout — the venv, not
+  the checkout, is what runs. On-device unpushed work preserved as branch
+  `raspberry-pi-fixes` (`be59d7c`, pushed to origin from spark; the device has
+  no GitHub auth).
+- **CLI upgrade**: checkout pulled to `8238c1a` (v0.48.0), `ensurepip` +
+  `pip install -e .` into its venv → `reachy-mini-cli 0.48.0`.
+- **Broker**: `mosquitto` installed via apt, `/etc/mosquitto/conf.d/local-only.conf`
+  = `listener 1883 127.0.0.1` + `allow_anonymous true`; enabled at boot;
+  verified `ss -tlnp` shows `127.0.0.1:1883` only.
+- **Engine probe** (before cutover): demo-mode stopped, foreground
+  `behavior engine run --max-ticks 600` → 600 ticks clean, `feel-alive`
+  owning head/antennas/body_yaw, live DoA on the bus, tee socket created,
+  retained `reachy/state/*` tree + `reachy/state/online true` published.
+- **Cutover**: `reachy-runtime.service` **hand-authored** (upstream
+  `units.py` text minus `Requires=reachy-daemon.service` — ReachyMiniOS runs
+  the SDK daemon as the system service `reachy-mini-daemon.service` on :8000,
+  so the CLI's user daemon unit would double-start it; deviation to file
+  upstream). `demo-mode` disabled, `runtime` enabled; heartbeat age 0.5s.
+  Unit backups in `~/unit-backups/`. Rollback = disable runtime, enable
+  demo-mode (unit file preserved).
+- **Runtime restart drill**: `systemctl --user restart reachy-runtime` →
+  active again with tee socket rebound and retained `online true` within 6s.
+- **Hardening P0**: on-device `.env` now `-rw-------` (chmod 600).
+- **Harness deps**: robot's reachy-nova venv is editable against
+  `~/git/reachy-nova` (branch switch = deploy);
+  `aws_sdk_bedrock_runtime`/paho/dotenv/yaml/numpy import clean.
+
+### Live acceptance record (2026-08-10 evening, harness deployed on-robot)
+
+- **Attach**: every component start/attach is one `[SENSE stage=…]` journald
+  line: tee `header accepted (f32le rate=16000)`, bus `connect … rc=Success`,
+  `runtime-online`, `engine live`, `harness up pid=… components=4`.
+- **Hear (human)**: Ori spoke at the robot → `[SENSE stage=hear event=transcript]
+  heard '…'` lines and an audible conversational reply. Mic RMS for close
+  speech ≈0.09 vs ≈0.002 room floor.
+- **Echo safety**: robot-speaker audio barely registers on the tee (XVF3800
+  hardware AEC IS active on the wireless capture path — resolves parked v6)
+  AND the software half-duplex gate arms per playback (`echo gate armed …
+  suppressed 68 chunks (6800 ms)`); gate now arms *before* the HTTP post after
+  a live echo-loop incident (Nova conversed with its own tail).
+- **Speak**: Sonic replies play through the daemon HTTP route (`queued
+  duration=6.44s` → `played`); playback audible in the room (user-confirmed).
+- **Act**: a live Sonic tool call crossed the intents spool and the ENGINE
+  answered: `set_inhibition refused reason=unknown behavior 'look-toward-sound'
+  (…have: feel-alive, pet-reaction, orient-to-sound, …)` — typed refusal with
+  the real catalog, returned to the model as the tool result.
+- **Read**: `mosquitto_pub` of a `rule/fire` event → nervous-system verdict →
+  `inject … priority=NORMAL urgency=NOW` → spoken reply about the reflex.
+- **Robot-to-robot**: Nova transcribed the *local* (USB) unit's embody voice —
+  cross-unit conversation observed unprompted.
+- **Runtime restart under live harness (h15)**: `runtime-offline` →
+  `tee-unavailable` → `runtime-online` → `reconnected … header accepted`,
+  same harness process, within ~8s. PASS.
+- **Reboot survival**: full power cycle → runtime + harness + mosquitto all
+  return unattended (linger), motors re-enabled by the media-client patch,
+  Sonic session re-established. PASS.
+- **Stalled-generation guard**: live sessions showed Bedrock generations that
+  stop streaming audio without a terminal `contentEnd` (duplicate
+  speculative/final texts); `_speaking` pinned forever. A 4s speaking watchdog
+  now clears the stuck state (`nova_sonic.py`), after which the buffered
+  utterance flushes and plays.
+- **KNOWN HARDWARE BLOCKER (outside harness scope)**: head/body motors do not
+  move — antennas only. Verified below every layer of ours: engine-confirmed
+  gotos, raw `reachy_mini` SDK (`goto_target`, runtime stopped), AND the
+  daemon's own HTTP `/api/move/goto` all produce zero motion; SDK goto hangs
+  on the daemon motion service. Daemon backend never reports alive
+  (`ready: false`, `last_alive: null`) despite a 49Hz motor-controller loop,
+  with serial errors on `body_rotation` (id 10) and `stewart_6` (id 16).
+  Survives daemon restart AND full power cycle. 2026-08-11 refinement: the
+  head/body motors are physically limp (no holding torque — Ori's
+  observation) while the antennas hold and animate, and the unit DID move
+  fully before (with the old app and with demo-mode) — so this is not
+  shipped-broken hardware and not today's software: prime suspect is a loose
+  head/body motor-chain connection (exactly the ids throwing comm errors).
+  Being verified physically.
+- **Upstream findings for reachy-mini-cli** (branch `wireless-motor-enable`
+  pushed): (1) wireless daemon boots `motor_control_mode=disabled` — the CLI
+  never calls `enable_motors()`; patched best-effort in `HeldMediaClient`
+  (+ the sdk_transport media session). (2) `service enable runtime` would
+  double-start the SDK daemon on ReachyMiniOS (the OS owns it as
+  `reachy-mini-daemon.service`); the deployed `reachy-runtime.service` is
+  hand-authored without `Requires=reachy-daemon.service`.

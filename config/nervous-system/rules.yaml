@@ -153,6 +153,25 @@ rules:
     llm_evaluate: false
     inject_template: "Things you know: {context}"
 
+  memory/context:
+    # The harness memory leg (reachy_nova/harness/memory_leg.py) routes every
+    # qq knowledge context here — NovaMemory.on_context never reaches
+    # sonic.inject_text directly. Background knowledge, not news: DEFERRABLE,
+    # so it rides along rather than interrupting.
+    priority: NORMAL
+    urgency: DEFERRABLE
+    llm_evaluate: false
+    inject_template: "Something you know: {text}"
+
+  memory/result:
+    # The answer to a memory query the leg dispatched (NovaMemory.on_result).
+    # Nova asked for this, so it is worth saying — but still only in the words
+    # this template renders.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You remember: {text}"
+
   # --- Emotion events ---
   emotions/wound_created:
     priority: HIGH
@@ -196,3 +215,165 @@ rules:
     urgency: NOW
     llm_evaluate: false
     inject_template: "A new skill idea didn't pass its safety check: {reason}"
+
+  # --- Runtime bus events (reachy-mini-cli's symbolic runtime) --------------
+  # These arrive over MQTT as reachy/events/{source}/{type} and are keyed here
+  # by the same "source/type" pair (reachy_nova/harness/bus.py). {source} is
+  # the runtime block type and {type} its action — see the runtime feed half
+  # of reachy-mini-cli's docs/export-schema.md. Only the events that tell Nova
+  # something it cannot work out on its own carry an inject_template; the
+  # LOW/BACKGROUND ones are observed (dashboard/logs) and never spoken about.
+
+  sense/snapshot:
+    # The 50Hz engine's perception snapshot. NOT subscribed by default
+    # (NOVA_BUS_SOURCES defaults to rule,intent,motion): unfiltered it floods —
+    # upstream measured 187 cues in ~40s from this stream alone. Nova already
+    # has its own senses; this is the runtime's copy of them.
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  rule/fire:
+    # A deterministic reflex fired on the robot's body — something moved that
+    # Nova did not decide, so it needs to know it happened.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "Your body just reacted on its own — the '{rule}' reflex fired."
+
+  # Per-rule rule/fire overrides (reachy_nova/harness/bus.py rule_for): a key
+  # "rule/fire:<rule-id>" wins over the generic rule/fire entry for that one
+  # runtime rule, falling back to it for every other rule id. This is how a
+  # known reflex gets a SENSORY inject instead of the generic mechanical one.
+
+  "rule/fire:pat-acknowledge":
+    # The runtime's shipped touch reflex (default_rules.toml). LIVE FINDING
+    # 2026-08-12: discrete reachy/events/pat/* topics do not exist on-device —
+    # touch reaches Nova as this rule's fire, so this is THE pat sense today.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You feel someone petting you — your body is already leaning into it."
+
+  "rule/fire:nova-face-noticed":
+    # The harness's own standing overlay rule (installed at startup by
+    # reachy_nova/harness/app.py ensure_face_rule): the face cue has no shipped
+    # runtime rule, so without this fire a recognised face never crosses the
+    # bus. The rule/fire payload names the rule, not the person — identity
+    # stays with the runtime's own face store.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You notice a familiar face — someone you recognize just came into view."
+
+  rule/suppress:
+    # A reflex was considered and held back (cooldown/rearming/inhibited).
+    # Bookkeeping, not news.
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  intent/declare:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  intent/update:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  intent/clear:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  intent/applied:
+    # A standing symbolic goal took effect in the runtime.
+    priority: NORMAL
+    urgency: DEFERRABLE
+    llm_evaluate: false
+    inject_template: "Your standing intention '{name}' is now in effect."
+
+  intent/blocked:
+    # The runtime refused a standing goal — a failure Nova must not miss,
+    # otherwise it keeps believing it asked for something that never landed.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "The runtime blocked your intention '{name}'."
+
+  motion/admit:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  motion/evict:
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  motion/goto:
+    # Goto-lane lifecycle (admitted/done/cancelled). Movement Nova can feel
+    # through its own senses — logged, not narrated.
+    priority: LOW
+    urgency: BACKGROUND
+    llm_evaluate: false
+
+  # --- Runtime pat/face/vision events (t7) ----------------------------------
+  # Discrete touch/sight senses published by reachy-mini-cli under their own
+  # block types (reachy/events/pat/#, reachy/events/face/#,
+  # reachy/events/vision/#) — as opposed to the continuous pat/face fields
+  # already riding inside sense/snapshot above. IMPORTANT CAVEAT: these exact
+  # topic/type names are NOT YET LIVE-CONFIRMED on the device (pat sense is
+  # live, face waits on the vision extra) — a later task confirms and adjusts
+  # this block, a config-only change, once the wire names are pinned down.
+  # The tracking/pat_level1(2) and face/face_recognized entries above are
+  # Nova's OWN reflex/engine senses and are unrelated to this block.
+
+  pat/level1:
+    # A light touch — the runtime's discrete pat block, one step up from the
+    # antenna-driven reflex Nova already handles in-process.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You feel someone patting you gently."
+
+  pat/level2:
+    # A firmer or sustained touch — same discrete block, stronger contact.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You feel someone patting you more firmly now."
+
+  pat/detected:
+    # A touch event with no level distinction the runtime bothered to make.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You feel someone touching you."
+
+  face/recognized:
+    # The runtime's own discrete face block, payload {id, name, score} — the
+    # same shape as tracking/face_recognized and face/face_recognized above,
+    # just published over the runtime's bus instead of Nova's own engine.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    inject_template: "You notice {name} is here."
+
+  face/unknown:
+    # A face was detected but not matched to anyone Nova knows.
+    priority: LOW
+    urgency: DEFERRABLE
+    llm_evaluate: false
+    inject_template: "You notice someone you don't recognize."
+
+  vision/description:
+    # The runtime's own discrete scene-description block — distinct from
+    # vision/vision_description above (Nova's own Nova 2 Lite frame
+    # analysis), same shape.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: true
+    inject_template: "Right now you see: {description}"

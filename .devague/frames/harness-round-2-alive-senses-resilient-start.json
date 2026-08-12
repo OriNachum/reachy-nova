@@ -1,0 +1,696 @@
+{
+  "slug": "harness-round-2-alive-senses-resilient-start",
+  "title": "harness round 2: alive senses + resilient start",
+  "schema_version": 5,
+  "status": "exported",
+  "created": "2026-08-11T20:49:24Z",
+  "updated": "2026-08-11T21:42:50Z",
+  "claims": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "Wireless harness round 2: resilient auto-start (clock-jump-proof Sonic, no competing auto-run), working barge-in, pat + face + tracking senses routed into Nova, and Nova Act browsing as a tool",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h8",
+          "text": "all five c21 acceptance signals pass live on the wireless unit",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "verify by the five live acceptance signals in c21 on the deployed wireless unit, after a real overnight power-off",
+      "revisions": []
+    },
+    {
+      "id": "c2",
+      "kind": "requirement",
+      "text": "nova_sonic.py detects a wall-clock step (drift between time.time() and time.monotonic() beyond ~60s) and forces a Sonic session restart \u2014 the 2026-08-11 boot showed an NTP +14h step leaving a zombie Bedrock stream: injections flowed, zero responses, no error, until a manual harness restart",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h1",
+          "text": "a forced clock step on the device (or a simulated one in tests) triggers exactly one Sonic session restart and the next spoken utterance gets a reply",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c3",
+      "kind": "requirement",
+      "text": "boot-time exclusivity is encoded in the repo, not just hand-applied on the device: harness/unit.py's rendered units (and an install doc/script for the hand-authored reachy-runtime.service) carry Conflicts=reachy-demo-mode.service, demo-mode stays manual-only (no [Install]), and the old ReachyMiniApp reachy-nova-autostart.service stays masked",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h2",
+          "text": "a fresh render/install from the repo reproduces tonight's exclusivity: demo-mode cannot be enabled by preset, and starting it stops the runtime (Conflicts both ways)",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c4",
+      "kind": "requirement",
+      "text": "barge-in works by fixing gate policy, not adding barge-in code: nova_sonic.py already has _handle_barge_in (USER transcript while _speaking -> Nova Lite decision -> on_interruption -> speaker.preempt, wired in harness/app.py); it never fires because hearing.py drops every mic chunk while the EchoGate is armed, so Sonic is deaf during its own speech",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h3",
+          "text": "with the gate policy off, speaking over the robot mid-utterance reaches Sonic as a USER transcript and _handle_barge_in fires \u2014 observable as a preempt in the journal",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c5",
+      "kind": "requirement",
+      "text": "the echo gate becomes a policy (env-selectable, e.g. NOVA_ECHO_GATE=off|half-duplex, default off on the wireless): XVF3800 hardware AEC was verified active live on 2026-08-10 \u2014 gate.py's docstring premise 'no verified hardware AEC (spec c19)' is now disproven for this device",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h4",
+          "text": "with hearing suppression off on the wireless, the robot does not converse with its own echo (the 2026-08-10 echo-loop regression stays fixed, now by hardware AEC alone)",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c6",
+      "kind": "boundary",
+      "text": "EchoGate stays: speaking.py also uses it for one-speaker-at-a-time playback windowing (0.48.0 has no speaker arbitration), and half-duplex must remain selectable for devices without hardware AEC \u2014 hearing suppression and playback serialization get decoupled, not deleted",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h9",
+          "text": "with hearing suppression off, utterances still play one at a time (no overlapping playback), and setting NOVA_ECHO_GATE=half-duplex restores the old suppression behavior",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c7",
+      "kind": "assumption",
+      "text": "patting is a wiring job, not a port: reachy-mini-cli already ships pat_sense.py / pet_reaction.py / motion/pat*.py with availability verdicts (sense_availability.py carries pat + pat_event vocabularies); the harness adds the pat source to NOVA_BUS_SOURCES and rules.yaml routes so Sonic hears 'you are being petted'",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c8",
+      "kind": "assumption",
+      "text": "face recognition is runtime-owned too: face_sense.py + vision/face.py + face_store.py exist in reachy-mini-cli; issue #120 says the face sense needs the [vision] extra installed in the device venv, with availability published to reachy/state \u2014 the harness leg is bus routing + injection, plus verifying the extra is installed on-device",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c9",
+      "kind": "boundary",
+      "text": "tracking behavior (orienting to sound/faces, feel-alive motion) stays in the runtime (orient.py, feel_alive.py); the harness never runs its own tracking loop \u2014 it receives events and may command goto via the existing intent tools. The old-app tracking.py and face_recognition.py are NOT ported; test_harness_boundary.py's AST gate (harness never imports reachy_mini) holds",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h10",
+          "text": "test_harness_boundary.py still passes after the round: no harness module imports reachy_mini or runs a tracking loop",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c10",
+      "kind": "requirement",
+      "text": "Nova Act browsing surfaces as a Sonic tool: nova_browser.py already exists flag-gated (NOVA_ACT_ENABLED, default off, lazy imports \u2014 nova_act/playwright never imported when off); the harness adds a browse tool to TOOL_SPECS wired to the NovaBrowser queue in app.py, with progress emitted back via inject",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h5",
+          "text": "with NOVA_ACT_ENABLED unset nothing imports nova_act/playwright (boundary test), and with it set a spoken browse request produces a queued task and a spoken result",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c11",
+      "kind": "assumption",
+      "text": "the vision leg reads the runtime's camera clip rider: clip_rider.py overwrite-in-place clip path is published on retained reachy/state/clip, and nova_omni.py's understand() already takes a rolling clip + still + context \u2014 no new camera ownership anywhere",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c12",
+      "kind": "requirement",
+      "text": "the device CLI venv gets the [vision] extra installed: live reachy/state/senses on 2026-08-11 shows face and clip both unavailable with reason=vision-extra-absent (cv2 missing), while pat is available:true and frame_available:true \u2014 one install unblocks both the face sense and the clip rider",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h6",
+          "text": "after installing the [vision] extra on the device, reachy/state/senses reports face available:true and reachy/state/clip carries a real clip path",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c13",
+      "kind": "decision",
+      "text": "browser execution: on-device Nova Act confirmed; AgentCore-hosted browser to be verified as the preferred surface (user decision, q1)",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c14",
+      "kind": "decision",
+      "text": "face enrollment: one-time CLI enrollment into the runtime's face_store (user decision, q2)",
+      "origin": "user",
+      "status": "rejected",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c15",
+      "kind": "decision",
+      "text": "face learning is BOTH ways (user amendment to q2): one-time CLI enrollment into the runtime's face_store, AND Nova learns names from conversation \u2014 an unknown face seen now can be named by voice ('I'm Ori') and becomes a stored identity",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c16",
+      "kind": "requirement",
+      "text": "conversational face learning rides FaceStore's existing temporary-face seam (remember_temporary -> temp_id -> enroll(name, embedding) in reachy/vision/face_store.py): the harness gets an enroll_face tool Sonic can call when someone introduces themselves; if the runtime exposes no enrollment intent, that seam is requested via a reachy-mini-cli issue rather than the harness writing face_store files directly",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h7",
+          "text": "saying 'I'm <name>' to an unknown face results in a face_store identity the runtime greets by name on the next sighting, via a sanctioned runtime seam (intent or CLI), never by the harness writing face_store files",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c17",
+      "kind": "audience",
+      "text": "Ori and anyone sharing a room with the two Reachy Mini units \u2014 plus the harness itself as the consumer of the runtime's senses",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h11",
+          "text": "acceptance is judged by people in the room interacting naturally (speech, touch, presence) \u2014 no SSH, dashboard, or debug tooling involved in the happy path",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c18",
+      "kind": "after_state",
+      "text": "the robot comes up alive from any cold boot with no manual restarts and nothing else able to seize it; you can talk over it and it stops to listen; it feels pats, recognizes and learns faces, sees through the camera clip, and can browse the web on request",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h12",
+          "text": "an overnight unplugged robot answers the first spoken sentence after power-on with no human intervention beyond the power switch",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c19",
+      "kind": "before_state",
+      "text": "today a cold boot after a long power-off leaves a zombie Sonic stream until someone restarts the harness; the robot is deaf while it speaks (no barge-in); pats and faces are sensed by the runtime but never reach Nova; the camera and face senses are dead for a missing cv2; browsing exists as dormant flag-gated code",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h13",
+          "text": "each before-state fact is journal-cited: the 2026-08-11 zombie stream, gate suppression in hearing.py, vision-extra-absent in reachy/state/senses, NOVA_ACT_ENABLED default off",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c20",
+      "kind": "why_it_matters",
+      "text": "a companion robot that must be manually revived, talks over you, and ignores touch is a demo, not a companion \u2014 this round closes the gap between senses the runtime already has and the mind that should feel them",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h14",
+          "text": "after the round, a first-time visitor can hold a natural interrupted conversation and get a touch reaction without being told any special rules",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c21",
+      "kind": "success_signal",
+      "text": "live acceptance on the wireless: (1) power-off overnight, power-on, robot answers speech with zero SSH; (2) interrupting it mid-sentence makes it stop and respond; (3) a pat gets a spoken/gesture reaction; (4) it greets an enrolled face by name and learns a new name by voice; (5) 'search the web for X' returns a spoken answer",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h15",
+          "text": "each signal is demonstrated live and recorded in the scope doc's acceptance section, not simulated",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c22",
+      "kind": "requirement",
+      "text": "Sonic gets a cause-agnostic response-liveness watchdog alongside the clock-step detector: if injects/audio keep flowing but zero response events arrive for a bounded window, the session force-restarts \u2014 the 2026-08-11 zombie produced no error at all, and the clock detector only covers that one cause",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h16",
+          "text": "a synthetic zombie (responses muted while injects continue) triggers exactly one forced session restart within the watchdog window, in a unit test",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c23",
+      "kind": "requirement",
+      "text": "device observability is repaired as part of the round: journald on the device finds no journal files (diagnosis worked only via the in-memory _PID ring); persistent storage with a hard size cap (e.g. SystemMaxUse=64M) is required so acceptance evidence and post-mortems survive a reboot",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h17",
+          "text": "after a device reboot, journalctl --user -u reachy-nova-harness shows pre-reboot lines, and total journal disk use stays under the configured cap",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c24",
+      "kind": "requirement",
+      "text": "disk headroom is a checked precondition, not an assumption: the device root is 93% full (972M free, probe 2026-08-12) and this round wants cv2, chromium, and rolling clips \u2014 the bring-up task frees space first and fails loudly if headroom is insufficient",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h18",
+          "text": "the bring-up step records df before/after: install completes with >=10% root free, and the runtime's control loop holds ~50Hz with vision senses live",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c25",
+      "kind": "requirement",
+      "text": "demo/runtime exclusivity is upstreamed to reachy-mini-cli's unit templates (issue to their agent): reachy/cli/_commands/service.py enable|install rewrites the presence unit files, so device-local hardening is clobbered by the next service verb \u2014 the Conflicts= pair and manual-only demo must come from the templates themselves",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h19",
+          "text": "a fresh 'reachy service enable runtime' from the patched CLI yields units where demo-mode cannot auto-run and Conflicts= pairs both presence units \u2014 no device-local edits needed",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c26",
+      "kind": "assumption",
+      "text": "the runtime's sound-reactive rules (look-toward-sound, rms moving-floor) tolerate harness speaker playback without self-orienting or floor poisoning \u2014 the runtime has no knowledge of harness playback windows, and tonight's floor=inf flood shows the moving-floor gate can be poisoned",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [
+        {
+          "id": "q1",
+          "text": "does look-toward-sound orient toward the robot's own speaker during harness playback, and can the moving-floor gate be poisoned again (floor=inf) by a clock step or long silence?",
+          "resolved": false,
+          "blocking": false,
+          "resolution": ""
+        }
+      ],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c27",
+      "kind": "decision",
+      "text": "browse gating: open this round, face-gated later (user decision, q3)",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c28",
+      "kind": "decision",
+      "text": "forced Sonic restarts start clean \u2014 no context recap (user decision, q4)",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    }
+  ],
+  "open_vagueness": [
+    {
+      "id": "v1",
+      "text": "whether the deployed runtime venv has the [vision] extra and whether pat/face events actually appear on reachy/events/* MQTT topics (vs only internal cues) \u2014 verifiable on-device before planning",
+      "kind": "unknown_blocking",
+      "claim_id": null,
+      "resolved": true,
+      "resolution": "verified live 2026-08-11: pat sense available:true on the deployed runtime; face + clip rider unavailable solely for vision-extra-absent (no cv2 in the CLI venv); only residual unknown is the exact discrete pat/face event topic names, confirmable on first live pat \u2014 nonblocking",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v2",
+      "text": "whether nova-act supports Bedrock AgentCore Browser as a remote execution surface from the harness \u2014 verify during implementation; local chromium is the fallback",
+      "kind": "unknown_nonblocking",
+      "claim_id": null,
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v3",
+      "text": "exact discrete MQTT topic names for pat/face events (reachy/events/<source>/<type>) \u2014 confirm on first live pat/face after the vision extra lands",
+      "kind": "unknown_nonblocking",
+      "claim_id": null,
+      "resolved": true,
+      "resolution": "confirmed 2026-08-12 from CLI source + live bus: discrete reachy/events/pat|face/* topics do NOT exist \u2014 sense-block events all collapse to sense/snapshot; pat crosses MQTT as rule/fire of the deployed pat-acknowledge rule (payload carries {rule}, already routed+templated by the harness); face has NO default rule on its cue, so the harness must install a nova- overlay rule (t10) for face identity to reach Nova; t7's provisional pat/face/vision rules.yaml keys are inert and can be repurposed or pruned in t10",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v4",
+      "text": "XVF3800 AEC robustness across speaker volumes and rooms \u2014 verified in one session at one volume; barge-in default-off gate relies on it",
+      "kind": "unknown_nonblocking",
+      "claim_id": null,
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v5",
+      "text": "two-unit dynamics with barge-in on: robot A interrupting robot B could livelock a robot-to-robot conversation \u2014 observe live before tuning",
+      "kind": "unknown_nonblocking",
+      "claim_id": null,
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v6",
+      "text": "face-gating the browse tool on a recognized enrolled face",
+      "kind": "follow_up",
+      "claim_id": null,
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    }
+  ],
+  "scope_entries": [
+    {
+      "id": "s1",
+      "surface": "reachy_nova/nova_sonic.py (session lifecycle)",
+      "finding": "restart machinery exists (session generation counter, restart(), stream-died 3s backoff, 4s speaking watchdog at line ~449) but nothing detects a wall-clock step; the 2026-08-11 journal shows the NTP +14h jump at 21:10 left a zombie stream from 06:59 with injections but zero responses",
+      "seeds": [
+        "c2"
+      ]
+    },
+    {
+      "id": "s2",
+      "surface": "device systemd units (pollen@192.168.1.162, live journals 2026-08-11)",
+      "finding": "reachy-nova-autostart.service (old ReachyMiniApp, preset-enabled) retired to ~/unit-backups and masked; reachy-demo-mode.service rewritten manual-only with Conflicts=reachy-runtime.service; runtime unit given Conflicts=reachy-demo-mode.service \u2014 applied live but not yet encoded in harness/unit.py or an install doc",
+      "seeds": [
+        "c3"
+      ]
+    },
+    {
+      "id": "s3",
+      "surface": "reachy_nova/harness/hearing.py + gate.py + app.py",
+      "finding": "TeeHearing._drain drops every chunk while gate.active (hearing.py:406-408); app.py already wires sonic.on_interruption = speaker.preempt; nova_sonic.py:323 fires _handle_barge_in on USER-transcript-while-speaking \u2014 the gate is the sole reason barge-in never triggers",
+      "seeds": [
+        "c4",
+        "c5"
+      ]
+    },
+    {
+      "id": "s4",
+      "surface": "XVF3800 capture path (live test 2026-08-10)",
+      "finding": "hardware AEC verified active: robot's own speaker barely registers on the mic (human speech RMS ~0.09 vs ~0.002 floor during playback), contradicting gate.py's 'no verified hardware AEC (spec c19)' premise",
+      "seeds": [
+        "c5",
+        "c6"
+      ]
+    },
+    {
+      "id": "s5",
+      "surface": "reachy_nova/harness/speaking.py",
+      "finding": "SonicSpeaker uses the same EchoGate for one-speaker-at-a-time playback windowing (waits for the prior window before posting the next utterance) \u2014 gate removal would break playback serialization; policy split needed",
+      "seeds": [
+        "c6"
+      ]
+    },
+    {
+      "id": "s6",
+      "surface": "reachy-mini-cli reachy/behavior/pat_sense.py + sense_availability.py + motion/pat*.py",
+      "finding": "pat detection, warmup/idle publication and pat/pat_event availability vocabularies already exist runtime-side; the old app's tracking.py pat levels (level1/level2, scratch/side_pat) need no port",
+      "seeds": [
+        "c7",
+        "c9"
+      ]
+    },
+    {
+      "id": "s7",
+      "surface": "reachy-mini-cli reachy/behavior/face_sense.py + reachy/vision/ (face.py, face_store.py, producer.py)",
+      "finding": "face recognition with identity store is runtime-owned; issue #120 documents the [vision]-extra-absent failure mode with availability verdicts published to reachy/state \u2014 device venv extra status unverified",
+      "seeds": [
+        "c8"
+      ]
+    },
+    {
+      "id": "s8",
+      "surface": "reachy_nova/harness/bus.py",
+      "finding": "DEFAULT_SOURCES='rule,intent,motion' with NOVA_BUS_SOURCES override (bus.py:113-115); pat/face/vision sources are not subscribed today and rules.yaml has no entries for them",
+      "seeds": [
+        "c7",
+        "c8"
+      ]
+    },
+    {
+      "id": "s9",
+      "surface": "reachy_nova/nova_browser.py",
+      "finding": "NovaBrowser is flag-gated by NOVA_ACT_ENABLED (default off) with lazy nova_act/playwright imports and a queue-based worker; nothing in harness/tools.py TOOL_SPECS or app.py references it yet",
+      "seeds": [
+        "c10"
+      ]
+    },
+    {
+      "id": "s10",
+      "surface": "reachy-mini-cli reachy/behavior/clip_rider.py + reachy_nova/nova_omni.py",
+      "finding": "clip rider writes an overwrite-in-place clip under behavior_dir and the path reaches retained reachy/state/clip via the engine's state writer; nova_omni.understand() already accepts clip+still+context \u2014 the vision leg composes from existing parts",
+      "seeds": [
+        "c11"
+      ]
+    },
+    {
+      "id": "s11",
+      "surface": "live MQTT bus (mosquitto_sub on-device, 2026-08-11)",
+      "finding": "retained reachy/state/senses: pat available:true, frame_available:true, face+clip unavailable reason=vision-extra-absent; cv2 import fails in the CLI venv; 10s event sample shows only reachy/events/sense/snapshot (~27/s) \u2014 discrete pat/face event topic names still to be confirmed on a first live pat",
+      "seeds": [
+        "c12"
+      ]
+    },
+    {
+      "id": "s12",
+      "surface": "challenge pass / failure-mode lens: nova_sonic.py session loop",
+      "finding": "the 2026-08-11 zombie raised no error; clock-step detection is cause-specific, so a liveness watchdog is the containment for unknown zombie causes",
+      "seeds": [
+        "c22"
+      ]
+    },
+    {
+      "id": "s13",
+      "surface": "challenge pass / observability lens: device journald (probe 2026-08-12)",
+      "finding": "journalctl reports 'No journal files were found' for user and system scope; only the in-memory _PID ring was readable; /etc/systemd/journald.conf is all-defaults",
+      "seeds": [
+        "c23"
+      ]
+    },
+    {
+      "id": "s14",
+      "surface": "challenge pass / operations+capacity lens: device disk/RAM (probe 2026-08-12)",
+      "finding": "root 93% full with 972M free, RAM 3.8G/2.5G free \u2014 cv2 + chromium + rolling clips do not fit without cleanup; RAM is workable but tight with chromium",
+      "seeds": [
+        "c24"
+      ]
+    },
+    {
+      "id": "s15",
+      "surface": "challenge pass / lifecycle lens: reachy-mini-cli service.py + service/units.py",
+      "finding": "enable|install rewrite the presence units from templates and purge retired units \u2014 device-local unit hardening is not durable; the intent registry is the documented extension point for a future enroll command kind",
+      "seeds": [
+        "c25"
+      ]
+    },
+    {
+      "id": "s16",
+      "surface": "challenge pass / adjacent-systems lens: runtime rms/orient rules vs harness playback",
+      "finding": "the runtime has no knowledge of harness playback windows; 2026-08-11 journal showed look-toward-sound cooldown floods and a moving-floor gate stuck open at floor=inf after the clock step",
+      "seeds": [
+        "c26"
+      ]
+    },
+    {
+      "id": "s17",
+      "surface": "challenge pass / security lens: voice-triggered browse tool",
+      "finding": "browse would be triggerable by any voice in the room; the retired app gated admin actions on a recognized face \u2014 gating is a user decision (q3)",
+      "seeds": []
+    },
+    {
+      "id": "s18",
+      "surface": "challenge pass / reversibility lens: gate policy + units",
+      "finding": "clean pass: NOVA_ECHO_GATE env flip is the rollback for barge-in, unit backups exist in ~/unit-backups, autostart mask is reversible with unmask \u2014 containment already in the spec (c5/c6)",
+      "seeds": []
+    },
+    {
+      "id": "s19",
+      "surface": "challenge pass / concurrency lens: harness threading + same-file tool tasks",
+      "finding": "clean pass at spec level: existing callback/thread patterns unchanged; the real concurrency risk is build-time (tools.py/app.py shared by several tasks) and lands plan-side as file-disjointness sequencing",
+      "seeds": []
+    }
+  ],
+  "lapses": []
+}

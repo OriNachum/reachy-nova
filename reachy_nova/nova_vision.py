@@ -10,6 +10,8 @@ from collections.abc import Callable
 
 import cv2
 import numpy as np
+
+from . import config
 import boto3
 
 logger = logging.getLogger(__name__)
@@ -27,19 +29,19 @@ class NovaVision:
 
     def __init__(
         self,
-        region: str = "us-east-1",
-        model_id: str = "us.amazon.nova-2-lite-v1:0",
+        region: str | None = None,
+        model_id: str | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         analyze_interval: float = 30.0,
         on_description: Callable[[str], None] | None = None,
     ):
-        self.region = region
-        self.model_id = model_id
+        self.region = region or config.region()
+        self.model_id = model_id or config.lite_model_id()
         self.system_prompt = system_prompt
         self.analyze_interval = analyze_interval
         self.on_description = on_description
 
-        self._client = boto3.client("bedrock-runtime", region_name=region)
+        self._client = boto3.client("bedrock-runtime", region_name=self.region)
         self._thread: threading.Thread | None = None
         self._latest_frame: np.ndarray | None = None
         self._frame_lock = threading.Lock()

@@ -1,0 +1,84 @@
+{
+  "plan_slug": "harness-round-2-alive-senses-resilient-start",
+  "schema_version": 1,
+  "created": "2026-08-11T22:15:33Z",
+  "updated": "2026-08-11T22:19:19Z",
+  "deviations": [
+    {
+      "id": "d1",
+      "what": "route pat via rule/fire of the deployed pat-acknowledge rule and face via a harness-installed nova-face-noticed overlay rule, instead of subscribing discrete pat/face event topics",
+      "task_ref": "t7",
+      "reason": "t6 live finding: the runtime collapses all sense-block events to sense/snapshot \u2014 discrete reachy/events/pat|face topics do not exist; t7's provisional rules.yaml keys are inert",
+      "affects": [
+        "t10",
+        "t6"
+      ],
+      "origin": "llm",
+      "status": "approved",
+      "classification": "acceptable"
+    },
+    {
+      "id": "d2",
+      "what": "FACE_RULE gains duration_s=2.0 \u2014 a post-merge fix-forward commit outside any task's boundary",
+      "task_ref": "t10",
+      "reason": "live t11 testing: the engine refused the overlay reload ('nod' loops with no default duration), keeping last-good config \u2014 the face leg was dead as merged",
+      "affects": [
+        "t11"
+      ],
+      "origin": "llm",
+      "status": "approved",
+      "classification": "acceptable"
+    },
+    {
+      "id": "d3",
+      "what": "playback-aware barge-in added: USER transcript during a gate window preempts, and preempt() now POSTs /api/media/stop_sound \u2014 beyond t2's gate-policy scope",
+      "task_ref": "t2",
+      "reason": "live t11 testing: Sonic's interruption path only runs during generation; the audible daemon playback afterwards had no cut path, so barge-in was heard but not felt",
+      "affects": [
+        "t10",
+        "t11",
+        "h3"
+      ],
+      "origin": "llm",
+      "status": "approved",
+      "classification": "acceptable"
+    },
+    {
+      "id": "d4",
+      "what": "t11 acceptance signal 3 (pat reaction) is blocked upstream and leaves this round's live acceptance partial",
+      "task_ref": "t11",
+      "reason": "pat stillness gate measured never-open under feel-alive (19/19 blocked over 32s) \u2014 structural runtime calibration defect, filed as reachy-mini-cli#168",
+      "affects": [
+        "c21",
+        "h15"
+      ],
+      "origin": "llm",
+      "status": "approved",
+      "classification": "needs-follow-up"
+    },
+    {
+      "id": "d5",
+      "what": "browse executes on the AgentCore hosted browser (CDP endpoint via AgentCoreBrowserSessionProvider), not on-device chromium",
+      "task_ref": "t4",
+      "reason": "user decision ('first try agentcore') after disk pressure; nova-act officially documents the AgentCore Browser integration \u2014 no chromium on the Pi",
+      "affects": [
+        "t11"
+      ],
+      "origin": "user",
+      "status": "approved",
+      "classification": "acceptable"
+    },
+    {
+      "id": "d6",
+      "what": "reachy_nova's agent implements the enroll intent kind in reachy-mini-cli directly (device branch wireless-motor-enable) instead of waiting for their agent to pick up #166",
+      "task_ref": "t8",
+      "reason": "live t11: Nova submitted four enroll intents, each dropped 'unknown kind' \u2014 the seam blocks face-name learning mid-test; user approved implementing it now",
+      "affects": [
+        "t11"
+      ],
+      "origin": "user",
+      "status": "approved",
+      "classification": "acceptable"
+    }
+  ]
+}

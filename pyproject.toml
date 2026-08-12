@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 
 [project]
-name = "reachy_nova"
+name = "reachy-nova"
 version = "0.1.0"
 description = "Reachy Nova - Voice, Vision & Browser AI for Reachy Mini"
 readme = "README.md"
@@ -31,10 +31,12 @@ keywords = ["reachy-mini-app"]
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
+    "pytest-xdist>=3.5.0",
 ]
 
 [project.scripts]
 sonic-demo = "tools.sonic_demo:main"
+reachy-nova-harness = "reachy_nova.harness.__main__:main"
 
 [project.entry-points."reachy_mini_apps"]
 reachy_nova = "reachy_nova.main:ReachyNova"
