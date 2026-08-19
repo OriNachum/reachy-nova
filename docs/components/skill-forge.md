@@ -18,6 +18,20 @@ validator before it is ever eligible to run. Only a validated skill gets
 **auto-activated** — hot-registered into the live runtime and, once Sonic
 next allows it, callable by the model.
 
+> **Design revision (2026-08-19):** the "separate machine by design" sentence
+> above records the original architecture and still describes the *default*
+> path — it is not being withdrawn. What's new is an optional on-device
+> writer: when `FORGE_WRITER=kiro` is configured, authoring instead happens
+> **on-device**, through a standing Kiro CLI session speaking ACP (the
+> `nova-writer` agent — see `docs/security.md`'s trust-decision section for
+> the full-shell-as-`pollen` rationale, and `config/kiro/nova-writer.json`
+> for the agent config). The Kiro path still produces the same two fenced
+> files (`SKILL.md` + `executor.py`) and flows through the exact same
+> stage -> validate -> auto-activate pipeline and `forge/*` events described
+> below — only *where the dispatch runs* changes, not the pipeline it feeds.
+> `FORGE_BASE_URL`'s separate-machine HTTP path remains the default; Kiro is
+> opt-in.
+
 The runtime self-extension loop, end to end:
 
 ```text
