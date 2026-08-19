@@ -31,6 +31,11 @@
 #     files — debugging on 2026-08-12 had to fall back to the in-memory ring)
 #     and the root disk is ~93% full, so persistence needs a hard cap, not
 #     unbounded persistent storage.
+#   - provisions the nova-writer Kiro agent config (config/kiro/nova-writer.json
+#     -> ~/.kiro/agents/nova-writer.json), task t5. Kiro is optional on the
+#     device, so this step is guarded on both sides (repo config present,
+#     kiro-cli on PATH, ~/.kiro writable) and never fails the whole install —
+#     see install_nova_writer_agent_config() below.
 #
 # Idempotent: every step tolerates already-applied state. Safe to re-run.
 #
@@ -46,6 +51,8 @@ set -euo pipefail
 
 CLI_PYTHON="${1:-$HOME/reachy-mini-cli/.venv/bin/python}"
 NOVA_PYTHON="${2:-python3}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 log() { printf '[install-device-units] %s\n' "$*"; }
 warn() { printf '[install-device-units] WARN: %s\n' "$*" >&2; }
@@ -110,5 +117,39 @@ printf '[Journal]\nStorage=persistent\nSystemMaxUse=64M\n' \
 
 log "restarting systemd-journald"
 sudo systemctl restart systemd-journald
+
+# --- 5. provision the nova-writer Kiro agent config (optional) -----------
+# Copies config/kiro/nova-writer.json to ~/.kiro/agents/nova-writer.json so
+# the on-device Kiro writer (task t5/t6, FORGE_WRITER=kiro) has its agent
+# config in place before any ACP session starts it. Kiro itself is optional
+# on the device: this step is guarded on both sides and never fails the
+# whole install — it warns and continues (does not exit non-zero) if the
+# repo's config is missing, if kiro-cli isn't on PATH, or if ~/.kiro can't
+# be created. Plain `cp` of the same file twice is idempotent.
+install_nova_writer_agent_config() {
+    local repo_config="$REPO_ROOT/config/kiro/nova-writer.json"
+    local kiro_agents_dir="$HOME/.kiro/agents"
+
+    if [ ! -f "$repo_config" ]; then
+        warn "no $repo_config — skipping nova-writer agent config provisioning"
+        return 0
+    fi
+
+    if ! command -v kiro-cli >/dev/null 2>&1; then
+        warn "kiro-cli not found on PATH — skipping nova-writer agent config provisioning"
+        return 0
+    fi
+
+    if ! mkdir -p "$kiro_agents_dir" 2>/dev/null; then
+        warn "could not create $kiro_agents_dir — skipping nova-writer agent config provisioning"
+        return 0
+    fi
+
+    cp "$repo_config" "$kiro_agents_dir/nova-writer.json"
+    log "provisioned nova-writer agent config to $kiro_agents_dir/nova-writer.json"
+}
+
+log "provisioning nova-writer Kiro agent config (optional — guarded, non-fatal if kiro is absent)"
+install_nova_writer_agent_config
 
 log "install-device-units.sh completed successfully"

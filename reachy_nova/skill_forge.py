@@ -24,6 +24,19 @@ callable; when none is given it lazy-imports ``forge_validator.validate`` on
 first use and, if that import fails, fails CLOSED — treats the skill as
 rejected with reason ``"validator unavailable"`` rather than ever staging an
 un-vetted skill as activatable.
+
+``FORGE_WRITER`` selects *where* the authoring dispatch runs, without
+touching anything downstream of it: ``"http"`` (the default) is the
+behavior described above — a POST to ``FORGE_BASE_URL``. ``"kiro"`` sends
+the exact same authoring instructions through an injected "kiro prompt
+callable" (any object exposing ``.prompt(text, timeout=...) -> str``, e.g.
+``reachy_nova.kiro_acp.KiroAcpSession``) instead — a standing on-device
+coding-agent session rather than a separate-machine HTTP endpoint. Both
+writers feed the identical parse -> stage -> validate -> ``forge/*`` event
+pipeline; only the transport differs. An unconfigured or dead kiro session,
+a prompt() that times out or raises, unparseable kiro output, and an
+unrecognized ``FORGE_WRITER`` value all fail closed to ``forge/rejected``
+with a clear reason, exactly like every HTTP failure mode.
 """
 
 from __future__ import annotations
@@ -48,6 +61,11 @@ DEFAULT_STAGING_ROOT = Path.home() / ".reachy_nova" / "skills-forged"
 DEFAULT_FORGE_MODEL = "qwen3"
 DEFAULT_TIMEOUT = 120.0
 
+# FORGE_WRITER selects the authoring transport. "http" (default) is the
+# original FORGE_BASE_URL POST path; "kiro" routes through an injected
+# kiro-prompt-callable instead. Anything else fails closed.
+DEFAULT_FORGE_WRITER = "http"
+
 PROMPT_TEMPLATE = (
     "You are the skill-forge for Reachy Nova, a physical robot. Given a goal "
     "and sensory context, respond with EXACTLY two fenced code blocks and "
@@ -59,6 +77,18 @@ PROMPT_TEMPLATE = (
     "2. A block fenced as ```executor.py``` containing a single Python "
     "function `def execute(params, ctx):` implementing the skill's "
     "behavior using only the primitives available on `ctx`.\n\n"
+    "A static validator rejects anything outside this exact surface, so obey "
+    "it strictly. The ONLY attributes that exist on `ctx` are: "
+    "`ctx.gesture(name)` (play a named gesture), `ctx.vocalize(kind)` (a "
+    "non-speech sound like a chirp), `ctx.say(text)` (speak text aloud), "
+    "`ctx.inject(text)` (whisper context into the conversation), "
+    "`ctx.state_get(key)`, `ctx.state_update(**kw)`, and "
+    "`ctx.emotion(event)`. Nothing else — `ctx.speak`, `ctx.log`, "
+    "`ctx.move` and any other attribute FAIL validation. The only imports "
+    "allowed are numpy, math, time, typing, dataclasses; no file, network, "
+    "process or os access of any kind; `executor.py` must stay under 200 "
+    "lines and define exactly `def execute(params, ctx):` with those two "
+    "positional arguments.\n\n"
     "Output nothing else: no prose before, between, or after the two fenced "
     "blocks."
 )
@@ -74,6 +104,9 @@ PublishFn = Callable[[str, dict], None]
 ValidatorFn = Callable[[Path], tuple[bool, list[str]]]
 # transport(url, payload, headers, timeout) -> parsed JSON response dict.
 TransportFn = Callable[[str, dict, dict[str, str], float], dict]
+# Anything with .prompt(text, timeout=...) -> str, e.g. kiro_acp.KiroAcpSession.
+# Duck-typed deliberately — SkillForge never imports kiro_acp itself.
+KiroSession = object
 
 
 def _default_transport(url: str, payload: dict, headers: dict[str, str], timeout: float) -> dict:
@@ -103,6 +136,17 @@ def _build_messages(goal: str, context: dict, improve: str | None) -> list[dict]
         {"role": "system", "content": PROMPT_TEMPLATE},
         {"role": "user", "content": "\n\n".join(user_lines)},
     ]
+
+
+def _build_kiro_prompt(goal: str, context: dict, improve: str | None) -> str:
+    """Same authoring instructions as `_build_messages`, collapsed to one string.
+
+    The kiro writer speaks one prompt string per turn (ACP has no separate
+    system/user roles at this call site) — collapsing system+user here keeps
+    the two-fenced-file contract identical across both writers.
+    """
+    messages = _build_messages(goal, context, improve)
+    return "\n\n".join(m["content"] for m in messages)
 
 
 def _extract_fences(content: str) -> dict[str, str]:
@@ -171,12 +215,16 @@ class SkillForge:
         staging_root: Path | str | None = None,
         transport: TransportFn | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        kiro_session: KiroSession | None = None,
     ):
         self._publish = publish
         self._validator = validator
         self._staging_root = Path(staging_root) if staging_root is not None else DEFAULT_STAGING_ROOT
         self._transport = transport or _default_transport
         self._timeout = timeout
+        # Any object exposing .prompt(text, timeout=...) -> str. Only consulted
+        # when FORGE_WRITER=kiro; ignored (not even required) on the http path.
+        self._kiro_session = kiro_session
 
         # Lazy-import cache for the sibling forge_validator module, tried
         # (at most) once per instance the first time no validator is given.
@@ -218,6 +266,16 @@ class SkillForge:
             self._reject(None, [f"internal error: {e}"])
 
     def _run_inner(self, goal: str, context: dict, improve: str | None) -> None:
+        writer = os.environ.get("FORGE_WRITER", DEFAULT_FORGE_WRITER)
+        if writer == "http":
+            self._run_http(goal, context, improve)
+        elif writer == "kiro":
+            self._run_kiro(goal, context, improve)
+        else:
+            logger.warning("Skill-forge got unknown FORGE_WRITER=%r — failing closed", writer)
+            self._reject(None, [f"unknown FORGE_WRITER: {writer!r}"])
+
+    def _run_http(self, goal: str, context: dict, improve: str | None) -> None:
         base_url = os.environ.get("FORGE_BASE_URL")
         if not base_url:
             self._reject(None, ["endpoint not configured"])
@@ -250,22 +308,46 @@ class SkillForge:
             self._reject(None, ["unparseable reply"])
             return
 
+        self._finish_from_content(content, source=url)
+
+    def _run_kiro(self, goal: str, context: dict, improve: str | None) -> None:
+        if self._kiro_session is None:
+            logger.warning("Skill-forge FORGE_WRITER=kiro but no kiro_session was configured — failing closed")
+            self._reject(None, ["kiro writer not configured"])
+            return
+
+        prompt_text = _build_kiro_prompt(goal, context, improve)
+        try:
+            content = self._kiro_session.prompt(prompt_text, timeout=self._timeout)
+        except Exception as e:  # noqa: BLE001 - dead session, timeout, or any other kiro failure
+            logger.warning("Skill-forge kiro session prompt failed: %s", e)
+            self._reject(None, [f"kiro session failed: {e}"])
+            return
+
+        self._finish_from_content(content, source="kiro")
+
+    def _finish_from_content(self, content: str, source: str) -> None:
+        """Shared tail of both writers: parse fences -> stage -> validate -> emit.
+
+        Identical for the http and kiro paths — only how `content` (the raw
+        assistant reply text) was obtained differs upstream.
+        """
         fences = _extract_fences(content)
         skill_md = fences.get("SKILL.md")
         executor_py = fences.get("executor.py")
 
         if not skill_md or not skill_md.strip():
-            logger.warning("Skill-forge reply from %s missing/empty SKILL.md fence", url)
+            logger.warning("Skill-forge reply from %s missing/empty SKILL.md fence", source)
             self._reject(None, ["missing or empty SKILL.md fence"])
             return
         if not executor_py or not executor_py.strip():
-            logger.warning("Skill-forge reply from %s missing/empty executor.py fence", url)
+            logger.warning("Skill-forge reply from %s missing/empty executor.py fence", source)
             self._reject(None, ["missing or empty executor.py fence"])
             return
 
         name = _extract_and_sanitize_name(skill_md)
         if not name:
-            logger.warning("Skill-forge reply from %s had no usable skill name", url)
+            logger.warning("Skill-forge reply from %s had no usable skill name", source)
             self._reject(None, ["invalid or missing skill name"])
             return
 

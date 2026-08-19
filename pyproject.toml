@@ -28,6 +28,14 @@ dependencies = [
 ]
 keywords = ["reachy-mini-app"]
 
+# Optional extras for external integrations.
+# The kiro extra is intentionally empty: the ACP client is stdlib-only by design
+# (it drives an externally-installed kiro-cli binary over stdio). The extra exists
+# so `uv pip install 'reachy-nova[kiro]'` is a stable spelling if a dependency
+# ever becomes genuinely needed.
+[project.optional-dependencies]
+kiro = []
+
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",

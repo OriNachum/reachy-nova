@@ -1,0 +1,21 @@
+{
+  "plan_slug": "kiro-writer-pettable-upgrade",
+  "schema_version": 1,
+  "created": "2026-08-19T09:25:03Z",
+  "updated": "2026-08-19T09:25:03Z",
+  "deviations": [
+    {
+      "id": "d1",
+      "what": "t9 presumes the harness runs the kiro writer, but no wave-2 task ships the integration wiring: nothing constructs KiroSessionUnit in build_app(), IntentTools has no forge tool, and SkillForge is not instantiated anywhere in the harness path. Main agent adds the wiring leg directly: KiroSessionUnit as a supervisor component (gated on FORGE_WRITER=kiro), a forge tool on the harness tool surface backed by SkillForge(kiro_session=...), and kiro_rules exposed for rule authoring",
+      "task_ref": "t9",
+      "reason": "plan gap discovered at wave 3: component tasks (t3,t4,t6,t7) each built their module but no task covered composing them into build_app()/IntentTools \u2014 t9's acceptance ('standing session in the supervisor's unit list', 'forge dispatch produces an activated skill') is unreachable without it",
+      "affects": [
+        "t9",
+        "t10"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable"
+    }
+  ]
+}

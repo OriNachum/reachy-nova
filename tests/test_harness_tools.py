@@ -50,6 +50,9 @@ EXPECTED_TOOLS = (
     "create_rule",
     "browse",
     "enroll_face",
+    # the kiro-writer pair (deviation d1) — refused unless a ForgeLeg is wired
+    "forge",
+    "use_skill",
 )
 
 #: ``<time.time_ns()>-<uuid4.hex>.json``

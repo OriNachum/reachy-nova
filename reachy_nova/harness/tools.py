@@ -75,6 +75,8 @@ GOTO = "goto"
 CREATE_RULE = "create_rule"
 BROWSE = "browse"
 ENROLL_FACE = "enroll_face"
+FORGE = "forge"
+USE_SKILL = "use_skill"
 
 #: The harness's ENTIRE action set, in publication order. Each addition past
 #: the original six is a deliberate widening of the blast radius, never an
@@ -92,6 +94,8 @@ ACTION_SET: tuple[str, ...] = (
     CREATE_RULE,
     BROWSE,
     ENROLL_FACE,
+    FORGE,
+    USE_SKILL,
 )
 
 #: Seconds a tool call waits for the engine to confirm before degrading.
@@ -129,6 +133,12 @@ BROWSE_DISABLED_REASON = (
 #: Refusal reason when ``browse`` is called before a :class:`NovaBrowser`
 #: handle has been wired in (flag on, but ``IntentTools`` built without one).
 BROWSE_NOT_WIRED_REASON = "browser automation is enabled but not wired up yet"
+
+#: Refusal reason when ``forge``/``use_skill`` are called without a wired
+#: ForgeLeg (the kiro writer is opt-in: FORGE_WRITER=kiro).
+FORGE_NOT_WIRED_REASON = (
+    "the skill forge is disabled — set FORGE_WRITER=kiro to enable the on-device kiro writer"
+)
 
 #: The intents-spool op behind the ``enroll_face`` tool. The tool name and the
 #: wire op deliberately differ: the tool is named for what Nova is doing
@@ -405,6 +415,47 @@ TOOL_SPECS: list[dict] = [
             "required": ["name"],
         },
     ),
+    _spec(
+        FORGE,
+        "Teach yourself a new skill: describe what the skill should do and a "
+        "coder agent writes it in the background. You will be told when it is "
+        "staged or rejected, and once activated you call it with use_skill. "
+        "Only available when the kiro writer is configured.",
+        {
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "string",
+                    "description": "What the new skill should do, in plain language.",
+                },
+                "improve": {
+                    "type": "string",
+                    "description": "Optional: name of an existing forged skill to improve.",
+                },
+            },
+            "required": ["goal"],
+        },
+    ),
+    _spec(
+        USE_SKILL,
+        "Run one of the skills you forged earlier, by name. If you are unsure "
+        "what exists, call it with an empty or wrong name and the error lists "
+        "the available skills.",
+        {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The activated skill's name.",
+                },
+                "params": {
+                    "type": "object",
+                    "description": "Parameters for the skill, if it takes any.",
+                },
+            },
+            "required": ["name"],
+        },
+    ),
 ]
 
 
@@ -604,7 +655,12 @@ class IntentTools:
         await_timeout: float = DEFAULT_AWAIT_TIMEOUT,
         browser: object | None = None,
         on_browse_progress: Callable[[str], None] | None = None,
+        forge_leg: object | None = None,
     ) -> None:
+        # ``forge``/``use_skill`` (deviation d1) drive a ForgeLeg handle the
+        # same way ``browse`` drives a NovaBrowser: injected, and refused with
+        # a named reason when absent rather than half-working.
+        self._forge_leg = forge_leg
         self._commands_dir = Path(commands_dir) if commands_dir is not None else None
         self._results_dir = Path(results_dir) if results_dir is not None else None
         self.await_timeout = float(await_timeout)
@@ -703,7 +759,29 @@ class IntentTools:
             return self._create_rule(params)
         if tool_name == BROWSE:
             return self._browse(params)
+        if tool_name in (FORGE, USE_SKILL):
+            return self._forge_tool(tool_name, params)
         return self.submit_and_await(_BUILDERS[tool_name](params))
+
+    def _forge_tool(self, tool_name: str, params: Mapping) -> dict:
+        """``forge``/``use_skill`` — delegate to the injected ForgeLeg."""
+        if self._forge_leg is None:
+            raise ToolRefused(FORGE_NOT_WIRED_REASON)
+        if tool_name == FORGE:
+            goal = params.get("goal")
+            if not isinstance(goal, str) or not goal.strip():
+                raise ToolRefused("'goal' must be a non-empty string")
+            improve = params.get("improve")
+            if improve is not None and not isinstance(improve, str):
+                raise ToolRefused("'improve' must be a string when given")
+            return self._forge_leg.forge(goal, improve=improve)
+        name = params.get("name")
+        if not isinstance(name, str):
+            raise ToolRefused("'name' must be a string")
+        raw_params = params.get("params")
+        if raw_params is not None and not isinstance(raw_params, Mapping):
+            raise ToolRefused("'params' must be an object when given")
+        return self._forge_leg.use_skill(name, dict(raw_params or {}))
 
     def _create_rule(self, params: Mapping) -> dict:
         """Author a nova-namespaced reflex in the rules overlay, then reload.
