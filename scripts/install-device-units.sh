@@ -145,7 +145,10 @@ install_nova_writer_agent_config() {
         return 0
     fi
 
-    cp "$repo_config" "$kiro_agents_dir/nova-writer.json"
+    if ! cp "$repo_config" "$kiro_agents_dir/nova-writer.json" 2>/dev/null; then
+        warn "could not copy $repo_config to $kiro_agents_dir/nova-writer.json — skipping nova-writer agent config provisioning"
+        return 0
+    fi
     log "provisioned nova-writer agent config to $kiro_agents_dir/nova-writer.json"
 }
 

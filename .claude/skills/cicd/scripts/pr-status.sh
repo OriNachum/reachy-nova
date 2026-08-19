@@ -83,17 +83,35 @@ fi
 echo
 echo "── Review pipeline ───────────────────────────────────────────────────"
 
-# Inline-thread tally via GraphQL (resolved vs unresolved).
-THREADS_JSON=$(gh api graphql -f query="
+# Inline-thread tally via GraphQL (resolved vs unresolved), paginated: a PR
+# can have more than 100 review threads, and a bare reviewThreads(first: 100)
+# would silently drop the rest, letting a PR with extra unresolved threads
+# get reported as clean (qodo review comment 3812045221). Accumulate nodes
+# across pages via pageInfo.hasNextPage/endCursor before tallying.
+THREADS_JSON="[]"
+CURSOR="null"
+while :; do
+    PAGE=$(gh api graphql -f query="
 {
   repository(owner: \"${REPO%%/*}\", name: \"${REPO##*/}\") {
     pullRequest(number: $PR_NUMBER) {
-      reviewThreads(first: 100) {
+      reviewThreads(first: 100, after: $CURSOR) {
         nodes { id isResolved comments(first: 1) { nodes { author { login } } } }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
-}" --jq '.data.repository.pullRequest.reviewThreads.nodes')
+}" --jq '.data.repository.pullRequest.reviewThreads')
+
+    THREADS_JSON=$(jq -c -s '.[0] + .[1].nodes' <(echo "$THREADS_JSON") <(echo "$PAGE"))
+
+    HAS_NEXT=$(echo "$PAGE" | jq -r '.pageInfo.hasNextPage')
+    if [[ "$HAS_NEXT" != "true" ]]; then
+        break
+    fi
+    END_CURSOR=$(echo "$PAGE" | jq -r '.pageInfo.endCursor')
+    CURSOR="\"$END_CURSOR\""
+done
 
 INLINE_TOTAL=$(echo "$THREADS_JSON" | jq 'length')
 INLINE_RESOLVED=$(echo "$THREADS_JSON" | jq '[.[] | select(.isResolved)] | length')
