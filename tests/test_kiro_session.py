@@ -95,6 +95,73 @@ class FakeFactory:
         return len(self.built)
 
 
+class FailingSession(FakeSession):
+    """A session double whose handshake fails at a chosen step.
+
+    ``close_calls`` counts invocations so a test can assert "closed exactly
+    once", and closing can itself be made to raise via ``close_error`` to
+    prove that a broken ``close()`` never masks the original failure.
+    """
+
+    def __init__(
+        self,
+        *,
+        fail_at: str,
+        error: Exception,
+        close_error: Exception | None = None,
+    ) -> None:
+        super().__init__()
+        self._fail_at = fail_at
+        self._error = error
+        self._close_error = close_error
+        self.close_calls = 0
+
+    def start(self) -> None:
+        super().start()
+        if self._fail_at == "start":
+            raise self._error
+
+    def initialize(self) -> None:
+        super().initialize()
+        if self._fail_at == "initialize":
+            raise self._error
+
+    def new_session(self, cwd: str) -> str:
+        super().new_session(cwd)
+        if self._fail_at == "new_session":
+            raise self._error
+
+    def close(self) -> None:
+        self.close_calls += 1
+        super().close()
+        if self._close_error is not None:
+            raise self._close_error
+
+
+class FlakyRestartFactory:
+    """Simulates a ``kiro-cli`` executable that disappears and comes back.
+
+    The first call (used by ``start()``) always succeeds. The next
+    ``num_failures`` calls raise ``FileNotFoundError`` — the real-world
+    precedent from PR review comment 3812045193 (systemd, no ``kiro-cli`` on
+    PATH). Calls after that succeed again, so a test can assert the watchdog
+    survives the failures and recovers once the binary is back.
+    """
+
+    def __init__(self, num_failures: int) -> None:
+        self._num_failures = num_failures
+        self.built: list[FakeSession] = []
+        self.call_count = 0
+
+    def __call__(self) -> FakeSession:
+        self.call_count += 1
+        if 1 < self.call_count <= 1 + self._num_failures:
+            raise FileNotFoundError("kiro-cli: No such file or directory")
+        session = FakeSession(prompt_prefix=f"reply{len(self.built)}")
+        self.built.append(session)
+        return session
+
+
 def _poll_until(predicate, *, timeout: float = 5.0, interval: float = 0.01) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -374,3 +441,144 @@ def test_history_max_defaults_to_fifty_with_no_env_or_kwarg() -> None:
     factory = FakeFactory()
     unit = KiroSessionUnit(factory, cwd="/work", env={})
     assert unit._history_max == 50
+
+
+# --------------------------------------------------------------------------- #
+# 5. _spawn_session closes a partially-started session on handshake failure  #
+#    (qodo review comment 3812045184).                                      #
+# --------------------------------------------------------------------------- #
+
+
+def test_spawn_session_closes_session_when_initialize_fails() -> None:
+    session = FailingSession(fail_at="initialize", error=KiroAcpError("init boom"))
+    unit = KiroSessionUnit(lambda: session, cwd="/work")
+
+    with pytest.raises(KiroAcpError) as exc_info:
+        unit._spawn_session()
+
+    assert str(exc_info.value) == "init boom"
+    assert session.started is True
+    assert session.close_calls == 1
+
+
+def test_spawn_session_closes_session_when_new_session_fails() -> None:
+    session = FailingSession(fail_at="new_session", error=KiroAcpError("new_session boom"))
+    unit = KiroSessionUnit(lambda: session, cwd="/work")
+
+    with pytest.raises(KiroAcpError) as exc_info:
+        unit._spawn_session()
+
+    assert str(exc_info.value) == "new_session boom"
+    assert session.initialized is True
+    assert session.close_calls == 1
+
+
+def test_spawn_session_preserves_original_exception_type_and_message() -> None:
+    original = KiroAcpError("original message, unchanged")
+    session = FailingSession(fail_at="initialize", error=original)
+    unit = KiroSessionUnit(lambda: session, cwd="/work")
+
+    with pytest.raises(KiroAcpError) as exc_info:
+        unit._spawn_session()
+
+    assert exc_info.value is original
+    assert type(exc_info.value) is KiroAcpError
+    assert str(exc_info.value) == "original message, unchanged"
+
+
+def test_spawn_session_close_failure_does_not_mask_original_error() -> None:
+    session = FailingSession(
+        fail_at="new_session",
+        error=KiroAcpError("real failure"),
+        close_error=RuntimeError("close is also broken"),
+    )
+    unit = KiroSessionUnit(lambda: session, cwd="/work")
+
+    with pytest.raises(KiroAcpError, match="real failure"):
+        unit._spawn_session()
+
+    assert session.close_calls == 1
+
+
+def test_watchdog_restart_calls_spawn_session_which_closes_partial_session() -> None:
+    """End-to-end: a recycle-triggering failure still closes the half-open session."""
+    good_session = FakeSession()
+    bad_session = FailingSession(fail_at="initialize", error=KiroAcpError("recycle boom"))
+    sessions = iter([good_session, bad_session])
+    factory = lambda: next(sessions)  # noqa: E731
+    unit = KiroSessionUnit(factory, cwd="/work", monitor_interval=10.0, history_max=1)
+    stop_event = threading.Event()
+    try:
+        unit.start(stop_event)
+        # This prompt crosses the threshold and triggers a recycle; the
+        # replacement session's handshake fails, so the recycle keeps the
+        # existing (good) session but must still close the half-open one.
+        result = unit.prompt("hello")
+        assert result == "reply:hello"
+        assert bad_session.close_calls == 1
+        assert unit.status()["recycles"] == 0
+        assert unit.is_alive() is True
+    finally:
+        unit.stop(timeout=2.0)
+        stop_event.set()
+
+
+# --------------------------------------------------------------------------- #
+# 6. Non-KiroAcpError spawn failures (OSError/FileNotFoundError) do not kill #
+#    the watchdog thread (qodo review comment 3812045193).                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_spawn_session_normalizes_non_kiro_errors_to_kiro_acp_error() -> None:
+    session = FailingSession(fail_at="start", error=FileNotFoundError("no kiro-cli on PATH"))
+    unit = KiroSessionUnit(lambda: session, cwd="/work")
+
+    with pytest.raises(KiroAcpError) as exc_info:
+        unit._spawn_session()
+
+    assert "no kiro-cli on PATH" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+
+
+def test_watchdog_survives_file_not_found_and_recovers() -> None:
+    """The exact class of failure that fired live under systemd: kiro-cli
+    disappearing from PATH must not kill the monitor thread — it keeps
+    retrying with backoff and recovers once the factory succeeds again."""
+    factory = FlakyRestartFactory(num_failures=2)
+    unit = KiroSessionUnit(
+        factory,
+        cwd="/work",
+        monitor_interval=0.01,
+        backoff_initial_s=0.01,
+        backoff_max_s=0.02,
+    )
+    stop_event = threading.Event()
+    try:
+        unit.start(stop_event)
+        first_session = factory.built[0]
+        first_session.kill()
+
+        # Two restart attempts hit FileNotFoundError before the third
+        # succeeds and produces a second built (and alive) FakeSession.
+        assert _poll_until(lambda: len(factory.built) >= 2, timeout=5.0)
+        assert unit.is_alive() is True
+        assert unit.status()["restarts"] >= 3
+        # The monitor thread must still be running, never having died on the
+        # unhandled FileNotFoundError.
+        assert unit._thread is not None and unit._thread.is_alive()
+    finally:
+        unit.stop(timeout=2.0)
+        stop_event.set()
+
+
+def test_spawn_session_normalizes_oserror_from_factory_itself() -> None:
+    def factory() -> FakeSession:
+        raise OSError("process creation failed")
+
+    unit = KiroSessionUnit(factory, cwd="/work")
+
+    with pytest.raises(KiroAcpError) as exc_info:
+        unit._spawn_session()
+
+    assert "process creation failed" in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, OSError)
