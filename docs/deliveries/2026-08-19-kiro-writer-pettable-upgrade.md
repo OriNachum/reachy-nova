@@ -9,9 +9,24 @@ Wireless (CM4, `pollen@192.168.1.162`) on 2026-08-19.
 
 ## The three success signals (spec c17/h14)
 
-### Signal 1 — a pat produces a spoken/gesture reaction: **PENDING the hand**
+### Signal 1 — a pat produces a spoken/gesture reaction: **PROVEN (10:59:04 BST)**
 
-Everything up to the physical pat is proven:
+Ori patted the head; the journal shows the full chain in one tick —
+`Pat level1! type=side_pat (2 presses)` → `pat-acknowledge fired
+run=pet-reaction` (Ori saw the antennas react) → **`nova-pat-cheer fired
+run=speak say='I love getting pats on my head! This feels wonderful!'`**
+(the kiro-authored rule) → harness inject: "I feel someone petting me and my
+body is already leaning into it — that feels nice!". Recorded in the round-2
+acceptance section (t11 signal 3); closes OriNachum/reachy-nova#7.
+
+Tuning that made it land: while face-tracking the default gate was only
+~3 % open (vs ~13 % idle), so `REACHY_PAT_STILL_EPS_DEG_S=8.0` was set via a
+systemd drop-in (`~/.config/systemd/user/reachy-runtime.service.d/pat-eps.conf`).
+Honest caveat: a follow-up pat ~2 min later did not re-trigger — detection
+while actively tracking remains intermittent; the upstream receptive-window
+discussion continues.
+
+The supporting evidence chain:
 
 - Upstream fix deployed (t1): reachy-mini-cli#168 closed by the v0.49.0
   cadence-invariant deg/s stillness gate (PR #169); merged into the device's
@@ -26,11 +41,10 @@ Everything up to the physical pat is proven:
 - Two rules now react to a pat: the runtime's own `pat-acknowledge` →
   `pet-reaction`, and the kiro-authored `nova-pat-cheer` (below).
 
-**Remaining:** a human pets the head; journals must show the chain
-pat cue → `rule/fire` → sensory inject + `pet-reaction` (and
-`nova-pat-cheer`'s spoken line). Recorded here as *pending*, per the
-honesty condition — never claimed early. This also closes
-OriNachum/reachy-nova#7 (t11 signal 3 of the round-2 record).
+All of the above landed together in the live pat at 10:59:04 — see the
+PROVEN header. Also recorded in
+`docs/plans/2026-08-11-harness-round-2-alive-senses-resilient-start.md`
+(t11 signal 3).
 
 ### Signal 2 — a forge dispatch yields an activated, callable skill: **PROVEN**
 
