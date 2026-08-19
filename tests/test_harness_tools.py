@@ -53,6 +53,9 @@ EXPECTED_TOOLS = (
     # the kiro-writer pair (deviation d1) — refused unless a ForgeLeg is wired
     "forge",
     "use_skill",
+    # author_rule (qodo review comment 3812045168): the kiro-authored-rule
+    # pipeline's production caller, refused the same way as forge/use_skill.
+    "author_rule",
 )
 
 #: ``<time.time_ns()>-<uuid4.hex>.json``

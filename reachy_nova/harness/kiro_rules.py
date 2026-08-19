@@ -136,33 +136,41 @@ def build_prompt(goal: str) -> str:
 #: Any fenced code block, labeled or not (mirrors skill_forge.py's fence regex).
 _FENCE_RE = re.compile(r"```([^\n`]*)\n(.*?)\n?```", re.DOTALL)
 
-#: Fence labels that count as an explicit claim "this is the rule".
-_PREFERRED_LABELS = ("json", "rule", "rule.json")
+
+class _FenceContractViolation(ValueError):
+    """The reply didn't obey the "exactly one fenced object" contract.
+
+    ``str(err)`` is the human-readable reason surfaced verbatim in
+    :func:`author_rule`'s structured failure result.
+    """
 
 
-def _extract_fenced_object(reply: str) -> str | None:
-    """The text of the one fenced object in *reply*, or ``None`` if there is none.
+def _extract_fenced_object(reply: str) -> str:
+    """The text of the ONE fenced object in *reply*.
 
-    Liberal in locating the fence: any fenced block counts, a ``json``/``rule``
-    label is preferred over an unlabeled or oddly-labeled one, and a reply
-    with stray prose around the fence is fine — only the fenced body is
-    returned. Strict from here on: what comes back is handed to ``json.loads``
-    unmodified, so a value that merely LOOKS like an object still has to
-    parse as one.
+    Liberal in locating the fence — any label (or none) is accepted on that
+    single fence, and stray prose around it is fine, only the fenced body is
+    returned. But the prompt's contract (see :func:`build_prompt`) is
+    EXACTLY one fenced object, so this raises :class:`_FenceContractViolation`
+    — rather than silently guessing which one is the rule — for every
+    violation of that contract: no fence at all, more than one fence, or a
+    single fence whose body is empty. What survives is handed to
+    ``json.loads`` unmodified, so a value that merely LOOKS like an object
+    still has to parse as one.
     """
     fences = _FENCE_RE.findall(reply)
     if not fences:
-        return None
-    for label, body in fences:
-        if label.strip().lower() in _PREFERRED_LABELS:
-            stripped = body.strip()
-            if stripped:
-                return stripped
-    for _label, body in fences:
-        stripped = body.strip()
-        if stripped:
-            return stripped
-    return None
+        raise _FenceContractViolation("no fenced rule object found in kiro's reply")
+    if len(fences) > 1:
+        raise _FenceContractViolation(
+            f"reply contains {len(fences)} fenced blocks (multiple fences); "
+            "the protocol requires exactly one fenced JSON object"
+        )
+    _label, body = fences[0]
+    stripped = body.strip()
+    if not stripped:
+        raise _FenceContractViolation("the single fenced block was empty")
+    return stripped
 
 
 def _rule_id_of(rule: Any) -> str | None:
@@ -238,9 +246,10 @@ def author_rule(
         _log("error", reason)
         return _result(False, reason=reason)
 
-    fenced = _extract_fenced_object(reply)
-    if fenced is None:
-        reason = "no fenced rule object found in kiro's reply"
+    try:
+        fenced = _extract_fenced_object(reply)
+    except _FenceContractViolation as err:
+        reason = str(err)
         _log("error", f"{reason}: reply={reply[:200]!r}")
         return _result(False, reason=reason)
 

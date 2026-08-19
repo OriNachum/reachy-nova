@@ -77,6 +77,7 @@ BROWSE = "browse"
 ENROLL_FACE = "enroll_face"
 FORGE = "forge"
 USE_SKILL = "use_skill"
+AUTHOR_RULE = "author_rule"
 
 #: The harness's ENTIRE action set, in publication order. Each addition past
 #: the original six is a deliberate widening of the blast radius, never an
@@ -96,6 +97,7 @@ ACTION_SET: tuple[str, ...] = (
     ENROLL_FACE,
     FORGE,
     USE_SKILL,
+    AUTHOR_RULE,
 )
 
 #: Seconds a tool call waits for the engine to confirm before degrading.
@@ -134,8 +136,8 @@ BROWSE_DISABLED_REASON = (
 #: handle has been wired in (flag on, but ``IntentTools`` built without one).
 BROWSE_NOT_WIRED_REASON = "browser automation is enabled but not wired up yet"
 
-#: Refusal reason when ``forge``/``use_skill`` are called without a wired
-#: ForgeLeg (the kiro writer is opt-in: FORGE_WRITER=kiro).
+#: Refusal reason when ``forge``/``use_skill``/``author_rule`` are called
+#: without a wired ForgeLeg (the kiro writer is opt-in: FORGE_WRITER=kiro).
 FORGE_NOT_WIRED_REASON = (
     "the skill forge is disabled — set FORGE_WRITER=kiro to enable the on-device kiro writer"
 )
@@ -456,6 +458,23 @@ TOOL_SPECS: list[dict] = [
             "required": ["name"],
         },
     ),
+    _spec(
+        AUTHOR_RULE,
+        "Ask your coder agent to write a lasting behavior rule from a "
+        "plain-language goal — unlike create_rule, you describe WHAT you "
+        "want and the writer designs the rule; returns the engine's "
+        "verdict.",
+        {
+            "type": "object",
+            "properties": {
+                "goal": {
+                    "type": "string",
+                    "description": "What the rule should do, in plain language.",
+                },
+            },
+            "required": ["goal"],
+        },
+    ),
 ]
 
 
@@ -759,12 +778,12 @@ class IntentTools:
             return self._create_rule(params)
         if tool_name == BROWSE:
             return self._browse(params)
-        if tool_name in (FORGE, USE_SKILL):
+        if tool_name in (FORGE, USE_SKILL, AUTHOR_RULE):
             return self._forge_tool(tool_name, params)
         return self.submit_and_await(_BUILDERS[tool_name](params))
 
     def _forge_tool(self, tool_name: str, params: Mapping) -> dict:
-        """``forge``/``use_skill`` — delegate to the injected ForgeLeg."""
+        """``forge``/``use_skill``/``author_rule`` — delegate to the injected ForgeLeg."""
         if self._forge_leg is None:
             raise ToolRefused(FORGE_NOT_WIRED_REASON)
         if tool_name == FORGE:
@@ -775,6 +794,11 @@ class IntentTools:
             if improve is not None and not isinstance(improve, str):
                 raise ToolRefused("'improve' must be a string when given")
             return self._forge_leg.forge(goal, improve=improve)
+        if tool_name == AUTHOR_RULE:
+            goal = params.get("goal")
+            if not isinstance(goal, str) or not goal.strip():
+                raise ToolRefused("'goal' must be a non-empty string")
+            return self._forge_leg.author_rule(goal)
         name = params.get("name")
         if not isinstance(name, str):
             raise ToolRefused("'name' must be a string")

@@ -16,8 +16,10 @@ import time
 
 import pytest
 
+from reachy_nova.harness import forge_leg as forge_leg_module
 from reachy_nova.harness.forge_leg import ForgeLeg
 from reachy_nova.harness.tools import (
+    AUTHOR_RULE,
     FORGE,
     FORGE_NOT_WIRED_REASON,
     USE_SKILL,
@@ -140,6 +142,50 @@ def test_use_skill_unknown_name_lists_available(roots):
     assert outcome["available"] == ["chirp-twice"]
 
 
+def test_author_rule_delegates_to_kiro_rules_with_the_same_session(monkeypatch, roots):
+    """ForgeLeg.author_rule delegates to kiro_rules.author_rule using the
+    SAME session handle the leg was constructed with (qodo review comment
+    3812045168)."""
+    calls = []
+
+    def fake_author_rule(goal, session, **kwargs):
+        calls.append((goal, session))
+        return {"ok": True, "rule_id": "nova-pat-nod", "verdict": "reload confirmed: 1", "reason": None}
+
+    monkeypatch.setattr(forge_leg_module.kiro_rules, "author_rule", fake_author_rule)
+    session = _FakeSession()
+    leg = ForgeLeg(_FakeSonic(), session, **roots)
+
+    result = leg.author_rule("nod when patted")
+
+    assert result == {
+        "ok": True,
+        "rule_id": "nova-pat-nod",
+        "verdict": "reload confirmed: 1",
+        "reason": None,
+    }
+    assert calls == [("nod when patted", session)]
+
+
+def test_author_rule_failure_dict_passes_through(monkeypatch, roots):
+    def fake_author_rule(goal, session, **kwargs):
+        return {
+            "ok": False,
+            "rule_id": None,
+            "verdict": None,
+            "reason": "no fenced rule object found in kiro's reply",
+        }
+
+    monkeypatch.setattr(forge_leg_module.kiro_rules, "author_rule", fake_author_rule)
+    leg = ForgeLeg(_FakeSonic(), _FakeSession(), **roots)
+
+    result = leg.author_rule("do a thing")
+
+    assert result["ok"] is False
+    assert result["rule_id"] is None
+    assert "no fenced" in result["reason"]
+
+
 def test_startup_reregisters_previously_forged_skills(roots):
     sonic = _FakeSonic()
     first = ForgeLeg(sonic, _FakeSession(), **roots)
@@ -195,3 +241,64 @@ def test_forge_and_use_skill_are_published_tool_specs():
     names = {spec["toolSpec"]["name"] if "toolSpec" in spec else spec.get("name") for spec in TOOL_SPECS}
     assert FORGE in names or any(FORGE in str(spec) for spec in TOOL_SPECS)
     assert USE_SKILL in names or any(USE_SKILL in str(spec) for spec in TOOL_SPECS)
+
+
+# --------------------------------------------------------------------------- #
+# author_rule — the same wired/unwired/validation contract as forge/use_skill #
+# --------------------------------------------------------------------------- #
+
+
+def test_tools_refuse_author_rule_without_a_wired_leg():
+    import json
+
+    tools = IntentTools()
+    payload = json.loads(tools.execute(AUTHOR_RULE, {"goal": "nod when patted"}))
+    assert payload["ok"] is False
+    assert FORGE_NOT_WIRED_REASON in payload["error"]
+
+
+def test_tools_delegate_author_rule_to_the_wired_leg(monkeypatch, roots):
+    import json
+
+    def fake_author_rule(goal, session, **kwargs):
+        return {"ok": True, "rule_id": "nova-pat-nod", "verdict": "reload confirmed: 1", "reason": None}
+
+    monkeypatch.setattr(forge_leg_module.kiro_rules, "author_rule", fake_author_rule)
+    leg = ForgeLeg(_FakeSonic(), _FakeSession(), **roots)
+    tools = IntentTools(forge_leg=leg)
+
+    result = json.loads(tools.execute(AUTHOR_RULE, {"goal": "nod when patted"}))
+    assert result["ok"] is True
+    assert result["rule_id"] == "nova-pat-nod"
+
+
+def test_tools_delegate_author_rule_failure_dict_through(monkeypatch, roots):
+    import json
+
+    def fake_author_rule(goal, session, **kwargs):
+        return {"ok": False, "rule_id": None, "verdict": None, "reason": "kiro session.prompt() failed: boom"}
+
+    monkeypatch.setattr(forge_leg_module.kiro_rules, "author_rule", fake_author_rule)
+    leg = ForgeLeg(_FakeSonic(), _FakeSession(), **roots)
+    tools = IntentTools(forge_leg=leg)
+
+    result = json.loads(tools.execute(AUTHOR_RULE, {"goal": "nod when patted"}))
+    assert result["ok"] is False
+    assert "boom" in result["reason"]
+
+
+def test_tools_validate_author_rule_arguments(roots):
+    import json
+
+    tools = IntentTools(forge_leg=ForgeLeg(_FakeSonic(), _FakeSession(), **roots))
+    missing = json.loads(tools.execute(AUTHOR_RULE, {}))
+    assert missing["ok"] is False
+    not_a_string = json.loads(tools.execute(AUTHOR_RULE, {"goal": 7}))
+    assert not_a_string["ok"] is False
+    blank = json.loads(tools.execute(AUTHOR_RULE, {"goal": "   "}))
+    assert blank["ok"] is False
+
+
+def test_author_rule_is_a_published_tool_spec():
+    names = {spec["toolSpec"]["name"] for spec in TOOL_SPECS}
+    assert AUTHOR_RULE in names

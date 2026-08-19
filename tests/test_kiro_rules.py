@@ -319,7 +319,10 @@ def test_overlay_refusal_raises_ruleRefused_internally_but_never_escapes(overlay
 # --------------------------------------------------------------------------- #
 
 
-def test_extraction_prefers_a_json_labeled_fence_over_an_earlier_unlabeled_one(overlay_path):
+def test_extraction_rejects_a_reply_with_more_than_one_fence(overlay_path):
+    """The protocol requires exactly one fence — a second one is refused, not
+    silently resolved by preferring the json-labeled one (qodo review comment
+    3812045206)."""
     reply = (
         "Let me think about this...\n"
         "```\n"
@@ -330,16 +333,29 @@ def test_extraction_prefers_a_json_labeled_fence_over_an_earlier_unlabeled_one(o
     )
     session = FakeSession(reply=reply)
     result = author(session=session)
-    assert result["ok"] is True
-    assert result["rule_id"] == "nova-pat-nod"
+    assert result["ok"] is False
+    assert result["rule_id"] is None
+    assert result["verdict"] is None
+    assert "multiple fences" in result["reason"]
+    assert "2 fenced" in result["reason"]
+    assert not overlay_path.exists()
 
 
-def test_extraction_falls_back_to_the_first_fence_when_none_is_labeled_json(overlay_path):
+def test_extraction_accepts_a_single_fence_with_any_label(overlay_path):
     reply = f"```\n{json.dumps(RULE)}\n```"
     session = FakeSession(reply=reply)
     result = author(session=session)
     assert result["ok"] is True
     assert result["rule_id"] == "nova-pat-nod"
+
+
+def test_extraction_rejects_a_single_but_empty_fence(overlay_path):
+    session = FakeSession(reply="```json\n\n```")
+    result = author(session=session)
+    assert result["ok"] is False
+    assert result["rule_id"] is None
+    assert "empty" in result["reason"]
+    assert not overlay_path.exists()
 
 
 # --------------------------------------------------------------------------- #

@@ -706,8 +706,12 @@ def test_default_transport_propagates_urlopen_errors(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_kiro_writer_happy_path_stages_skill(tmp_path, monkeypatch):
-    monkeypatch.setenv("FORGE_WRITER", "kiro")
+@pytest.mark.parametrize("writer_value", ["kiro", "KIRO", "Kiro", " kiro ", "KIRO "])
+def test_kiro_writer_happy_path_stages_skill(tmp_path, monkeypatch, writer_value):
+    """FORGE_WRITER selects the kiro path under any of resolve_writer's
+    accepted spellings — not just the exact lowercase "kiro" (qodo review
+    comment 3812045200)."""
+    monkeypatch.setenv("FORGE_WRITER", writer_value)
     publisher = _RecordingPublisher()
     kiro = _FakeKiroSession(response=GOOD_REPLY_CONTENT)
 
@@ -730,6 +734,45 @@ def test_kiro_writer_happy_path_stages_skill(tmp_path, monkeypatch):
     prompt_text, timeout = kiro.calls[0]
     assert "wave at people" in prompt_text
     assert timeout == skill_forge.DEFAULT_TIMEOUT
+
+
+# ---------------------------------------------------------------------------
+# resolve_writer — the one place FORGE_WRITER is normalized (both SkillForge's
+# own dispatch and harness/app.py's component gate call this).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("kiro", "kiro"),
+        ("KIRO", "kiro"),
+        ("Kiro", "kiro"),
+        (" kiro ", "kiro"),
+        ("KIRO ", "kiro"),
+        ("http", "http"),
+        ("HTTP", "http"),
+        ("carrier-pigeon", "carrier-pigeon"),
+    ],
+)
+def test_resolve_writer_normalizes_known_and_unknown_values(monkeypatch, raw, expected):
+    monkeypatch.setenv("FORGE_WRITER", raw)
+    assert skill_forge.resolve_writer() == expected
+
+
+def test_resolve_writer_defaults_to_http_when_unset(monkeypatch):
+    monkeypatch.delenv("FORGE_WRITER", raising=False)
+    assert skill_forge.resolve_writer() == skill_forge.DEFAULT_FORGE_WRITER == "http"
+
+
+def test_resolve_writer_defaults_to_http_when_empty(monkeypatch):
+    monkeypatch.setenv("FORGE_WRITER", "")
+    assert skill_forge.resolve_writer() == "http"
+
+
+def test_resolve_writer_reads_an_explicit_env_mapping():
+    assert skill_forge.resolve_writer({"FORGE_WRITER": " KIRO "}) == "kiro"
+    assert skill_forge.resolve_writer({}) == "http"
 
 
 def test_kiro_writer_includes_improve_and_context_in_prompt(tmp_path, monkeypatch):

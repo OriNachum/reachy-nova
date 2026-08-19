@@ -31,13 +31,13 @@ without seeing" is visible rather than inferred.
 
 from __future__ import annotations
 
-import os
 import threading
 from pathlib import Path
 
 from .. import config
 from ..nova_browser import act_enabled
 from ..sensory_log import stage as _stage
+from ..skill_forge import resolve_writer
 from . import statedir
 from .cognition_feed import CognitionFeed
 from .gate import EchoGate, resolve_policy
@@ -210,9 +210,13 @@ def build_app() -> list[object]:
     # forge leg — the kiro writer is opt-in (FORGE_WRITER=kiro, deviation d1):
     # a standing watchdogged ACP session plus the forge/use_skill tool surface.
     # Anything failing here degrades to a named absent component, never a crash.
+    # resolve_writer() is the SAME normalization SkillForge._run_inner uses
+    # (qodo review comment 3812045200) — reading FORGE_WRITER inline here with
+    # different normalization is exactly what let "KIRO" expose these
+    # components while every dispatch through them was rejected.
     forge_leg = None
     kiro_unit = None
-    if os.environ.get("FORGE_WRITER", "").strip().lower() == "kiro":
+    if resolve_writer() == "kiro":
         try:
             from ..kiro_acp import KiroAcpSession
             from .forge_leg import ForgeLeg
