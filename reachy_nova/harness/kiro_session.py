@@ -303,11 +303,52 @@ class KiroSessionUnit:
     # -- session spawn / recycle -----------------------------------------------
 
     def _spawn_session(self) -> Any:
-        """Build, start, initialize and open a session. Raises on failure."""
-        session = self._session_factory()
-        session.start()
-        session.initialize()
-        session.new_session(self._cwd)
+        """Build, start, initialize and open a session.
+
+        The single choke point for BOTH:
+
+        * **no leaked subprocesses** — if the handshake fails partway
+          (``start()`` succeeded but ``initialize()`` or ``new_session()``
+          raised, or ``start()`` itself raised after doing partial work), the
+          partially-started session is closed before the exception
+          propagates. ``close()`` itself raising is swallowed (best-effort,
+          logged at DEBUG) so it never masks the original failure.
+        * **a watchdog that survives any spawn failure** — every exception
+          raised anywhere in this method (factory call, ``start()``,
+          ``initialize()``, ``new_session()``) is normalized to
+          :class:`KiroAcpError`, chained via ``from err`` so the original
+          traceback/type is still visible. Production spawn failures are not
+          limited to :class:`KiroAcpError` — e.g. ``kiro-cli`` missing from
+          PATH raises ``FileNotFoundError`` out of ``subprocess.Popen`` (this
+          fired live under systemd) — and callers here
+          (:meth:`_restart_with_backoff`, :meth:`_compact_history`) only
+          catch :class:`KiroAcpError`. Normalizing here, rather than
+          broadening those catches, keeps the watchdog/recycle code itself
+          unchanged. A :class:`KiroAcpError` raised directly by the session is
+          re-raised as-is (same type/message, no double-wrapping).
+        """
+        try:
+            session = self._session_factory()
+        except KiroAcpError:
+            raise
+        except Exception as err:  # noqa: BLE001 - normalize to KiroAcpError
+            raise KiroAcpError(str(err)) from err
+
+        try:
+            session.start()
+            session.initialize()
+            session.new_session(self._cwd)
+        except Exception as err:
+            try:
+                session.close()
+            except Exception as close_err:  # noqa: BLE001 - best-effort cleanup
+                logger.debug(
+                    "kiro_session: close() on failed spawn raised: %s", close_err
+                )
+            if isinstance(err, KiroAcpError):
+                raise
+            raise KiroAcpError(str(err)) from err
+
         return session
 
     def _compact_history(self) -> None:
