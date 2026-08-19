@@ -2,7 +2,7 @@
   "plan_slug": "kiro-writer-pettable-upgrade",
   "schema_version": 1,
   "created": "2026-08-19T09:25:03Z",
-  "updated": "2026-08-19T09:25:03Z",
+  "updated": "2026-08-19T10:21:10Z",
   "deviations": [
     {
       "id": "d1",
@@ -14,7 +14,7 @@
         "t10"
       ],
       "origin": "llm",
-      "status": "proposed",
+      "status": "approved",
       "classification": "acceptable"
     }
   ]

@@ -49,7 +49,7 @@ Quoted verbatim from the `devague summary` skeleton:
 
 ## Mid-work Decisions
 
-- `d1` — (recorded via /deviate, **proposed — awaiting Ori's confirm**) t9
+- `d1` — (recorded via /deviate, **approved by Ori 2026-08-19**, classification `acceptable`) t9
   presumes the harness runs the kiro writer, but no wave-2 task ships the
   integration wiring: nothing constructs KiroSessionUnit in build_app(),
   IntentTools has no forge tool, and SkillForge is not instantiated anywhere
@@ -111,8 +111,6 @@ Quoted verbatim from the `devague summary` skeleton:
 
 ## Remaining Work / Follow-up
 
-- **Ori: confirm (or reject) deviation `d1`** — recorded proposed; the wiring
-  it covers is merged and live-proven.
 - **Repeat-pat reliability while tracking** — intermittent even at
   eps=8.0 deg/s; upstream receptive-window discussion continues on
   reachy-mini-cli (their #168 thread's options 2/3). Consider a receptive
