@@ -39,6 +39,7 @@ import logging
 import threading
 from pathlib import Path
 
+from reachy_nova.harness import kiro_rules
 from reachy_nova.sensory_log import stage as _stage
 from reachy_nova.skill_forge import DEFAULT_STAGING_ROOT, SkillForge
 from reachy_nova.skills import ForgedSkillContext, SkillManager, activate_forged
@@ -68,6 +69,7 @@ class ForgeLeg:
         active_root: Path | str | None = None,
     ) -> None:
         self._sonic = sonic
+        self._session_unit = session_unit
         self._staging_root = Path(staging_root) if staging_root is not None else DEFAULT_STAGING_ROOT
         self._active_root = Path(active_root) if active_root is not None else DEFAULT_ACTIVE_ROOT
 
@@ -119,6 +121,22 @@ class ForgeLeg:
 
     def known_skills(self) -> list[str]:
         return sorted(self._skill_manager.skills)
+
+    def author_rule(self, goal: str) -> dict:
+        """Ask the kiro writer to turn *goal* into a landed behavior rule.
+
+        Delegates to :func:`kiro_rules.author_rule` on the SAME standing
+        session ``forge()`` drives, using the SAME session handle passed at
+        construction. Unlike :meth:`forge` (which only queues a background
+        dispatch and returns immediately), this call runs synchronously —
+        but bounded, since ``kiro_rules.author_rule`` itself is bounded by
+        its own ``prompt_timeout`` — and returns the pipeline's structured
+        ``{ok, rule_id, verdict, reason}`` result verbatim. Tool calls
+        already run off Sonic's own response thread (see
+        ``harness/app.py``'s ``_on_tool_use``), so blocking here never stalls
+        the voice loop.
+        """
+        return kiro_rules.author_rule(goal, self._session_unit)
 
     # -- forge event plumbing ------------------------------------------------
 

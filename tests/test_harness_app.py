@@ -304,6 +304,50 @@ def test_user_transcript_with_no_playback_window_does_not_preempt():
     assert stops == []
 
 
+# --------------------------------------------------------------------------- #
+# FORGE_WRITER normalization — one resolver, one place (qodo comment 3812045200) #
+# --------------------------------------------------------------------------- #
+
+
+def test_app_gates_the_kiro_writer_through_resolve_writer():
+    """build_app() must call the shared resolve_writer(), not its own inline
+    env read — this is what keeps its gate agreeing with SkillForge's own
+    dispatch on what a writer value means."""
+    import inspect
+
+    source = inspect.getsource(app)
+    assert "resolve_writer" in source
+    assert 'os.environ.get("FORGE_WRITER"' not in source
+
+
+@pytest.mark.parametrize("writer_value", ["kiro", "KIRO", "Kiro", " kiro ", "KIRO "])
+def test_kiro_writer_gate_accepts_every_normalized_spelling(monkeypatch, writer_value):
+    """Every spelling resolve_writer() normalizes to "kiro" enables the same
+    kiro-writer components build_app() wires under the exact "kiro" value —
+    this is the composition-level half of qodo comment 3812045200: before the
+    fix, "KIRO" exposed these components while SkillForge rejected every
+    request through them as an unknown writer."""
+    monkeypatch.setenv("FORGE_WRITER", writer_value)
+    components = _build()
+    names = [type(c).__name__ for c in components]
+    assert "KiroSessionUnit" in names
+
+
+@pytest.mark.parametrize("writer_value", ["http", "HTTP", "", "carrier-pigeon"])
+def test_non_kiro_writer_values_leave_the_kiro_writer_absent(monkeypatch, writer_value, caplog):
+    if writer_value:
+        monkeypatch.setenv("FORGE_WRITER", writer_value)
+    else:
+        monkeypatch.delenv("FORGE_WRITER", raising=False)
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        components = _build()
+    names = [type(c).__name__ for c in components]
+    assert "KiroSessionUnit" not in names
+    assert any(
+        "component absent name=kiro-writer reason=writer-http" in m for m in _messages(caplog)
+    )
+
+
 def test_browser_result_callback_reaches_the_conversation(monkeypatch):
     """The answer from a finished browse must inject — the tool result itself
     is only the 'queued' acknowledgment."""

@@ -66,6 +66,23 @@ DEFAULT_TIMEOUT = 120.0
 # kiro-prompt-callable instead. Anything else fails closed.
 DEFAULT_FORGE_WRITER = "http"
 
+
+def resolve_writer(env=os.environ) -> str:
+    """Normalize ``FORGE_WRITER`` — the ONE place that decides what it means.
+
+    Trims whitespace and lowercases, so ``"KIRO"``, ``" kiro "`` and
+    ``"Kiro"`` all resolve identically. Both :class:`SkillForge`'s own
+    dispatch (``_run_inner``) and ``harness/app.py``'s component gate call
+    this instead of reading ``FORGE_WRITER`` inline — before this helper
+    existed the two read the same variable with different normalization
+    (``app.py`` trimmed+lowercased, ``SkillForge`` compared the raw value),
+    so a value like ``"KIRO"`` would enable and expose the kiro-writer
+    components while every request to it was rejected as an unknown writer
+    (qodo review comment 3812045200). An unset or empty value resolves to
+    :data:`DEFAULT_FORGE_WRITER`.
+    """
+    return (env.get("FORGE_WRITER") or DEFAULT_FORGE_WRITER).strip().lower()
+
 PROMPT_TEMPLATE = (
     "You are the skill-forge for Reachy Nova, a physical robot. Given a goal "
     "and sensory context, respond with EXACTLY two fenced code blocks and "
@@ -266,7 +283,7 @@ class SkillForge:
             self._reject(None, [f"internal error: {e}"])
 
     def _run_inner(self, goal: str, context: dict, improve: str | None) -> None:
-        writer = os.environ.get("FORGE_WRITER", DEFAULT_FORGE_WRITER)
+        writer = resolve_writer()
         if writer == "http":
             self._run_http(goal, context, improve)
         elif writer == "kiro":
