@@ -112,7 +112,11 @@ def build_prompt(goal: str) -> str:
         f"        duration comparator (require a numeric 'value' in seconds): {duration_ops}\n"
         '  - "run": string, REQUIRED, the behaviour name to run.\n'
         '  - "params": OPTIONAL object of {name: number} pairs passed to the behaviour.\n'
-        '  - "duration_s": OPTIONAL number > 0 — how long the behaviour runs.\n'
+        '  - "duration_s": number > 0 — how long the behaviour runs. OPTIONAL\n'
+        "    for one-shot behaviours, but REQUIRED for looping behaviours with\n"
+        "    no default duration ('speak' is one): the engine REJECTS a\n"
+        "    looping rule without duration_s because it would hold its channel\n"
+        "    forever. When in doubt, include a small duration_s (2-5 seconds).\n"
         '  - "cooldown_s": OPTIONAL number >= 0 — minimum time between firings.\n'
         '  - "hysteresis": OPTIONAL number >= 0.\n'
         f'  - "say": OPTIONAL string, at most {rules_overlay.MAX_SAY_CHARS} characters — '
