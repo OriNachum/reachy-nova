@@ -102,10 +102,11 @@ class FakeProcess:
     asked.
     """
 
-    def __init__(self, argv: list) -> None:
+    def __init__(self, argv: list, *, stderr: "FakeStderr | None" = None) -> None:
         self.argv = argv
         self.stdout = FakeStdout()
         self.stdin = FakeStdin(on_write=self._on_write)
+        self.stderr = stderr
         self._returncode: int | None = None
         self.terminated = False
         self.killed = False
@@ -640,3 +641,181 @@ def test_explicit_binary_path_is_never_rewritten(monkeypatch):
     with pytest.raises(RuntimeError):
         session.start()
     assert seen["argv"][0] == "/opt/kiro/kiro-cli"
+
+
+# --------------------------------------------------------------------------- #
+# Prompt-timeout poisoning (qodo review comment 3812045178)                  #
+#                                                                             #
+# A prompt timeout must poison the session: further sends on this instance   #
+# raise immediately, the child is hard-terminated, and any late/unsolicited  #
+# session/update chunk is dropped rather than accumulated (guarded by an     #
+# "accepting" flag tied to whichever session/prompt request is in flight).   #
+# --------------------------------------------------------------------------- #
+
+
+def _agent_message_chunk_update(text: str) -> dict:
+    return {
+        "update": {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": text},
+        }
+    }
+
+
+def test_late_chunk_after_prompt_timeout_does_not_contaminate_next_prompt():
+    session, holder = _make_session()
+    session.start()
+    process = holder["process"]
+
+    process.script("initialize", result={})
+    process.script("session/new", result={"sessionId": "s1"})
+    session.initialize(timeout=5)
+    session.new_session(cwd="/tmp", timeout=5)
+
+    # session/prompt is never scripted -> the first turn times out.
+    with pytest.raises(KiroAcpError, match="timed out"):
+        session.prompt("first turn", timeout=0.2)
+
+    # Simulate a chunk from the timed-out turn landing on stdout just after
+    # the future gave up (the reader thread dispatches whatever it reads,
+    # regardless of whether a caller is still waiting on it).
+    session._handle_update(_agent_message_chunk_update("late contamination")["update"])
+    with session._text_lock:
+        assert session._accumulated_text == []  # dropped, never accumulated
+        assert session._dropped_late_chunks >= 1
+
+    # The session is poisoned: the next prompt on the SAME session must raise
+    # rather than silently mixing in (or being able to receive) the late text.
+    with pytest.raises(KiroAcpError, match="poisoned"):
+        session.prompt("second turn", timeout=1)
+
+    with session._text_lock:
+        assert "late contamination" not in "".join(session._accumulated_text)
+
+    session.close(grace=1)
+
+
+def test_prompt_timeout_terminates_child_process():
+    session, holder = _make_session()
+    session.start()
+    process = holder["process"]
+
+    process.script("initialize", result={})
+    process.script("session/new", result={"sessionId": "s1"})
+    session.initialize(timeout=5)
+    session.new_session(cwd="/tmp", timeout=5)
+
+    with pytest.raises(KiroAcpError, match="timed out"):
+        session.prompt("hello?", timeout=0.2)
+
+    assert process.terminated is True
+
+    session.close(grace=1)
+
+
+def test_chunk_with_no_prompt_in_flight_is_dropped_not_accumulated():
+    session, holder = _make_session()
+    session.start()
+    process = holder["process"]
+
+    process.script("initialize", result={})
+    session.initialize(timeout=5)
+
+    # No session/prompt has ever been sent on this session -- an unsolicited
+    # chunk shows up on stdout anyway.
+    process.stdout.push(
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": _agent_message_chunk_update("unsolicited"),
+        }
+    )
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and session._dropped_late_chunks < 1:
+        time.sleep(0.01)
+
+    with session._text_lock:
+        assert session._accumulated_text == []
+        assert session._dropped_late_chunks >= 1
+
+    process.stdout.end()
+    session.close(grace=1)
+
+
+# --------------------------------------------------------------------------- #
+# stderr draining (qodo review comment 3812045182)                          #
+#                                                                             #
+# The child's stderr must be continuously drained on its own thread so a     #
+# full pipe (from kiro's own diagnostics) can never block delivery of ACP    #
+# responses on stdout.                                                      #
+# --------------------------------------------------------------------------- #
+
+
+class FakeStderr:
+    """Queue-backed stderr line iterator; records every line the drain thread reads."""
+
+    _SENTINEL = object()
+
+    def __init__(self) -> None:
+        self._q: "queue.Queue" = queue.Queue()
+        self.consumed: list[str] = []
+
+    def push(self, line: str) -> None:
+        self._q.put(line if line.endswith("\n") else line + "\n")
+
+    def end(self) -> None:
+        self._q.put(self._SENTINEL)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> str:
+        item = self._q.get()
+        if item is self._SENTINEL:
+            raise StopIteration
+        self.consumed.append(item)
+        return item
+
+
+def test_stderr_none_is_tolerated():
+    # The existing FakeProcess (no stderr attached, i.e. stderr is None) must
+    # keep working -- the drain thread must not blow up on a None stream.
+    session, holder = _make_session()
+    session.start()
+    process = holder["process"]
+    assert process.stderr is None
+
+    process.script("initialize", result={"ok": True})
+    result = session.initialize(timeout=5)
+    assert result == {"ok": True}
+
+    process.stdout.end()
+    session.close(grace=1)  # must not hang
+
+
+def test_stderr_is_drained_continuously():
+    holder: dict = {}
+    fake_stderr = FakeStderr()
+
+    def factory(argv: list) -> FakeProcess:
+        proc = FakeProcess(argv, stderr=fake_stderr)
+        holder["process"] = proc
+        return proc
+
+    session = KiroAcpSession(process_factory=factory, env={})
+    session.start()
+    process = holder["process"]
+
+    fake_stderr.push("diagnostic line 1")
+    fake_stderr.push("diagnostic line 2")
+
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and len(fake_stderr.consumed) < 2:
+        time.sleep(0.01)
+
+    assert fake_stderr.consumed == ["diagnostic line 1\n", "diagnostic line 2\n"]
+
+    fake_stderr.end()
+    process.stdout.end()
+    session.close(grace=1)  # must not hang

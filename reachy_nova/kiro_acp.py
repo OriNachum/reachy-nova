@@ -37,10 +37,39 @@ and block on that request's ``Future.result(timeout=...)``. Because
 ``Future`` is itself thread-safe, the only additional lock is a short one
 guarding the request-id counter and the pending-requests dict.
 
+A second background thread (also started by :meth:`start`) continuously
+drains ``process.stderr``, logging each line at DEBUG. This exists solely so
+kiro's own diagnostics can never fill the stderr pipe and block the child —
+an unread stderr pipe backs up the OS pipe buffer, and once that's full the
+child stalls on its own stderr writes and stops delivering ACP responses on
+stdout too. The drain thread tolerates ``stderr is None`` (nothing to do)
+and exits when the pipe hits EOF.
+
 If the child process exits (stdout hits EOF) the reader thread fails every
 still-pending future with :class:`KiroAcpError` rather than leaving a caller
 blocked forever; :meth:`prompt` also rejects immediately, before writing
 anything, if the process has already exited.
+
+Prompt-timeout poisoning
+-------------------------
+``session/update`` notifications carrying ``agent_message_chunk`` text are
+only accumulated while a ``session/prompt`` request is actually in flight
+(tracked as the "active" request id, guarded by the same lock as the
+accumulator). Any chunk that arrives with no prompt in flight — including a
+late chunk from a turn whose request already timed out — is dropped (counted
+and logged at DEBUG) rather than stored, so it can never leak into a later
+turn's result.
+
+As a second, independent layer of defense, a ``session/prompt`` timeout
+*poisons* the session: it is marked dead and the child process is
+hard-terminated immediately. Every subsequent call on this
+:class:`KiroAcpSession` instance (``initialize``/``new_session``/``prompt``)
+raises :class:`KiroAcpError` right away rather than trying the dead child.
+Recovery is **not** retrying on this instance — the standing-session unit
+above this class (``KiroSessionUnit``) polls :attr:`alive`, notices the dead
+session, and respawns a fresh :class:`KiroAcpSession` with capped
+exponential backoff. That respawn is the intended recovery path for a
+prompt timeout.
 """
 
 from __future__ import annotations
@@ -166,6 +195,7 @@ class KiroAcpSession:
 
         self._process: Any | None = None
         self._reader_thread: threading.Thread | None = None
+        self._stderr_thread: threading.Thread | None = None
 
         self._id_lock = threading.Lock()
         self._request_id = 0
@@ -177,9 +207,23 @@ class KiroAcpSession:
 
         # Guards the accumulated-text buffer, written by the reader thread
         # (session/update notifications) and read/reset by prompt() on the
-        # caller's thread.
+        # caller's thread; also guards the "accepting" state below, since
+        # they change together.
         self._text_lock = threading.Lock()
         self._accumulated_text: list[str] = []
+
+        # The request id of the session/prompt currently in flight, if any.
+        # agent_message_chunk updates are only accumulated while this is set
+        # — anything else (no prompt in flight, or a late chunk from a turn
+        # that already timed out) is dropped, not stored.
+        self._active_request_id: int | None = None
+        self._dropped_late_chunks = 0
+
+        # Set by a prompt timeout: the session is dead from here on, and the
+        # child has already been hard-terminated. See "Prompt-timeout
+        # poisoning" in the module docstring.
+        self._poisoned = False
+        self._poison_reason: str | None = None
 
     # -- construction / argv -------------------------------------------------
 
@@ -236,6 +280,10 @@ class KiroAcpSession:
             target=self._read_loop, name="kiro-acp-reader", daemon=True
         )
         self._reader_thread.start()
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr, name="kiro-acp-stderr", daemon=True
+        )
+        self._stderr_thread.start()
 
     def initialize(self, timeout: float = DEFAULT_INITIALIZE_TIMEOUT) -> dict:
         """Run the ACP ``initialize`` handshake; returns its ``result`` dict."""
@@ -269,8 +317,9 @@ class KiroAcpSession:
         """Send one conversational turn; returns the accumulated assistant text.
 
         Raises :class:`KiroAcpError` promptly (no waiting) if the child
-        process has already exited, if the request times out, or if the
-        response carries a JSON-RPC error.
+        process has already exited, if the session was poisoned by an
+        earlier prompt timeout (see the module docstring), if this request
+        times out, or if the response carries a JSON-RPC error.
         """
         if self._session_id is None:
             raise KiroAcpError("prompt() called before a session exists — call new_session() first")
@@ -282,6 +331,7 @@ class KiroAcpSession:
             "session/prompt",
             {"sessionId": self._session_id, "prompt": [{"type": "text", "text": text}]},
             timeout=timeout,
+            track_active=True,
         )
         stop_reason = result.get("stopReason")
         if stop_reason is not None and stop_reason != "end_turn":
@@ -323,6 +373,8 @@ class KiroAcpSession:
 
         if self._reader_thread is not None:
             self._reader_thread.join(timeout=grace)
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=grace)
 
     # -- request/response plumbing --------------------------------------------
 
@@ -331,7 +383,18 @@ class KiroAcpSession:
             self._request_id += 1
             return self._request_id
 
-    def _send_request(self, method: str, params: dict, timeout: float) -> dict:
+    def _send_request(
+        self, method: str, params: dict, timeout: float, *, track_active: bool = False
+    ) -> dict:
+        with self._text_lock:
+            poison_reason = self._poison_reason if self._poisoned else None
+        if poison_reason is not None:
+            raise KiroAcpError(
+                f"cannot send {method!r}: kiro-cli session was poisoned after a prompt "
+                f"timeout ({poison_reason}) and the child process was closed; a fresh "
+                "session is required (the standing-session watchdog respawns one automatically)"
+            )
+
         process = self._process
         if process is None or process.poll() is not None:
             raise KiroAcpError(f"cannot send {method!r}: kiro-cli process is not running")
@@ -340,6 +403,9 @@ class KiroAcpSession:
         future: Future = Future()
         with self._pending_lock:
             self._pending[req_id] = future
+        if track_active:
+            with self._text_lock:
+                self._active_request_id = req_id
 
         message = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
         line = json.dumps(message) + "\n"
@@ -349,6 +415,7 @@ class KiroAcpSession:
         except Exception as err:
             with self._pending_lock:
                 self._pending.pop(req_id, None)
+            self._clear_active_request(req_id)
             raise KiroAcpError(f"failed writing {method!r} to kiro-cli stdin: {err}") from err
 
         try:
@@ -356,11 +423,50 @@ class KiroAcpSession:
         except FutureTimeoutError:
             with self._pending_lock:
                 self._pending.pop(req_id, None)
-            raise KiroAcpError(f"{method!r} timed out after {timeout}s waiting on kiro-cli") from None
+            self._clear_active_request(req_id)
+            if track_active:
+                self._poison(f"{method!r} timed out after {timeout}s waiting on kiro-cli")
+            raise KiroAcpError(
+                f"{method!r} timed out after {timeout}s waiting on kiro-cli; "
+                "session closed to prevent reply contamination"
+            ) from None
+
+        self._clear_active_request(req_id)
 
         if "error" in response:
             raise KiroAcpError(f"{method!r} returned a JSON-RPC error: {response['error']!r}")
         return response.get("result") or {}
+
+    def _clear_active_request(self, req_id: int) -> None:
+        with self._text_lock:
+            if self._active_request_id == req_id:
+                self._active_request_id = None
+
+    def _poison(self, reason: str) -> None:
+        """Mark the session dead and hard-terminate the child.
+
+        Called only from a ``session/prompt`` timeout. See "Prompt-timeout
+        poisoning" in the module docstring for why this exists and what the
+        recovery path is (it is not retrying on this instance).
+        """
+        with self._text_lock:
+            if self._poisoned:
+                return
+            self._poisoned = True
+            self._poison_reason = reason
+        logger.warning(
+            "kiro_acp: poisoning session after %s; hard-terminating the child so the "
+            "standing-session watchdog detects a dead session and respawns it",
+            reason,
+        )
+        process = self._process
+        if process is None:
+            return
+        try:
+            if process.poll() is None:
+                process.terminate()
+        except Exception as err:  # noqa: BLE001 - best-effort during poisoning
+            logger.debug("kiro_acp: terminate() during poisoning raised: %s", err)
 
     def _read_loop(self) -> None:
         """Background reader: decode each stdout line and dispatch it."""
@@ -381,6 +487,26 @@ class KiroAcpSession:
             logger.warning("kiro_acp: reader loop error: %s", err)
         finally:
             self._fail_pending("kiro-cli process exited")
+
+    def _drain_stderr(self) -> None:
+        """Continuously read the child's stderr so a full pipe can never block it.
+
+        kiro-cli's own diagnostics land here; this thread's only job is to
+        keep the pipe drained, logging each line at DEBUG — never surfaced
+        to callers. Tolerates ``stderr is None`` (the fake-process test
+        harness, or any process factory that doesn't pipe stderr) by
+        returning immediately, and exits on EOF like the reader thread.
+        """
+        process = self._process
+        if process is None or process.stderr is None:
+            return
+        try:
+            for raw_line in process.stderr:
+                line = raw_line.rstrip("\n")
+                if line:
+                    logger.debug("kiro stderr: %s", line)
+        except Exception as err:  # noqa: BLE001 - drain thread must never crash silently
+            logger.debug("kiro_acp: stderr drain loop error: %s", err)
 
     def _dispatch(self, msg: dict) -> None:
         if "id" in msg and ("result" in msg or "error" in msg):
@@ -413,6 +539,14 @@ class KiroAcpSession:
         if not text:
             return
         with self._text_lock:
+            if self._active_request_id is None:
+                self._dropped_late_chunks += 1
+                logger.debug(
+                    "kiro_acp: dropping agent_message_chunk with no session/prompt in "
+                    "flight (%d dropped total)",
+                    self._dropped_late_chunks,
+                )
+                return
             self._accumulated_text.append(text)
 
     def _fail_pending(self, reason: str) -> None:
