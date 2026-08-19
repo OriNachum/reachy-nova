@@ -48,8 +48,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import threading
+from pathlib import Path
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -220,6 +222,14 @@ class KiroAcpSession:
         if self._process is not None:
             raise KiroAcpError("KiroAcpSession.start() called twice")
         argv = self.argv
+        # A bare binary name that PATH can't resolve (systemd services often
+        # lack ~/.local/bin, where kiro-cli installs) falls back to the
+        # user-local install before spawning — an explicit KIRO_CLI_BIN path
+        # is never second-guessed.
+        if os.sep not in argv[0] and shutil.which(argv[0]) is None:
+            candidate = Path.home() / ".local" / "bin" / argv[0]
+            if candidate.exists():
+                argv[0] = str(candidate)
         logger.info("kiro_acp: spawning %s", " ".join(argv))
         self._process = self._process_factory(argv)
         self._reader_thread = threading.Thread(

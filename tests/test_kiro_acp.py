@@ -598,3 +598,45 @@ def test_agent_flag_from_env_and_kwarg():
     assert kwarg_wins.argv[-2:] == ["--agent", "other"]
     empty_env_means_none = KiroAcpSession(env={"KIRO_AGENT": ""})
     assert "--agent" not in empty_env_means_none.argv
+
+
+def test_bare_binary_falls_back_to_user_local_bin(monkeypatch, tmp_path):
+    """systemd services often lack ~/.local/bin on PATH — start() falls back."""
+    import shutil as _shutil
+    from pathlib import Path as _Path
+
+    fake_home = tmp_path / "home"
+    local_bin = fake_home / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    fake_bin = local_bin / "kiro-cli"
+    fake_bin.write_text("#!/bin/sh\n")
+
+    monkeypatch.setattr(_shutil, "which", lambda name: None)
+    monkeypatch.setattr(_Path, "home", classmethod(lambda cls: fake_home))
+
+    seen = {}
+
+    def factory(argv):
+        seen["argv"] = list(argv)
+        raise RuntimeError("stop before spawning anything real")
+
+    session = KiroAcpSession(env={}, process_factory=factory)
+    with pytest.raises(RuntimeError):
+        session.start()
+    assert seen["argv"][0] == str(fake_bin)
+
+
+def test_explicit_binary_path_is_never_rewritten(monkeypatch):
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda name: None)
+    seen = {}
+
+    def factory(argv):
+        seen["argv"] = list(argv)
+        raise RuntimeError("stop")
+
+    session = KiroAcpSession(binary="/opt/kiro/kiro-cli", env={}, process_factory=factory)
+    with pytest.raises(RuntimeError):
+        session.start()
+    assert seen["argv"][0] == "/opt/kiro/kiro-cli"
