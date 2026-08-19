@@ -145,6 +145,20 @@ def test_install_script_documents_idempotency() -> None:
     assert "idempotent" in SCRIPT_PATH.read_text().lower()
 
 
+def test_install_script_guards_optional_kiro_config_copy() -> None:
+    """The nova-writer Kiro config `cp` must warn-and-continue on failure,
+    not abort the whole install under the script-wide `set -e` (qodo review
+    comment 3812045214)."""
+    text = SCRIPT_PATH.read_text()
+    assert 'if ! cp "$repo_config" "$kiro_agents_dir/nova-writer.json"' in text
+    # the guard must actually recover (warn + return 0), matching the
+    # function's other guarded steps, not just suppress the error code
+    guard_start = text.index('if ! cp "$repo_config" "$kiro_agents_dir/nova-writer.json"')
+    guard_block = text[guard_start : guard_start + 400]
+    assert "warn " in guard_block
+    assert "return 0" in guard_block
+
+
 # --- end-to-end, stubbed systemctl/sudo -------------------------------------
 
 
