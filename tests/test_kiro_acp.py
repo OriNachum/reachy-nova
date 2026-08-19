@@ -579,3 +579,22 @@ def test_reader_thread_is_daemon():
     process = holder["process"]
     process.stdout.end()
     session.close(grace=1)
+
+
+# --------------------------------------------------------------------------- #
+# --agent selection (KIRO_AGENT / agent kwarg) — the nova-writer seam         #
+# --------------------------------------------------------------------------- #
+
+
+def test_agent_flag_absent_by_default():
+    session = KiroAcpSession(env={})
+    assert "--agent" not in session.argv
+
+
+def test_agent_flag_from_env_and_kwarg():
+    from_env = KiroAcpSession(env={"KIRO_AGENT": "nova-writer"})
+    assert from_env.argv[-2:] == ["--agent", "nova-writer"]
+    kwarg_wins = KiroAcpSession(agent="other", env={"KIRO_AGENT": "nova-writer"})
+    assert kwarg_wins.argv[-2:] == ["--agent", "other"]
+    empty_env_means_none = KiroAcpSession(env={"KIRO_AGENT": ""})
+    assert "--agent" not in empty_env_means_none.argv

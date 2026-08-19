@@ -72,6 +72,11 @@ DEFAULT_MODEL = "minimax-m2.5"
 #: Env var selecting kiro's agent engine. v3 is pass-through (opt-in only) —
 #: it is never the default.
 AGENT_ENGINE_ENV = "KIRO_AGENT_ENGINE"
+
+#: Env var naming the kiro agent config to run sessions as (``--agent``);
+#: unset/empty means kiro's own default agent. The harness deployment sets
+#: this to the provisioned ``nova-writer``.
+AGENT_ENV = "KIRO_AGENT"
 DEFAULT_AGENT_ENGINE = "v2"
 VALID_AGENT_ENGINES = frozenset({"v1", "v2", "v3"})
 
@@ -132,6 +137,7 @@ class KiroAcpSession:
         binary: str | None = None,
         model: str | None = None,
         agent_engine: str | None = None,
+        agent: str | None = None,
         process_factory: ProcessFactory | None = None,
         env: Mapping[str, str] | None = None,
     ) -> None:
@@ -139,6 +145,10 @@ class KiroAcpSession:
 
         self._binary = binary if binary is not None else source.get(BINARY_ENV, DEFAULT_BINARY)
         self._model = model if model is not None else source.get(MODEL_ENV, DEFAULT_MODEL)
+        # The named kiro agent config (e.g. the provisioned ``nova-writer``).
+        # No default: without it kiro uses its own default agent, which is the
+        # right generic behavior; the harness deployment sets KIRO_AGENT.
+        self._agent = agent if agent is not None else (source.get(AGENT_ENV) or None)
 
         resolved_engine = (
             agent_engine if agent_engine is not None else source.get(AGENT_ENGINE_ENV, DEFAULT_AGENT_ENGINE)
@@ -174,7 +184,7 @@ class KiroAcpSession:
     @property
     def argv(self) -> list[str]:
         """The exact argv :meth:`start` spawns."""
-        return [
+        argv = [
             self._binary,
             "acp",
             "--trust-all-tools",
@@ -183,6 +193,9 @@ class KiroAcpSession:
             "--agent-engine",
             self._agent_engine,
         ]
+        if self._agent:
+            argv += ["--agent", self._agent]
+        return argv
 
     # -- status ---------------------------------------------------------------
 
