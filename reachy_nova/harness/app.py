@@ -32,10 +32,12 @@ without seeing" is visible rather than inferred.
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
 from .. import config
 from ..nova_browser import act_enabled
 from ..sensory_log import stage as _stage
+from ..skill_forge import resolve_writer
 from . import statedir
 from .cognition_feed import CognitionFeed
 from .gate import EchoGate, resolve_policy
@@ -205,9 +207,38 @@ def build_app() -> list[object]:
             "supervise", "nova", "component", "component absent name=browser reason=act-disabled"
         )
 
+    # forge leg — the kiro writer is opt-in (FORGE_WRITER=kiro, deviation d1):
+    # a standing watchdogged ACP session plus the forge/use_skill tool surface.
+    # Anything failing here degrades to a named absent component, never a crash.
+    # resolve_writer() is the SAME normalization SkillForge._run_inner uses
+    # (qodo review comment 3812045200) — reading FORGE_WRITER inline here with
+    # different normalization is exactly what let "KIRO" expose these
+    # components while every dispatch through them was rejected.
+    forge_leg = None
+    kiro_unit = None
+    if resolve_writer() == "kiro":
+        try:
+            from ..kiro_acp import KiroAcpSession
+            from .forge_leg import ForgeLeg
+            from .kiro_session import KiroSessionUnit
+
+            kiro_unit = KiroSessionUnit(KiroAcpSession, cwd=str(Path.home()))
+            forge_leg = ForgeLeg(sonic, kiro_unit)
+        except Exception as err:  # noqa: BLE001
+            kiro_unit = None
+            forge_leg = None
+            _stage(
+                "supervise", "nova", "component", f"component absent name=kiro-writer reason={err}"
+            )
+    else:
+        _stage(
+            "supervise", "nova", "component", "component absent name=kiro-writer reason=writer-http"
+        )
+
     intents = IntentTools(
         browser=browser,
         on_browse_progress=sonic.inject_text if browser is not None else None,
+        forge_leg=forge_leg,
     )
     if browser is not None:
         # The browse tool's own result is just the "queued" acknowledgment —
@@ -256,6 +287,11 @@ def build_app() -> list[object]:
     )
 
     components: list[object] = [sonic, speaker, hearing]
+
+    # kiro writer — the standing session restarts under the supervisor like
+    # any other component; the forge/use_skill tools above already hold it.
+    if kiro_unit is not None:
+        components.append(kiro_unit)
 
     # read leg — bus is optional-degraded: no broker means named drops, not death
     bus_component = None

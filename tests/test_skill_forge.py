@@ -74,12 +74,32 @@ def _rejecting_validator(reasons):
     return _validator
 
 
+class _FakeKiroSession:
+    """Duck-typed kiro session stub: the same `.prompt(text, timeout=...)`
+    surface `reachy_nova.kiro_acp.KiroAcpSession` exposes, without spawning a
+    subprocess. `response` is returned verbatim; `exc`, if set, is raised
+    instead (standing in for a dead session, a protocol error, or a timeout —
+    the kiro writer treats any raised exception the same way)."""
+
+    def __init__(self, response: str | None = None, exc: Exception | None = None):
+        self.response = response
+        self.exc = exc
+        self.calls: list[tuple[str, float]] = []
+
+    def prompt(self, text: str, timeout: float = 120.0) -> str:
+        self.calls.append((text, timeout))
+        if self.exc is not None:
+            raise self.exc
+        return self.response
+
+
 @pytest.fixture(autouse=True)
 def _clean_forge_env(monkeypatch):
     """Every test controls FORGE_* env vars explicitly."""
     monkeypatch.delenv("FORGE_BASE_URL", raising=False)
     monkeypatch.delenv("FORGE_MODEL", raising=False)
     monkeypatch.delenv("FORGE_API_KEY", raising=False)
+    monkeypatch.delenv("FORGE_WRITER", raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -673,3 +693,273 @@ def test_default_transport_propagates_urlopen_errors(monkeypatch):
             {},
             5.0,
         )
+
+
+# ---------------------------------------------------------------------------
+# FORGE_WRITER seam — kiro path
+#
+# The kiro writer sends the same authoring instructions through an injected
+# .prompt(text, timeout=...) callable instead of HTTP, then reuses the exact
+# same fence-parse -> stage -> validate -> forge/* event pipeline. Every
+# failure mode below must resolve to forge/rejected with a clear reason,
+# never an exception escaping the dispatch thread.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("writer_value", ["kiro", "KIRO", "Kiro", " kiro ", "KIRO "])
+def test_kiro_writer_happy_path_stages_skill(tmp_path, monkeypatch, writer_value):
+    """FORGE_WRITER selects the kiro path under any of resolve_writer's
+    accepted spellings — not just the exact lowercase "kiro" (qodo review
+    comment 3812045200)."""
+    monkeypatch.setenv("FORGE_WRITER", writer_value)
+    publisher = _RecordingPublisher()
+    kiro = _FakeKiroSession(response=GOOD_REPLY_CONTENT)
+
+    forge = SkillForge(publish=publisher, validator=_ok_validator, staging_root=tmp_path, kiro_session=kiro)
+
+    thread = forge.dispatch("wave at people", {"who": "ori"})
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    event_type, payload = publisher.wait_for("forge/staged")
+    assert payload["name"] == "wave-hello"
+    staged_dir = tmp_path / "wave-hello"
+    assert staged_dir.is_dir()
+    assert (staged_dir / "SKILL.md").read_text().startswith("---")
+    assert "def execute(params, ctx):" in (staged_dir / "executor.py").read_text()
+
+    # dispatch() reached the injected kiro session with the same instructions
+    # (goal text present) and the configured timeout.
+    assert len(kiro.calls) == 1
+    prompt_text, timeout = kiro.calls[0]
+    assert "wave at people" in prompt_text
+    assert timeout == skill_forge.DEFAULT_TIMEOUT
+
+
+# ---------------------------------------------------------------------------
+# resolve_writer — the one place FORGE_WRITER is normalized (both SkillForge's
+# own dispatch and harness/app.py's component gate call this).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("kiro", "kiro"),
+        ("KIRO", "kiro"),
+        ("Kiro", "kiro"),
+        (" kiro ", "kiro"),
+        ("KIRO ", "kiro"),
+        ("http", "http"),
+        ("HTTP", "http"),
+        ("carrier-pigeon", "carrier-pigeon"),
+    ],
+)
+def test_resolve_writer_normalizes_known_and_unknown_values(monkeypatch, raw, expected):
+    monkeypatch.setenv("FORGE_WRITER", raw)
+    assert skill_forge.resolve_writer() == expected
+
+
+def test_resolve_writer_defaults_to_http_when_unset(monkeypatch):
+    monkeypatch.delenv("FORGE_WRITER", raising=False)
+    assert skill_forge.resolve_writer() == skill_forge.DEFAULT_FORGE_WRITER == "http"
+
+
+def test_resolve_writer_defaults_to_http_when_empty(monkeypatch):
+    monkeypatch.setenv("FORGE_WRITER", "")
+    assert skill_forge.resolve_writer() == "http"
+
+
+def test_resolve_writer_reads_an_explicit_env_mapping():
+    assert skill_forge.resolve_writer({"FORGE_WRITER": " KIRO "}) == "kiro"
+    assert skill_forge.resolve_writer({}) == "http"
+
+
+def test_kiro_writer_includes_improve_and_context_in_prompt(tmp_path, monkeypatch):
+    monkeypatch.setenv("FORGE_WRITER", "kiro")
+    publisher = _RecordingPublisher()
+    kiro = _FakeKiroSession(response=GOOD_REPLY_CONTENT)
+
+    forge = SkillForge(publish=publisher, validator=_ok_validator, staging_root=tmp_path, kiro_session=kiro)
+    forge.dispatch(
+        "improve the wave skill",
+        {"last_feedback": "too slow"},
+        improve="def execute(params, ctx):\n    ctx.gesture('wave')\n",
+    ).join(timeout=5)
+
+    publisher.wait_for("forge/staged")
+    prompt_text = kiro.calls[0][0]
+    assert "improve the wave skill" in prompt_text
+    assert "too slow" in prompt_text
+    assert "ctx.gesture('wave')" in prompt_text
+
+
+def test_kiro_writer_not_configured_rejects(tmp_path, monkeypatch):
+    """FORGE_WRITER=kiro with no kiro_session given -> forge/rejected, no crash."""
+    monkeypatch.setenv("FORGE_WRITER", "kiro")
+    publisher = _RecordingPublisher()
+
+    forge = SkillForge(publish=publisher, validator=_ok_validator, staging_root=tmp_path, kiro_session=None)
+
+    thread = forge.dispatch("wave", {})
+    thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    event_type, payload = publisher.wait_for("forge/rejected")
+    assert "kiro writer not configured" in payload["reason"]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_kiro_writer_dead_session_rejects(tmp_path, monkeypatch, caplog):
+    """kiro_session.prompt() raising (e.g. the process already exited) rejects cleanly."""
+    monkeypatch.setenv("FORGE_WRITER", "kiro")
+    publisher = _RecordingPublisher()
+    kiro = _FakeKiroSession(exc=RuntimeError("cannot send 'session/prompt': kiro-cli process is not running"))
+
+    forge = SkillForge(publish=publisher, validator=_ok_validator, staging_root=tmp_path, kiro_session=kiro)
+
+    with caplog.at_level(logging.WARNING):
+        thread = forge.dispatch("wave", {})
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    event_type, payload = publisher.wait_for("forge/rejected")
+    assert "kiro" in payload["reason"].lower()
+    assert "not running" in payload["reason"]
+    assert any(r.levelno >= logging.WARNING for r in caplog.records)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_kiro_writer_timeout_rejects(tmp_path, monkeypatch, caplog):
+    """kiro_session.prompt() raising a timeout still resolves to forge/rejected."""
+    monkeypatch.setenv("FORGE_WRITER", "kiro")
+    publisher = _RecordingPublisher()
+    kiro = _FakeKiroSession(exc=TimeoutError("'session/prompt' timed out after 120.0s waiting on kiro-cli"))
+
+    forge = SkillForge(publish=publisher, validator=_ok_validator, staging_root=tmp_path, kiro_session=kiro)
+
+    with caplog.at_level(logging.WARNING):
+        thread = forge.dispatch("wave", {})
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    event_type, payload = publisher.wait_for("forge/rejected")
+    assert "timed out" in payload["reason"].lower()
+    assert any(r.levelno >= logging.WARNING for r in caplog.records)
+
+
+def test_kiro_writer_unparseable_output_rejects(tmp_path, monkeypatch):
+    """A kiro reply with no fenced blocks rejects via the same shared parsing."""
+    monkeypatch.setenv("FORGE_WRITER", "kiro")
+    publisher = _RecordingPublisher()
+    kiro = _FakeKiroSession(response="Sure! Here is your skill, no code blocks though.")
+
+    forge = SkillForge(publish=publisher, validator=_ok_validator, staging_root=tmp_path, kiro_session=kiro)
+
+    forge.dispatch("wave", {}).join(timeout=5)
+    event_type, payload = publisher.wait_for("forge/rejected")
+    assert payload["reason"]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_kiro_writer_validator_rejection_moves_folder_to_rejected(tmp_path, monkeypatch):
+    """The kiro path reuses the exact same stage/validate/reject pipeline as http."""
+    monkeypatch.setenv("FORGE_WRITER", "kiro")
+    publisher = _RecordingPublisher()
+    kiro = _FakeKiroSession(response=GOOD_REPLY_CONTENT)
+
+    forge = SkillForge(
+        publish=publisher,
+        validator=_rejecting_validator(["imports os", "calls subprocess"]),
+        staging_root=tmp_path,
+        kiro_session=kiro,
+    )
+
+    forge.dispatch("wave", {}).join(timeout=5)
+    event_type, payload = publisher.wait_for("forge/rejected")
+    assert "imports os" in payload["reason"]
+    assert "calls subprocess" in payload["reason"]
+
+    assert not (tmp_path / "wave-hello").exists()
+    rejected_dir = tmp_path / ".rejected" / "wave-hello"
+    assert rejected_dir.is_dir()
+
+
+def test_kiro_writer_never_touches_http_transport(tmp_path, monkeypatch):
+    """FORGE_WRITER=kiro must never invoke the HTTP transport, even if FORGE_BASE_URL is also set."""
+    monkeypatch.setenv("FORGE_WRITER", "kiro")
+    monkeypatch.setenv("FORGE_BASE_URL", "http://forge.local/v1")
+    publisher = _RecordingPublisher()
+    kiro = _FakeKiroSession(response=GOOD_REPLY_CONTENT)
+    transport_calls = []
+
+    def transport(url, payload, headers, timeout):
+        transport_calls.append((url, payload, headers, timeout))
+        return _chat_response(GOOD_REPLY_CONTENT)
+
+    forge = SkillForge(
+        publish=publisher,
+        validator=_ok_validator,
+        staging_root=tmp_path,
+        kiro_session=kiro,
+        transport=transport,
+    )
+
+    forge.dispatch("wave", {}).join(timeout=5)
+    publisher.wait_for("forge/staged")
+    assert transport_calls == []
+    assert len(kiro.calls) == 1
+
+
+def test_invalid_forge_writer_value_fails_closed(tmp_path, monkeypatch, caplog):
+    """An unrecognized FORGE_WRITER value rejects cleanly, like an unconfigured endpoint."""
+    monkeypatch.setenv("FORGE_WRITER", "carrier-pigeon")
+    publisher = _RecordingPublisher()
+
+    forge = SkillForge(publish=publisher, validator=_ok_validator, staging_root=tmp_path)
+
+    with caplog.at_level(logging.WARNING):
+        thread = forge.dispatch("wave", {})
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    event_type, payload = publisher.wait_for("forge/rejected")
+    assert "carrier-pigeon" in payload["reason"]
+    assert any(r.levelno >= logging.WARNING for r in caplog.records)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_default_writer_is_http_when_forge_writer_unset(tmp_path, monkeypatch):
+    """FORGE_WRITER unset -> http path used; an injected kiro_session sits unused."""
+    monkeypatch.setenv("FORGE_BASE_URL", "http://forge.local/v1")
+    publisher = _RecordingPublisher()
+    kiro = _FakeKiroSession(response=GOOD_REPLY_CONTENT)
+    seen_calls = []
+
+    def transport(url, payload, headers, timeout):
+        seen_calls.append(payload)
+        return _chat_response(GOOD_REPLY_CONTENT)
+
+    forge = SkillForge(
+        publish=publisher, validator=_ok_validator, staging_root=tmp_path, transport=transport, kiro_session=kiro
+    )
+    forge.dispatch("wave", {}).join(timeout=5)
+
+    publisher.wait_for("forge/staged")
+    assert len(seen_calls) == 1
+    assert kiro.calls == []  # kiro session never consulted on the default writer
+
+
+def test_explicit_forge_writer_http_matches_default(tmp_path, monkeypatch):
+    """FORGE_WRITER=http explicitly behaves identically to leaving it unset."""
+    monkeypatch.setenv("FORGE_WRITER", "http")
+    monkeypatch.setenv("FORGE_BASE_URL", "http://forge.local/v1")
+    publisher = _RecordingPublisher()
+
+    def transport(url, payload, headers, timeout):
+        return _chat_response(GOOD_REPLY_CONTENT)
+
+    forge = SkillForge(publish=publisher, validator=_ok_validator, staging_root=tmp_path, transport=transport)
+    forge.dispatch("wave", {}).join(timeout=5)
+
+    publisher.wait_for("forge/staged")

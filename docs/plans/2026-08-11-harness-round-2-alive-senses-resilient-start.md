@@ -86,6 +86,30 @@ slug: `harness-round-2-alive-senses-resilient-start` · status: `exported` · fr
   - signals 1-5 of c21 demonstrated live and recorded (overnight cold boot zero-SSH; mid-sentence interrupt; pat reaction; greet + learn a face by voice; spoken web search)
   - during playback, look-toward-sound does not orient to the robot's own speaker and no moving-floor poisoning recurs (c26 observed live); barge-in preempt visible in the journal, no echo loop
 
+#### Signal 3 (pat reaction) — RECORDED LIVE 2026-08-19 (was parked on reachy-mini-cli#168, resumed per OriNachum/reachy-nova#7)
+
+Upstream v0.49.0 (cadence-invariant deg/s stillness gate, closes #168) merged
+into the device runtime (`d458fd5`); gate measured open ~13 % idle / ~3 %
+while face-tracking; `REACHY_PAT_STILL_EPS_DEG_S=8.0` set via systemd drop-in
+to make the engaged robot pettable. Ori patted the head at 10:59:04 BST and
+the full chain landed in one tick, journal-verified on both services:
+
+```text
+Pat level1! type=side_pat (2 presses, level2 threshold=5.2 s)
+[SENSE stage=rule source=pat event=pat-acknowledge] fired kind=react run=pet-reaction
+[SENSE stage=rule source=pat event=nova-pat-cheer] fired kind=react run=speak
+  say='I love getting pats on my head! This feels wonderful!'
+harness: "I feel someone petting me and my body is already leaning into it — that feels nice!"
+```
+
+Ori independently confirmed the visible pet-reaction ("I saw the antennas
+move fast right now (I patted)"). Honest caveat: a follow-up pat ~2 min later
+did not re-trigger the cue — detection while actively face-tracking remains
+intermittent (upstream receptive-window discussion continues on
+reachy-mini-cli). `nova-pat-cheer` is itself kiro-authored (see
+`docs/deliveries/2026-08-19-kiro-writer-pettable-upgrade.md`), so this pat
+also proved the kiro rule firing live.
+
 ## Risks
 
 - [unknown_nonblocking] cv2 + clip encode CPU load next to the 50Hz control loop on a Pi already at load ~2.3 — watch `compose_hz` during bring-up (task t6)

@@ -144,6 +144,65 @@ deploying this harness must find the same listeners plus nothing new — any
 newly-appearing LAN-reachable port introduced by this harness is a
 regression, not an accepted residual.
 
+## Trust decision — the nova-writer Kiro agent runs with full shell as `pollen`
+
+The `nova-writer` Kiro agent (`config/kiro/nova-writer.json`, provisioned to
+`~/.kiro/agents/nova-writer.json` by `scripts/install-device-units.sh`) is an
+optional on-device writer engine: an agentic coding CLI (`kiro-cli`, ACP) that
+authors `reachy_nova` skill code and behavior rules when invoked from the
+forge/rules seams. Its tool config grants the **full** Kiro tool surface —
+`read`, `write`, `shell`, `aws`, and the rest — with every one of those also
+listed in `allowedTools`, and the standing ACP session it backs is started
+with `--trust-all-tools`. In plain terms: **the agent has full shell access
+as the `pollen` user on the CM4**, the same account the harness itself runs
+as.
+
+This is an explicit operator decision (Ori, 2026-08-19), not an oversight or
+a default left un-tightened:
+
+- **Architectural placement, not a tool allow-list.** The Kiro agent sits at
+  what the build plan calls the "Nova 2 Lite boundary" — the same
+  machine-enforced harness cognition tier that Nova 2 Lite's vision
+  understanding already occupies (see `tests/test_harness_boundary.py`: no
+  `reachy_mini` import, no `set_target`, AST-checked). The Kiro agent is a
+  **cognition-level actor** newly added inside that boundary — it can reason
+  about and author artifacts that flow back through sanctioned seams
+  (`inject_text`, the forge pipeline, `rules_overlay`) — but it is never a
+  second owner of the robot SDK. The full-shell grant is about what the
+  writer process can do *on the device it already lives on*, not about
+  granting it a second path onto the robot's motors/audio.
+- **Blast radius is the `pollen` account on the device.** Full shell as
+  `pollen` means the Kiro agent can do anything `pollen` can do on that CM4 —
+  read/write any file `pollen` owns, run any command `pollen` can run. It
+  does **not** grant root, does not grant a new network-reachable surface
+  (see [Accepted residual exposure](#accepted-residual-exposure) above — this
+  harness commits to opening no new listeners), and does not grant AWS
+  credentials beyond whatever `pollen`'s environment already exposes to it.
+  If the `pollen` account itself is compromised, this grant does not make
+  that materially worse; if the Kiro agent itself misbehaves or is
+  manipulated by a bad prompt, the practical ceiling on the damage is "what a
+  bad `pollen` shell session could do," not "root on the robot" or "control
+  of the physical robot outside sanctioned seams."
+- **The code it *authors* is still sandboxed separately from the trust the
+  agent itself runs with.** Full shell belongs to the Kiro **agent**, never
+  to the `executor.py` artifacts it writes. Every forged skill the writer
+  produces still has to pass `forge_validator`'s AST-only allow-list gate
+  (import allow-list, forbidden names, no dunder access, call-target
+  allow-list — see `docs/components/skill-forge.md`) before it is ever
+  eligible to activate, and at runtime a validated skill only ever receives
+  `ForgedSkillContext` — a seven-method surface (`ctx.gesture`,
+  `ctx.vocalize`, `ctx.say`, `ctx.inject`, `ctx.state_get`,
+  `ctx.state_update`, `ctx.emotion`) with no shell, no filesystem, no
+  network. A trusted writer producing untrusted, sandboxed output is the
+  same shape this harness already uses for the HTTP-backed forge path — Kiro
+  changes who/where the authoring happens, not what the generated code is
+  allowed to touch once it's live.
+
+Practically: treat `--trust-all-tools` for `nova-writer` the same way you'd
+treat giving a trusted human contributor an SSH login as `pollen` — it is a
+real, non-trivial grant, scoped to one already-trusted account on one
+already-owned device, made deliberately rather than by default.
+
 ## Running the hardening script
 
 ```bash

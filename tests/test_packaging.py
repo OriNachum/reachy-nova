@@ -92,3 +92,109 @@ def test_harness_stub_help_lists_subcommands():
     assert result.returncode == 0
     assert "run" in result.stdout
     assert "install-unit" in result.stdout
+
+
+def test_mandatory_dependencies_are_exactly_as_expected():
+    """Verify the mandatory dependency list hasn't drifted."""
+    data = _load_pyproject()
+    deps = data["project"]["dependencies"]
+
+    # Expected list of mandatory dependencies (canonical distribution names,
+    # no version specifiers or extras).
+    expected = [
+        "reachy-mini",
+        "boto3",
+        "aws-sdk-bedrock-runtime",
+        "nova-act",
+        "numpy",
+        "opencv-python",
+        "python-dotenv",
+        "pyaudio",
+        "ultralytics",
+        "pymongo",
+        "neo4j",
+        "slack-bolt",
+        "paho-mqtt",
+        "pyyaml",
+        "nemo-toolkit",
+    ]
+
+    # Strip version specifiers and extras from deps to get distribution names.
+    def canonicalize(dep_str: str) -> str:
+        """Extract the distribution name from a dependency specifier."""
+        # Split on brackets (extras) and comparison operators.
+        name = dep_str.split("[")[0]
+        for op in (">=", "<=", "==", ">", "<", "!=", "~="):
+            name = name.split(op)[0]
+        return name.strip().lower().replace("_", "-")
+
+    actual_names = sorted([canonicalize(d) for d in deps])
+    expected_names = sorted(expected)
+
+    assert actual_names == expected_names, (
+        f"Dependency mismatch:\n"
+        f"  Expected: {expected_names}\n"
+        f"  Actual:   {actual_names}"
+    )
+
+
+def test_optional_dependencies_kiro_exists_and_empty():
+    """Verify [project.optional-dependencies] exists with a kiro key that is empty."""
+    data = _load_pyproject()
+    assert "optional-dependencies" in data["project"], (
+        "Missing [project.optional-dependencies] section"
+    )
+    opt_deps = data["project"]["optional-dependencies"]
+    assert "kiro" in opt_deps, (
+        "Missing 'kiro' key in [project.optional-dependencies]"
+    )
+    assert opt_deps["kiro"] == [], (
+        f"Expected kiro to be an empty list, got {opt_deps['kiro']!r}"
+    )
+
+
+def test_import_reachy_nova_does_not_spawn_kiro():
+    """Verify that importing reachy_nova doesn't spawn a kiro process.
+
+    Run a fresh Python interpreter and import reachy_nova, then check:
+    1. The import succeeds.
+    2. No kiro-related module is in sys.modules (static safety).
+    3. No subprocess with 'kiro' in its name is spawned.
+    """
+    import os
+
+    full_env = dict(os.environ)
+    full_env["PYTHONPATH"] = str(REPO_ROOT)
+
+    script = """
+import sys
+import reachy_nova
+
+# Check that no kiro-related module was imported at the top level.
+kiro_modules = [m for m in sys.modules.keys() if "kiro" in m.lower()]
+if kiro_modules:
+    print(f"ERROR: Found kiro modules in sys.modules: {kiro_modules}")
+    sys.exit(1)
+
+print("OK")
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=REPO_ROOT,
+        env=full_env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, (
+        f"Import failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "OK" in result.stdout, (
+        f"Unexpected output:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    # Double-check: no "ERROR" in output.
+    assert "ERROR" not in result.stdout, (
+        f"Kiro module detected during import: {result.stdout}"
+    )
