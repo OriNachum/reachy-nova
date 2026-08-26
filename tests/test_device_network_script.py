@@ -89,6 +89,49 @@ def _write_stub(path: Path, template: str, **kwargs) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+# nmcli stub that fails the *apply-time* modify call to FALLBACK (identified
+# by its target priority, distinct from the recorded/original priority used
+# on revert) but succeeds on every other invocation, including the revert.
+FAILING_SECOND_MODIFY_NMCLI_STUB = """#!/usr/bin/env bash
+printf '%s\\n' "nmcli $*" >> "{log_file}"
+
+if [[ "$1" == "-t" && "$2" == "-f" ]]; then
+    field="$3"
+    name="$6"
+    if [[ "$name" == "{preferred}" ]]; then
+        ac="$NMCLI_STUB_PREFERRED_AC"
+        prio="$NMCLI_STUB_PREFERRED_PRIO"
+        ts="$NMCLI_STUB_PREFERRED_TS"
+    elif [[ "$name" == "{fallback}" ]]; then
+        ac="$NMCLI_STUB_FALLBACK_AC"
+        prio="$NMCLI_STUB_FALLBACK_PRIO"
+        ts="$NMCLI_STUB_FALLBACK_TS"
+    else
+        exit 1
+    fi
+    case "$field" in
+        connection.autoconnect) echo "connection.autoconnect:$ac" ;;
+        connection.autoconnect-priority) echo "connection.autoconnect-priority:$prio" ;;
+        connection.timestamp) echo "connection.timestamp:$ts" ;;
+    esac
+    exit 0
+fi
+
+if [[ "$1" == "connection" && "$2" == "modify" && "$3" == "{fallback}" ]]; then
+    if [[ "$*" == *"autoconnect-priority {fallback_target_prio}"* ]]; then
+        exit 1
+    fi
+fi
+exit 0
+"""
+
+# systemd-run stub that always fails, to exercise the nohup fallback.
+FAILING_SYSTEMD_RUN_STUB = """#!/usr/bin/env bash
+printf '%s\\n' "systemd-run $*" >> "{log_file}"
+exit 1
+"""
+
+
 @pytest.fixture()
 def env(tmp_path: Path):
     """Builds an isolated env dict + stub paths for one test run."""
@@ -369,8 +412,8 @@ def test_revert_restores_recorded_values(env) -> None:
     assert revert_result.returncode == 0, revert_result.stdout + revert_result.stderr
 
     calls = env["log_file"].read_text()
-    assert f"sudo -n {env['env']['REACHY_NMCLI']} connection modify {PREFERRED} connection.autoconnect-priority 5" in calls
-    assert f"sudo -n {env['env']['REACHY_NMCLI']} connection modify {FALLBACK} connection.autoconnect-priority 10" in calls
+    assert f"sudo -n {env['env']['REACHY_NMCLI']} connection modify {PREFERRED} connection.autoconnect yes connection.autoconnect-priority 5" in calls
+    assert f"sudo -n {env['env']['REACHY_NMCLI']} connection modify {FALLBACK} connection.autoconnect yes connection.autoconnect-priority 10" in calls
 
     state_file = env["state_dir"] / "reachy" / "network-revert-state.env"
     assert not state_file.exists(), "revert state should be cleared after --revert"
@@ -404,3 +447,137 @@ def test_check_and_dry_run_never_invoke_sudo(env) -> None:
         run_script(env, *args)
         calls = log_file.read_text() if log_file.exists() else ""
         assert "sudo" not in calls, f"{args} unexpectedly invoked sudo"
+
+
+# --- finding 4: revert must restore original autoconnect too ---------------
+
+
+def test_apply_records_original_autoconnect_alongside_priority(env) -> None:
+    env["env"]["REACHY_NET_NO_SYSTEMD_RUN"] = "1"
+    env["env"]["NMCLI_STUB_FALLBACK_AC"] = "no"
+
+    result = run_script(env, "--apply", "--revert-after", "120")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    state_file = env["state_dir"] / "reachy" / "network-revert-state.env"
+    state_text = state_file.read_text()
+    assert "PREFERRED_AUTOCONNECT=yes" in state_text
+    assert "FALLBACK_AUTOCONNECT=no" in state_text
+    # priorities are still recorded as before
+    assert "PREFERRED_PRIORITY=20" in state_text
+    assert "FALLBACK_PRIORITY=10" in state_text
+
+    pid_file = env["state_dir"] / "reachy" / "network-revert.pid"
+    if pid_file.exists():
+        try:
+            os.kill(int(pid_file.read_text().strip()), 9)
+        except ProcessLookupError:
+            pass
+
+
+def test_revert_restores_original_autoconnect_no(env) -> None:
+    env["env"]["REACHY_NET_NO_SYSTEMD_RUN"] = "1"
+    env["env"]["NMCLI_STUB_FALLBACK_AC"] = "no"
+
+    apply_result = run_script(env, "--apply", "--revert-after", "120")
+    assert apply_result.returncode == 0, apply_result.stdout + apply_result.stderr
+
+    pid_file = env["state_dir"] / "reachy" / "network-revert.pid"
+    if pid_file.exists():
+        try:
+            os.kill(int(pid_file.read_text().strip()), 9)
+        except ProcessLookupError:
+            pass
+
+    revert_result = run_script(env, "--revert")
+    assert revert_result.returncode == 0, revert_result.stdout + revert_result.stderr
+
+    calls = env["log_file"].read_text()
+    nmcli_bin = env["env"]["REACHY_NMCLI"]
+    assert (
+        f"sudo -n {nmcli_bin} connection modify {FALLBACK} "
+        f"connection.autoconnect no connection.autoconnect-priority 10" in calls
+    ), calls
+    assert (
+        f"sudo -n {nmcli_bin} connection modify {PREFERRED} "
+        f"connection.autoconnect yes connection.autoconnect-priority 20" in calls
+    ), calls
+
+    state_file = env["state_dir"] / "reachy" / "network-revert-state.env"
+    assert not state_file.exists()
+
+
+# --- finding 5: rollback must be armed before mutating NetworkManager ------
+
+
+def test_systemd_run_failure_falls_back_to_nohup_and_apply_proceeds(env) -> None:
+    _write_stub(
+        Path(env["env"]["PATH"].split(":", 1)[0]) / "systemd-run",
+        FAILING_SYSTEMD_RUN_STUB,
+        log_file=env["log_file"],
+    )
+
+    result = run_script(env, "--apply", "--revert-after", "60")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    calls = env["log_file"].read_text()
+    assert "systemd-run" in calls  # attempted
+    assert "connection modify" in calls  # apply proceeded anyway
+
+    pid_file = env["state_dir"] / "reachy" / "network-revert.pid"
+    assert pid_file.exists(), "nohup fallback should have armed a pidfile after systemd-run failed"
+    pid = int(pid_file.read_text().strip())
+    time.sleep(0.3)
+    alive = True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        alive = False
+    assert alive, "fallback revert job is not running"
+    try:
+        os.kill(pid, 9)
+    except ProcessLookupError:
+        pass
+
+
+def test_second_modify_failure_triggers_immediate_revert_and_nonzero_exit(env) -> None:
+    # Original fallback priority (3) is deliberately different from the
+    # apply target (10) so the two modify calls are distinguishable in the
+    # stub's log/matching, and so the revert-restoring-the-original
+    # assertion below can't be satisfied by the (failing) apply call itself.
+    env["env"]["NMCLI_STUB_FALLBACK_PRIO"] = "3"
+
+    nmcli_path = Path(env["env"]["PATH"].split(":", 1)[0]) / "nmcli"
+    _write_stub(
+        nmcli_path,
+        FAILING_SECOND_MODIFY_NMCLI_STUB,
+        log_file=env["log_file"],
+        preferred=PREFERRED,
+        fallback=FALLBACK,
+        fallback_target_prio="10",
+    )
+
+    result = run_script(env, "--apply", "--revert-after", "60")
+    assert result.returncode != 0, "apply must fail non-zero when a modify call fails"
+
+    calls = env["log_file"].read_text()
+    log_lines = [line for line in calls.splitlines() if line.strip()]
+
+    # rollback must be armed (revert state recorded + revert scheduled) before
+    # the first mutating nmcli call
+    arm_idx = next(i for i, line in enumerate(log_lines) if line.startswith("systemd-run"))
+    first_modify_idx = next(i for i, line in enumerate(log_lines) if "connection modify" in line)
+    assert arm_idx < first_modify_idx, calls
+
+    # the original fallback priority (3, not the failed apply target of 10)
+    # must have been restored via an explicit revert modify call after the
+    # failure
+    nmcli_bin = env["env"]["REACHY_NMCLI"]
+    assert (
+        f"sudo -n {nmcli_bin} connection modify {FALLBACK} "
+        f"connection.autoconnect yes connection.autoconnect-priority 3" in calls
+    ), calls
+
+    # no leftover pending revert state after the immediate rollback
+    state_file = env["state_dir"] / "reachy" / "network-revert-state.env"
+    assert not state_file.exists()
