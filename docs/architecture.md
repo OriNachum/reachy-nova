@@ -127,7 +127,9 @@ so it survives either side restarting. Everything file-shaped lives under one
 | **Reload spool** (`<state>/behavior/reload/{commands,results}`) | mind ↔ body | "please reload rules" → `CONFIRMED` / `REJECTED` (rejected means the old rules are still live) |
 | **Engine heartbeat** (`<state>/behavior/state.json: updated`) | body → mind | monotonic timestamp with a 2 s TTL — the *only* trusted liveness signal (not systemctl, not PID files) |
 | **PID claims** (`<state>/embody.pid`, `<state>/nova-harness.pid`) | peers | exclusivity between cognition attachments, verified by exact argv token |
-| **Daemon HTTP** (`POST /api/media/sounds/upload` → `play_sound` / `stop_sound`) | mind → daemon | complete mono int16 WAV per utterance; `play_sound` returns when playback *starts*, not ends |
+| **Daemon HTTP** (`POST /api/media/sounds/upload` → `play_sound` / `stop_sound`, plus `GET /api/volume/current` / `POST /api/volume/set`) | mind → daemon | complete mono int16 WAV per utterance; `play_sound` returns when playback *starts*, not ends; the volume endpoints back the `raise_voice`/`lower_voice`/`set_voice_level` tools |
+| **Persisted volume** (`<state>/nova-volume.json`) | mind (own) | last-set voice level, re-applied to the daemon on harness start when it disagrees |
+| **Persisted quiet deadline** (`<state>/nova-quiet.json`) | mind (own) | the timed-quiet `until` epoch, atomically written on every arm/release so a restart inside a quiet window comes back quiet rather than reintroducing itself out loud |
 | **Cognition feed** (NDJSON on stdout/journal) | mind → consumers | `{"t": "thinking" / "message" / "emotion", …}` in reachy-mini-cli's export schema, so external displays (e.g. the reTerminal bridge) read it unmodified |
 | **Kiro stdio** | mind ↔ writer | newline-delimited JSON‑RPC 2.0 (ACP): `initialize` → `session/new` → `session/prompt` with streamed `session/update` chunks |
 
@@ -183,6 +185,19 @@ template renders one sentence and hands it to Sonic's `inject_text`; a missing
 template costs exactly one log line. The raw `sense` stream is off by default
 — unfiltered it once produced 187 cues in 40 s.
 
+Two more per-entry fields shape *how* a rendered inject reaches the model:
+`voice: silent|brief|free` (default `free`) hints how much Nova should say
+about the event — never whether it happened — and the bus appends a short
+marker to the rendered text for `silent`/`brief`; `sense: <class>` (e.g.
+`pat`, `face`, `sound`, `vision`) names the sensory class an entry belongs
+to. The bus keys a per-class **dedupe window** (`NOVA_SENSE_DEDUPE_S`,
+default 10 s) off that `sense` class when present — so two differently
+named rules that fire off the same physical touch or glance collapse into
+one inject — and every inject that clears dedupe is also recorded into a
+small **sense history** ring buffer (`sense_history.py`), read back by the
+`recall_senses` tool so "what did you just feel?" answers from what
+actually happened rather than a guess.
+
 An important reality of the live device: discrete senses mostly **collapse
 into `sense/snapshot`**; only *rule fires* cross the bus as distinct events.
 So for a recognised face to reach the mind at all, the harness upserts one
@@ -221,12 +236,19 @@ Any playback HTTP failure clears the gate, purges the queue and fires one
 `on_playback_failure` — losing the mouth can never leave the mind stuck in
 "speaking".
 
+A timed **quiet gate** (`QuietState`, optional) sits at the very top of this
+path: while a quiet deadline is armed, an utterance is dropped there before
+any upload, gate arm, or queue touch happens — see
+`docs/components/quiet-mode.md`.
+
 ### 5.5 The tool surface — what the voice can *do*
 
 Sonic's `toolConfiguration` is the mind's entire action vocabulary:
 
 `run_behavior · declare_goal · set_mode · set_inhibition · goto · create_rule ·
-browse · enroll_face · forge · use_skill · author_rule`
+browse · enroll_face · lock_face · release_face · raise_voice · lower_voice ·
+set_voice_level · stay_silent · end_silence · recall_senses · forge ·
+use_skill · author_rule`
 
 Every call returns exactly one of three shapes — `{"ok": true, …}` with the
 engine's result verbatim, `{"ok": false, "error": …}` with a pre‑flight or
@@ -429,6 +451,8 @@ lives under `~/.reachy_nova/skills-active/`.
 9. **Cognition attachments are exclusive**; the runtime is the single owner.
 10. **Restate, don't import,** across the repo boundary — the harness restates
     only the rules schema it must, pinned in tests so drift is a visible diff.
+11. **Quiet mode drops at the speaker, never inside the model; a drop is not a
+    playback failure.**
 
 ## 10. The legacy path
 
@@ -451,7 +475,8 @@ directly with no reachy_nova at all.
 - Trust and security: `docs/security.md`
 - Components: `docs/components/skill-forge.md`, `speech-events.md`,
   `nova_sonic.md`, `nova_vision.md`, `patting.md`, `tracking.md`,
-  `vocalize.md`, `nova_browser.md`, `nova_memory.md`
+  `vocalize.md`, `nova_browser.md`, `nova_memory.md`, `gaze.md`,
+  `quiet-mode.md`
 - Nervous system rules: `config/nervous-system/rules.yaml`,
   `docs/plans/nervous-system.md`
 - File‑level module map: `CLAUDE.md`
