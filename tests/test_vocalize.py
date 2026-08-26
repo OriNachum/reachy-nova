@@ -135,6 +135,46 @@ class TestAdditiveHarmonics:
         assert np.allclose(high, clamped_high)
 
 
+class TestMasterGain:
+    """``NOVA_VOCALIZE_GAIN`` (default 0.35) scales the final synthesized
+    signal so vocalize output isn't louder than Nova Sonic's own speech.
+    Parsed defensively like ``NovaSonic``'s ``_liveness_window``/backoff env
+    knobs: missing/non-numeric/non-positive falls back to the default, and
+    the value is capped at 1.0 (vocalize can only be made quieter, never
+    boosted past raw synthesis)."""
+
+    def test_default_peak_is_at_or_below_default_gain(self, monkeypatch):
+        monkeypatch.delenv("NOVA_VOCALIZE_GAIN", raising=False)
+        samples = vocalize.synthesize("chirp_up", sample_rate=24000, duration=0.5, intensity=1.0)
+        assert np.max(np.abs(samples)) <= vocalize.DEFAULT_MASTER_GAIN + 1e-6
+
+    def test_env_override_above_default_is_louder(self, monkeypatch):
+        monkeypatch.setenv("NOVA_VOCALIZE_GAIN", "1.0")
+        samples = vocalize.synthesize("chirp_up", sample_rate=24000, duration=0.5, intensity=1.0)
+        assert np.max(np.abs(samples)) > vocalize.DEFAULT_MASTER_GAIN
+
+    def test_env_override_below_default_is_respected(self, monkeypatch):
+        monkeypatch.setenv("NOVA_VOCALIZE_GAIN", "0.1")
+        samples = vocalize.synthesize("chirp_up", sample_rate=24000, duration=0.5, intensity=1.0)
+        assert np.max(np.abs(samples)) <= 0.1 + 1e-6
+
+    def test_gain_is_capped_at_one(self, monkeypatch):
+        monkeypatch.setenv("NOVA_VOCALIZE_GAIN", "5.0")
+        assert vocalize._master_gain() == 1.0
+
+    def test_missing_env_defaults(self, monkeypatch):
+        monkeypatch.delenv("NOVA_VOCALIZE_GAIN", raising=False)
+        assert vocalize._master_gain() == vocalize.DEFAULT_MASTER_GAIN
+
+    def test_bad_env_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("NOVA_VOCALIZE_GAIN", "not-a-number")
+        assert vocalize._master_gain() == vocalize.DEFAULT_MASTER_GAIN
+        monkeypatch.setenv("NOVA_VOCALIZE_GAIN", "0")
+        assert vocalize._master_gain() == vocalize.DEFAULT_MASTER_GAIN
+        monkeypatch.setenv("NOVA_VOCALIZE_GAIN", "-1")
+        assert vocalize._master_gain() == vocalize.DEFAULT_MASTER_GAIN
+
+
 class _FakeSkillManager:
     """Records register_executor calls, mirroring SkillManager's signature."""
 

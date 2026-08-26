@@ -537,6 +537,156 @@ class TestBackoffIntegration:
         assert any("Immediate restart requested" in m for m in messages)
 
 
+class TestInterruptibleWait:
+    """``_interruptible_wait`` replaces both bare ``asyncio.sleep(delay)``
+    backoff sleeps so a loop already asleep can still be woken by an
+    immediate-restart request (PR #12 finding 2) or by shutdown (finding 3),
+    instead of blocking for up to the full 60s cap."""
+
+    def test_elapses_normally_when_nothing_fires(self, faketime):
+        sonic = NovaSonic(restart_rng=random.Random(20))
+        stop = threading.Event()
+
+        async def _drive():
+            sonic._loop = asyncio.get_running_loop()
+            await sonic._interruptible_wait(stop, 5.0)
+
+        start = faketime.mono
+        asyncio.run(_drive())
+        assert faketime.mono - start >= 5.0
+
+    def test_stop_event_wakes_it_early(self, faketime):
+        sonic = NovaSonic(restart_rng=random.Random(21))
+        stop = threading.Event()
+
+        async def _drive():
+            sonic._loop = asyncio.get_running_loop()
+
+            async def _stopper():
+                # Real (non-fake-clock) yields only — no real wall-clock
+                # wait — so this fires long before the 48s fake backoff
+                # would otherwise elapse.
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                stop.set()
+
+            asyncio.create_task(_stopper())
+            await asyncio.wait_for(sonic._interruptible_wait(stop, 48.0), timeout=10)
+
+        start = faketime.mono
+        asyncio.run(_drive())
+        assert faketime.mono - start < 1.0
+
+    def test_sonic_stop_wakes_it_early(self, faketime):
+        sonic = NovaSonic(restart_rng=random.Random(22))
+        stop = threading.Event()
+
+        async def _drive():
+            sonic._loop = asyncio.get_running_loop()
+
+            async def _stopper():
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                sonic._sonic_stop.set()
+
+            asyncio.create_task(_stopper())
+            await asyncio.wait_for(sonic._interruptible_wait(stop, 48.0), timeout=10)
+
+        start = faketime.mono
+        asyncio.run(_drive())
+        assert faketime.mono - start < 1.0
+
+    def test_immediate_restart_wakes_it_early_and_consumes_the_event(self, faketime):
+        sonic = NovaSonic(restart_rng=random.Random(23))
+        stop = threading.Event()
+
+        async def _drive():
+            sonic._loop = asyncio.get_running_loop()
+
+            async def _requester():
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                sonic.request_immediate_restart("network changed")
+
+            asyncio.create_task(_requester())
+            await asyncio.wait_for(sonic._interruptible_wait(stop, 48.0), timeout=10)
+
+        start = faketime.mono
+        asyncio.run(_drive())
+        assert faketime.mono - start < 1.0
+        assert not sonic._restart_now_event.is_set()
+
+
+class TestInterruptibleWaitIntegration:
+    """Same two signals, but exercised through the real ``_run_loop`` restart
+    sites (session-start failure and post-stream-death backoff), with the
+    loop already parked inside a long (~48s) backoff sleep."""
+
+    def test_immediate_restart_wakes_a_sleeping_backoff(self, faketime):
+        client = _DyingStreamClient()
+        sonic = _make_sonic(client, restart_rng=random.Random(15))
+        sonic._restart_attempt = 4  # next computed delay is ~48s
+
+        stop = threading.Event()
+
+        async def _driver():
+            sonic._loop = asyncio.get_running_loop()
+
+            async def _requester():
+                # Let the first stream open and die, landing the loop
+                # inside the long backoff sleep seeded above.
+                while len(client.streams) < 1:
+                    await asyncio.sleep(0)
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                sonic.request_immediate_restart("network changed")
+                for _ in range(500):
+                    if len(client.streams) >= 2:
+                        break
+                    await asyncio.sleep(0)
+                stop.set()
+
+            req_task = asyncio.create_task(_requester())
+            try:
+                await asyncio.wait_for(sonic._run_loop(stop), timeout=10)
+            finally:
+                req_task.cancel()
+
+        start = faketime.mono
+        asyncio.run(_driver())
+
+        assert len(client.streams) >= 2, "expected the sleeping backoff to wake and restart"
+        assert faketime.mono - start < 5.0, "restart should not wait out the ~48s backoff"
+
+    def test_stop_wakes_a_sleeping_backoff(self, faketime):
+        client = _DyingStreamClient()
+        sonic = _make_sonic(client, restart_rng=random.Random(16))
+        sonic._restart_attempt = 4  # next computed delay is ~48s
+
+        stop = threading.Event()
+
+        async def _driver():
+            sonic._loop = asyncio.get_running_loop()
+
+            async def _stopper():
+                while len(client.streams) < 1:
+                    await asyncio.sleep(0)
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                stop.set()
+
+            stop_task = asyncio.create_task(_stopper())
+            try:
+                await asyncio.wait_for(sonic._run_loop(stop), timeout=10)
+            finally:
+                stop_task.cancel()
+
+        start = faketime.mono
+        asyncio.run(_driver())
+
+        assert faketime.mono - start < 5.0, "_run_loop should exit promptly, not after ~48s"
+
+
 # --------------------------------------------------------------------------- #
 # start() never propagates a failure to the supervisor (task t5)              #
 # --------------------------------------------------------------------------- #

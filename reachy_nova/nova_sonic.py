@@ -644,6 +644,38 @@ class NovaSonic:
         """Check if either the global or sonic-local stop has been requested."""
         return stop_event.is_set() or self._sonic_stop.is_set()
 
+    async def _interruptible_wait(self, stop_event: threading.Event, delay: float) -> None:
+        """Sleep up to ``delay`` seconds, waking early on stop or an immediate restart.
+
+        Both backoff sleeps below (a failed ``_start_session()`` and the
+        delay before reopening a dead stream) call this instead of a bare
+        ``asyncio.sleep(delay)``. A plain sleep can't observe anything until
+        it returns, so a loop already parked inside a long backoff (up to
+        the 60s cap) was deaf to both ``request_immediate_restart()`` — an
+        "immediate" restart could still take up to 60s (PR #12 finding 2) —
+        and to shutdown — stopping Sonic mid-backoff could block loop
+        termination for up to 60s (finding 3). Polling every 0.1s mirrors
+        the watchdog tick in the response-wait loop below.
+
+        When woken by the immediate-restart event (rather than by elapsing
+        or by stop), the event is consumed here — cleared — so the caller
+        can proceed straight to a zero-additional-delay restart without the
+        request lingering to fire a second, redundant break once the new
+        session's response-wait loop starts.
+        """
+        deadline = time.monotonic() + max(0.0, delay)
+        while time.monotonic() < deadline:
+            if self._should_stop(stop_event):
+                return
+            if self._restart_now_event.is_set():
+                self._restart_now_event.clear()
+                logger.info(
+                    "Immediate restart requested during backoff wait: "
+                    f"{self._immediate_restart_reason} — skipping remaining delay"
+                )
+                return
+            await asyncio.sleep(min(0.1, deadline - time.monotonic()))
+
     async def _run_loop(self, stop_event: threading.Event) -> None:
         self._inject_lock = asyncio.Lock()
 
@@ -656,7 +688,7 @@ class NovaSonic:
                 logger.error(
                     f"Session start failed: {e} — retrying in {delay:.0f}s (attempt {attempt})"
                 )
-                await asyncio.sleep(delay)
+                await self._interruptible_wait(stop_event, delay)
                 continue
 
             response_task = asyncio.create_task(self._process_responses())
@@ -746,8 +778,7 @@ class NovaSonic:
             self._system_content = str(uuid.uuid4())
             self._audio_content = str(uuid.uuid4())
 
-            if delay > 0:
-                await asyncio.sleep(delay)
+            await self._interruptible_wait(stop_event, delay)
             # Reset inject throttle so new session gets a quiet start
             self._last_inject_time = time.time()
 
