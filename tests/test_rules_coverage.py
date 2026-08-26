@@ -191,6 +191,23 @@ def test_default_rule_still_exists_as_the_fallback():
     assert raw["default"].get("llm_evaluate") is True
 
 
+def test_lock_awareness_pairs_are_covered_with_templates():
+    """t13: the gaze-lock lifecycle events the runtime publishes while a
+    lock_face gaze lock is held/released each carry an explicit rule with a
+    warm inject_template — face-lost is a quiet "can't see them right now"
+    notice (the lock persists), lock-released is the actual drop.
+    """
+    rules = _load_rules_section()
+
+    for key in ("motion/face-lost", "motion/lock-released"):
+        assert key in rules, f"rules.yaml is missing the t13 lock-awareness entry {key}"
+        entry = rules[key]
+        assert "priority" in entry, f"{key} is missing priority"
+        assert "urgency" in entry, f"{key} is missing urgency"
+        assert "llm_evaluate" in entry, f"{key} is missing llm_evaluate"
+        assert entry.get("inject_template"), f"{key} is expected to carry an inject_template"
+
+
 def test_generic_rule_fire_is_voice_silent():
     """t6: the generic ``rule/fire`` entry (the reflex-fired fallback) is
     marked ``voice: silent`` — Nova gets the situational context but is

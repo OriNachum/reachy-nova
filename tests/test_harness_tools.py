@@ -947,6 +947,54 @@ def test_release_face_logs_one_sense_line_on_confirmation(tools, caplog):
 
 
 # --------------------------------------------------------------------------- #
+# lock_face/release_face mirror the confirmed verdict into LockState (t13)    #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def tools_with_lock(state_dir):
+    from reachy_nova.harness.lock_state import LockState
+
+    lock_state = LockState()
+    return IntentTools(await_timeout=0.15, lock_state=lock_state), lock_state
+
+
+def test_confirmed_lock_face_marks_the_belief_locked(tools_with_lock):
+    tools, lock_state = tools_with_lock
+    with intents_engine(response={"ok": True, "op": "lock_face", "locked": True}):
+        tools.execute("lock_face", {})
+    assert lock_state.locked is True
+
+
+def test_confirmed_release_face_marks_the_belief_released(tools_with_lock):
+    tools, lock_state = tools_with_lock
+    lock_state.mark_locked()
+    with intents_engine(response={"ok": True, "op": "release_face", "released": True}):
+        tools.execute("release_face", {})
+    assert lock_state.locked is False
+
+
+def test_refused_lock_face_does_not_touch_the_belief(tools_with_lock):
+    tools, lock_state = tools_with_lock
+    with intents_engine(response={"ok": False, "error": "no face known"}):
+        tools.execute("lock_face", {})
+    assert lock_state.locked is None
+
+
+def test_degraded_lock_face_does_not_touch_the_belief(tools_with_lock):
+    tools, lock_state = tools_with_lock
+    tools.execute("lock_face", {})  # no engine — degrades to ok: null
+    assert lock_state.locked is None
+
+
+def test_lock_face_works_normally_with_no_lock_state_wired(tools):
+    # IntentTools() built by the plain `tools` fixture has no lock_state at all.
+    with intents_engine(response={"ok": True, "op": "lock_face", "locked": True}):
+        result = json.loads(tools.execute("lock_face", {}))
+    assert result["ok"] is True
+
+
+# --------------------------------------------------------------------------- #
 # run_behavior names the gaze one-shots reachable through it (task t9)        #
 # --------------------------------------------------------------------------- #
 

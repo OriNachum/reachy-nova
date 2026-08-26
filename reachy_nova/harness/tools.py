@@ -62,6 +62,7 @@ from pathlib import Path
 
 from reachy_nova import sensory_log
 from reachy_nova.harness import statedir
+from reachy_nova.harness.lock_state import LockState
 from reachy_nova.harness.quiet import QuietState
 from reachy_nova.harness.rules_overlay import RuleRefused, upsert_rule
 from reachy_nova.nova_browser import act_enabled
@@ -901,6 +902,7 @@ class IntentTools:
         daemon_client: object | None = None,
         history: object | None = None,
         quiet: QuietState | None = None,
+        lock_state: LockState | None = None,
     ) -> None:
         # ``forge``/``use_skill`` (deviation d1) drive a ForgeLeg handle the
         # same way ``browse`` drives a NovaBrowser: injected, and refused with
@@ -917,6 +919,12 @@ class IntentTools:
         # the speaker gates on and the bus marks injects with — one object,
         # three readers, so the mind-side quiet can never disagree with itself.
         self._quiet = quiet
+        # ``lock_face``/``release_face`` (task t13) also update the harness's
+        # own LockState belief — public attribute, not a private one, so the
+        # supervisor can find it on this component (see build_app/
+        # supervisor._find_lock_state) without a second constructor argument
+        # threaded through every layer between them.
+        self.lock_state = lock_state
         # Did WE put SPEAK_BEHAVIOR into the runtime's inhibited set? Only then
         # may we take it back out: somebody else holding 'speak' down (an
         # operator, a rule) must survive our release untouched.
@@ -1036,7 +1044,28 @@ class IntentTools:
             return self._stay_silent(params)
         if tool_name == END_SILENCE:
             return self._end_silence(params)
+        if tool_name in (LOCK_FACE, RELEASE_FACE):
+            return self._lock_face_tool(tool_name, params)
         return self.submit_and_await(_BUILDERS[tool_name](params))
+
+    def _lock_face_tool(self, tool_name: str, params: Mapping) -> dict:
+        """``lock_face``/``release_face`` — spool round-trip, then mirror the
+        engine's CONFIRMED verdict into :attr:`lock_state`.
+
+        Only an ``ok: true`` result updates the belief: a refusal ("no face
+        known") or a degraded ``ok: null`` (unconfirmed) result means the
+        body's actual lock state did not observably change, so the belief must
+        not either. ``release_face``'s own "not locked" no-op still carries
+        ``ok: true`` (see the tool's docstring in this module's test suite),
+        which is exactly the state the belief should end up in either way.
+        """
+        result = self.submit_and_await(_BUILDERS[tool_name](params))
+        if self.lock_state is not None and result.get("ok") is True:
+            if tool_name == LOCK_FACE:
+                self.lock_state.mark_locked()
+            else:
+                self.lock_state.mark_released("requested")
+        return result
 
     def _forge_tool(self, tool_name: str, params: Mapping) -> dict:
         """``forge``/``use_skill``/``author_rule`` — delegate to the injected ForgeLeg."""

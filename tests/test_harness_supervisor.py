@@ -162,6 +162,46 @@ def test_engine_heartbeat_loss_is_a_named_drop(state_dir, caplog):
     )
 
 
+def test_engine_heartbeat_loss_clears_the_lock_belief_via_the_lock_state_hook(state_dir, caplog):
+    """t13: run()'s lock_state kwarg is notified on the live -> dropped
+    transition, so a locally-believed lock does not outlive the engine
+    process that actually held it."""
+    from reachy_nova.harness.lock_state import LockState
+
+    caplog.set_level(logging.INFO, logger="nova.sensory")
+    _write_heartbeat(state_dir, age_s=0.0)
+    lock_state = LockState()
+    lock_state.mark_locked()
+    stop = threading.Event()
+
+    def tick_hook(count: int) -> None:
+        if count == 1:
+            _write_heartbeat(state_dir, age_s=60.0)
+        if count >= 2:
+            stop.set()
+
+    supervisor.run([], stop, poll_interval=0.0, tick_hook=tick_hook, lock_state=lock_state)
+
+    assert lock_state.locked is None
+    assert (
+        "[SENSE stage=supervise source=nova event=lock] released reason=engine-restart"
+        in caplog.text
+    )
+
+
+def test_find_lock_state_discovers_it_on_a_component():
+    from reachy_nova.harness.lock_state import LockState
+
+    lock_state = LockState()
+    component = types.SimpleNamespace(lock_state=lock_state)
+
+    assert supervisor._find_lock_state([types.SimpleNamespace(), component]) is lock_state
+
+
+def test_find_lock_state_returns_none_when_absent():
+    assert supervisor._find_lock_state([types.SimpleNamespace()]) is None
+
+
 def test_engine_recovery_is_named_too(state_dir, caplog):
     caplog.set_level(logging.INFO, logger="nova.sensory")
     _write_heartbeat(state_dir, age_s=60.0)
@@ -323,6 +363,27 @@ def test_run_starts_the_loop_when_nothing_else_is_live(state_dir, monkeypatch):
     assert not statedir.harness_pid_path().exists()
 
 
+def test_cmd_run_passes_the_composed_lock_state_to_run(state_dir, monkeypatch):
+    """t13: cmd_run finds the composed graph's LockState (if any) and hands it
+    to run() so the engine-heartbeat watch can clear a stale belief."""
+    from reachy_nova.harness.lock_state import LockState
+
+    lock_state = LockState()
+    component = types.SimpleNamespace(lock_state=lock_state, name="fake")
+    monkeypatch.setattr(supervisor, "_composed_components", lambda: [component])
+    captured: dict[str, object] = {}
+
+    def fake_run(components, stop_event, **kwargs):
+        captured["lock_state"] = kwargs.get("lock_state")
+
+    monkeypatch.setattr(supervisor, "run", fake_run)
+
+    code = supervisor.main(["run"])
+
+    assert code == 0
+    assert captured["lock_state"] is lock_state
+
+
 # --------------------------------------------------------------------------- #
 # PR #6 review fixes (qodo): atomic pid claim + no-components refusal          #
 # --------------------------------------------------------------------------- #
@@ -365,6 +426,23 @@ def test_cmd_run_refuses_when_no_components_compose(tmp_path, monkeypatch):
     assert rc == supervisor.EXIT_NO_COMPONENTS
     # the pid file is released so the retry can claim it
     assert supervisor.read_pid() is None
+
+
+def test_status_reports_locked_none_when_no_lock_state_is_given(state_dir):
+    assert supervisor.status()["locked"] is None
+
+
+def test_status_reports_the_lock_states_current_belief(state_dir):
+    from reachy_nova.harness.lock_state import LockState
+
+    lock_state = LockState()
+    assert supervisor.status(lock_state=lock_state)["locked"] is None
+
+    lock_state.mark_locked()
+    assert supervisor.status(lock_state=lock_state)["locked"] is True
+
+    lock_state.mark_released()
+    assert supervisor.status(lock_state=lock_state)["locked"] is False
 
 
 def test_status_reports_the_quiet_deadline_when_one_is_armed(state_dir):
