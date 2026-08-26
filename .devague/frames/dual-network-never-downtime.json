@@ -614,7 +614,7 @@
     {
       "id": "s6",
       "surface": "challenge pass / adjacent-systems lens: device 'which tailscale', systemctl tailscaled",
-      "finding": "no tailscale on the robot (spark has 100.127.105.72); overlay networking is an unexamined alternative to subnet-bound discovery \u2014 raised as a user decision, not assumed",
+      "finding": "no tailscale on the robot (spark has <spark-tailnet-ip>); overlay networking is an unexamined alternative to subnet-bound discovery \u2014 raised as a user decision, not assumed",
       "seeds": []
     },
     {
@@ -725,7 +725,7 @@
     },
     {
       "id": "s21",
-      "surface": "challenge pass 2 / security lens: tailnet membership (spark 100.127.105.72, Ori's devices), robot SSH as pollen, Kiro full shell",
+      "surface": "challenge pass 2 / security lens: tailnet membership (spark <spark-tailnet-ip>, Ori's devices), robot SSH as pollen, Kiro full shell",
       "finding": "clean pass with one note: on the tailnet the robot's SSH becomes reachable from every device on Ori's tailnet, not only the LAN \u2014 same trust domain (Ori's own devices); no ACL work required this round, recorded as examined",
       "seeds": []
     }

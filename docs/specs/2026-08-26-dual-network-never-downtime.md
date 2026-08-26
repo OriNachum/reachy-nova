@@ -87,7 +87,7 @@
   - seeds: `c5`
 - `s5` — `challenge pass / adjacent-systems lens: reachy wireless find --json + overview, ~/.local/state/reachy/units.json`: discovery is an IPv4 HTTP sweep of spark's local /24-or-narrower subnets (268 hosts in 2.2 s), registry keyed by `hardware_id` with `last_ip`; it cannot see across subnets, so on the hotspot spark must be on the hotspot too, and 'wireless pin' aliases go stale on every switch
   - seeds: `c5`
-- `s6` — `challenge pass / adjacent-systems lens: device 'which tailscale', systemctl tailscaled`: no tailscale on the robot (spark has 100.127.105.72); overlay networking is an unexamined alternative to subnet-bound discovery — raised as a user decision, not assumed
+- `s6` — `challenge pass / adjacent-systems lens: device 'which tailscale', systemctl tailscaled`: no tailscale on the robot (spark has <spark-tailnet-ip>); overlay networking is an unexamined alternative to subnet-bound discovery — raised as a user decision, not assumed
 - `s7` — `challenge pass / assumptions lens: nmcli general status (CONNECTIVITY full), connection profiles hidden=no, autoconnect-retries default`: NM has connectivity checking but no failover-on-uplink-loss policy; hidden=no means NM waits for a beacon rather than probing the hotspot SSID
   - seeds: `c16`
 - `s8` — `challenge pass / failure-mode lens: reachy_nova/nova_sonic.py (_liveness_window, clock-step), harness/unit.py, grep for route/network in harness`: the harness has zero network awareness today — only unit ordering (After=network-online.target) and Sonic's 180 s liveness + clock-step watchdogs; nothing reacts to an IP change
@@ -113,7 +113,7 @@
   - seeds: `c26`
 - `s20` — `challenge pass 2 / spec-consistency lens: §Honesty line 43 (h6 'either … or the spec explicitly declares uplink loss out of scope')`: the spec never made the declaration h6 requires — added c27 `non_goal` so h6 is satisfiable
   - seeds: `c27`
-- `s21` — `challenge pass 2 / security lens: tailnet membership (spark 100.127.105.72, Ori's devices), robot SSH as pollen, Kiro full shell`: clean pass with one note: on the tailnet the robot's SSH becomes reachable from every device on Ori's tailnet, not only the LAN — same trust domain (Ori's own devices); no ACL work required this round, recorded as examined
+- `s21` — `challenge pass 2 / security lens: tailnet membership (spark <spark-tailnet-ip>, Ori's devices), robot SSH as pollen, Kiro full shell`: clean pass with one note: on the tailnet the robot's SSH becomes reachable from every device on Ori's tailnet, not only the LAN — same trust domain (Ori's own devices); no ACL work required this round, recorded as examined
 
 ## Decisions
 
