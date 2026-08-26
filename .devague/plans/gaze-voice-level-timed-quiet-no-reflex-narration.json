@@ -5,7 +5,7 @@
   "schema_version": 4,
   "status": "exported",
   "created": "2026-08-26T13:08:01Z",
-  "updated": "2026-08-26T13:32:31Z",
+  "updated": "2026-08-26T14:28:47Z",
   "targets": [
     {
       "id": "c1",
@@ -788,6 +788,26 @@
         "h23",
         "c33",
         "h25"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t17",
+      "summary": "runtime: mute/unmute intent kinds gating SpeechActuator.say + retained reachy/state/nova/online subscriber wired into FaceLockDriver.mind_online (reachy/behavior/speech_act.py, intents or a new mute driver, export/mqtt.py subscriber, cli/_commands/behavior.py wiring)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "mute -> {ok:true, op:'mute', muted:true}; while muted SpeechActuator.say drops the utterance and logs one latched senselog line; unmute -> {ok:true, muted:false}; a rule with run='nod' + say='...' is silent while muted (test through the rule engine's speech seam)",
+        "A retained reachy/state/nova/online message drives mind_online(): payload online -> True, offline/last-will -> False, never received -> None; FaceLockDriver releases with reason mind-offline after the grace when the harness goes offline (test with a fake MQTT client)",
+        "Both new kinds registered at composition like goto; uv run pytest -n auto green; black/isort/flake8 clean"
+      ],
+      "deps": [
+        "t5"
+      ],
+      "covers": [
+        "c36",
+        "h26",
+        "c43"
       ],
       "instruction": ""
     }

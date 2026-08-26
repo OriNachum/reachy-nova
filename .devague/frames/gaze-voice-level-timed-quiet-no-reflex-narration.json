@@ -4,7 +4,7 @@
   "schema_version": 5,
   "status": "exported",
   "created": "2026-08-26T10:59:59Z",
-  "updated": "2026-08-26T13:00:23Z",
+  "updated": "2026-08-26T14:51:57Z",
   "claims": [
     {
       "id": "c1",
@@ -1076,8 +1076,8 @@
     },
     {
       "id": "s32",
-      "surface": "challenge pass / cheap-probe: GET http://192.168.1.162:8000/api/volume/current",
-      "finding": "Not examined live \u2014 robot unreachable from spark during this pass (LAN/tailnet down or robot off); the daemon route is verified from source only (reachy_mini volume.py). Re-probe before the volume live check.",
+      "surface": "challenge pass / cheap-probe: GET http://<robot>:8000/api/volume/current",
+      "finding": "Not examined live \u2014 robot unreachable from spark during this pass (LAN/tailnet down or robot off); the daemon route is verified from source only (reachy_mini volume.py). Re-probe GET /api/volume/current on the robot before the volume live check.",
       "seeds": []
     }
   ],

@@ -159,7 +159,7 @@
   - seeds: `c43`
 - `s30` — `challenge pass / reversibility lens: config/nervous-system/rules.yaml load path (bus.py:255-270 no schema validation)`: Adding voice/sense fields is backward- and forward-compatible: `load_rules` does not validate keys, so an older harness ignores them and a newer harness defaults absent ones — clean pass, no rollback requirement needed
 - `s31` — `challenge pass / hardware lens: reachy-mini-cli reachy/behavior/engine.py:172-195 (admit -> evict by stopping class) + library.py:52-66 (LibraryEntry channels/default_class)`: Head-channel arbitration for the new one-shots is real but resolvable inside the existing StopClass model; parked as nonblocking for the plan.
-- `s32` — `challenge pass / cheap-probe: GET http://192.168.1.162:8000/api/volume/current`: Not examined live — robot unreachable from spark during this pass (LAN/tailnet down or robot off); the daemon route is verified from source only (`reachy_mini` volume.py). Re-probe before the volume live check.
+- `s32` — `challenge pass / cheap-probe: GET http://<robot>:8000/api/volume/current`: Not examined live — robot unreachable from spark during this pass (LAN/tailnet down or robot off); the daemon route is verified from source only (`reachy_mini` volume.py). Re-probe GET /api/volume/current on the robot before the volume live check.
 
 ## Decisions
 

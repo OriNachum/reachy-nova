@@ -1,0 +1,21 @@
+{
+  "plan_slug": "gaze-voice-level-timed-quiet-no-reflex-narration",
+  "schema_version": 1,
+  "created": "2026-08-26T14:28:47Z",
+  "updated": "2026-08-26T14:28:47Z",
+  "deviations": [
+    {
+      "id": "d1",
+      "what": "Add runtime task t17: a mute/unmute intent kind gating SpeechActuator.say for the quiet window, plus a retained reachy/state/nova/online subscriber wired into FaceLockDriver.mind_online; stay_silent/end_silence spool the extra op. Approved by Ori (option A) on 2026-08-26.",
+      "task_ref": "t5",
+      "reason": "runtime has no MQTT subscriber (mind_online shipped as a None seam; only max-hold binds) and rule 'say' bypasses the speak behavior (rule_engine.py:493 -> speech_act.py:468), so inhibiting 'speak' only mutes rules that run=speak",
+      "affects": [
+        "t5",
+        "t12"
+      ],
+      "origin": "user",
+      "status": "approved",
+      "classification": "acceptable"
+    }
+  ]
+}
