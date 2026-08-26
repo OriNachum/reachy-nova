@@ -68,6 +68,10 @@ EXPECTED_TOOLS = (
     # riding the runtime's lock_face/release_face intent kinds.
     "lock_face",
     "release_face",
+    # the gaze ALIAS pair (live finding L4) — thin run_behavior aliases under
+    # the underscored names Sonic actually reached for on the robot.
+    "look_at_face",
+    "look_at_sound",
     # the kiro-writer pair (deviation d1) — refused unless a ForgeLeg is wired
     "forge",
     "use_skill",
@@ -1894,3 +1898,81 @@ def test_the_restart_re_mute_happens_only_once(state_dir, clock):
         tools.tick()
         tools.tick()
     assert len(_ops(engine, "mute")) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Live findings L4/L5 (on-device run 2026-08-26 18:26–18:31)                  #
+#                                                                             #
+# L4: Sonic reached for a tool named `look_at_face`, was pre-flight refused   #
+#     ("unknown tool"), and gave up instead of calling                        #
+#     run_behavior(name="look-at-face").                                      #
+# L5: Sonic never called release_face on "you can look away", never called    #
+#     lower_voice on "a bit quieter", and never called recall_senses on "why  #
+#     did you do that?" — the descriptions never named those phrases.         #
+# --------------------------------------------------------------------------- #
+
+GAZE_ALIASES = {
+    "look_at_face": "look-at-face",
+    "look_at_sound": "look-at-sound",
+}
+
+
+def _spec_for(name: str) -> dict:
+    return next(s["toolSpec"] for s in TOOL_SPECS if s["toolSpec"]["name"] == name)
+
+
+@pytest.mark.parametrize("tool_name,behavior", sorted(GAZE_ALIASES.items()))
+def test_l4_a_gaze_alias_spools_the_run_behavior_op(tools, tool_name, behavior):
+    with intents_engine() as engine:
+        result = json.loads(tools.execute(tool_name, {}))
+    assert result["ok"] is True
+    assert [p["op"] for p in engine.seen] == ["run_behavior"]
+    payload = engine.seen[0]
+    assert payload["name"] == behavior
+    assert payload["lifetime"]["duration"] == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize("tool_name,behavior", sorted(GAZE_ALIASES.items()))
+def test_l4_a_gaze_alias_honours_an_explicit_duration(tools, tool_name, behavior):
+    with intents_engine() as engine:
+        json.loads(tools.execute(tool_name, {"duration": 4.5}))
+    assert engine.seen[0]["name"] == behavior
+    assert engine.seen[0]["lifetime"]["duration"] == pytest.approx(4.5)
+
+
+@pytest.mark.parametrize("tool_name", sorted(GAZE_ALIASES))
+def test_l4_a_gaze_alias_refuses_a_bad_duration_before_the_spool_write(tools, tool_name):
+    result = json.loads(tools.execute(tool_name, {"duration": 0}))
+    assert result["ok"] is False
+    assert "duration" in result["error"]
+    assert spooled() == []
+
+
+@pytest.mark.parametrize("tool_name", sorted(GAZE_ALIASES))
+def test_l4_a_gaze_alias_takes_no_required_arguments(tool_name):
+    schema = json.loads(_spec_for(tool_name)["inputSchema"]["json"])
+    assert schema["required"] == []
+    assert set(schema["properties"]) == {"duration"}
+
+
+def test_l4_the_gaze_alias_descriptions_say_what_they_do():
+    assert (
+        "glance at the person in front of you"
+        in _spec_for("look_at_face")["description"].lower()
+    )
+    assert "turn toward the last sound" in _spec_for("look_at_sound")["description"].lower()
+
+
+@pytest.mark.parametrize(
+    "tool_name,phrases",
+    [
+        ("release_face", ("look away", "stop following", "you can stop looking at me")),
+        ("lower_voice", ("quieter", "softer", "turn it down")),
+        ("raise_voice", ("speak up", "louder")),
+        ("recall_senses", ("why did you do that", "what did you feel", "what just happened")),
+    ],
+)
+def test_l5_descriptions_name_the_phrases_people_actually_say(tool_name, phrases):
+    description = _spec_for(tool_name)["description"].lower()
+    for phrase in phrases:
+        assert phrase in description, f"{tool_name} description never names {phrase!r}"

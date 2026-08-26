@@ -72,7 +72,10 @@ HARNESS_SYSTEM_PROMPT = (
     "a sound, or nothing at all, and never describe your own mechanism (no "
     "'reflex', 'rule', 'my body reacted on its own') unless someone asks why. "
     "When someone asks why you did something, what you felt, or what just "
-    "happened, call recall_senses and answer from what it returns."
+    "happened, call recall_senses and answer from what it returns. "
+    "When someone tells you to stop following or look away, call "
+    "release_face; when they ask why you did something, call recall_senses "
+    "before answering."
 )
 
 # --------------------------------------------------------------------------- #

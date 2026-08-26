@@ -346,18 +346,45 @@ rules:
 
   intent/applied:
     # A standing symbolic goal took effect in the runtime.
+    #
+    # LIVE FINDING L3 (2026-08-26 18:26-18:31): `{name}` is the intent KIND,
+    # not a thing a person said — so every quiet arm (set_inhibition, the
+    # mute/unmute pair behind stay_silent) narrated "Your standing intention
+    # 'set_inhibition' is now in effect." out loud. That is Nova reading its
+    # own plumbing aloud. It stays an inject (Nova should know its request
+    # landed) but is `voice: silent`: context only, never spoken about.
     priority: NORMAL
     urgency: DEFERRABLE
     llm_evaluate: false
+    voice: silent
     inject_template: "Your standing intention '{name}' is now in effect."
 
   intent/blocked:
     # The runtime refused a standing goal — a failure Nova must not miss,
     # otherwise it keeps believing it asked for something that never landed.
+    #
+    # LIVE FINDING L3: while a face lock was held, the RUNTIME's own
+    # `look-toward-sound` rule kept re-admitting `orient-to-sound` and kept
+    # being refused by the standing inhibition, ~once every 10 s. Rendered
+    # with `{name}` (= the intent kind, `set_inhibition`) that read as "The
+    # runtime blocked your intention 'set_inhibition'." — misleading (it is
+    # the BODY's reflex being held back, exactly as Nova asked, not Nova's
+    # own request failing) and relentless.
+    #
+    # The wire payload for an intent event is {t, ts, tick, action, name,
+    # payload} (reachy-mini-cli reachy/export/runtime.py runtime_to_jsonl);
+    # the blocked behaviour's own name is NOT a top-level field — the
+    # IntentDriver emits `behavior=` but `_intent_status_event` keeps only
+    # kind/cmd_id/result/reason/goal, and `payload` is nested. So the text
+    # names no behaviour at all rather than rendering an empty `{behavior}`.
+    # `voice: silent` keeps it as context; `dedupe: reflex-held` collapses
+    # the ~10 s repeat into one inject per dedupe window.
     priority: NORMAL
     urgency: NOW
     llm_evaluate: false
-    inject_template: "The runtime blocked your intention '{name}'."
+    voice: silent
+    dedupe: reflex-held
+    inject_template: "(a body reflex was held back)"
 
   motion/admit:
     priority: LOW

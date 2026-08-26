@@ -183,3 +183,56 @@ def test_route_event_absent_voice_defaults_to_free():
     text, reason = bus.route_event(cfg, "src", "type", {})
     assert reason == bus.REASON_INJECT
     assert text == "context"
+
+
+# --------------------------------------------------------------------------- #
+# Live finding L3 (on-device run 2026-08-26 18:26–18:31)                      #
+#                                                                             #
+# While a face lock was held, the runtime's own `look-toward-sound` rule kept  #
+# re-admitting `orient-to-sound` into the standing inhibition and being        #
+# refused. Every ~10 s the harness spoke "The runtime blocked your intention   #
+# 'set_inhibition'." — the body's reflex being held back exactly as asked,     #
+# narrated as Nova's own request failing. `intent/applied` was the same story  #
+# on the other edge: "Your standing intention 'set_inhibition' is now in       #
+# effect." after every quiet arm.                                             #
+# --------------------------------------------------------------------------- #
+
+
+def test_l3_intent_blocked_is_a_silent_deduped_body_cue(rules_cfg, raw_rules):
+    entry = raw_rules["rules"]["intent/blocked"]
+    assert entry.get("voice") == "silent"
+    assert entry.get("dedupe") == "reflex-held"
+
+    text, reason = bus.route_event(
+        rules_cfg, "intent", "blocked", {"name": "set_inhibition", "reason": "inhibited"}
+    )
+    assert reason == bus.REASON_INJECT
+    assert text.endswith(bus.VOICE_MARKERS["silent"])
+    # It no longer accuses Nova of having its own intention refused.
+    assert "set_inhibition" not in text
+    assert "intention" not in text.lower()
+    assert "held back" in text.lower()
+
+
+def test_l3_intent_blocked_renders_no_empty_placeholder(rules_cfg):
+    """The runtime's wire payload carries no top-level behaviour name, so the
+    template must not leave a dangling empty field behind."""
+    text, _ = bus.route_event(rules_cfg, "intent", "blocked", {"name": "set_inhibition"})
+    assert "{" not in text
+    assert ": )" not in text and "()" not in text
+    assert text.strip() == text
+
+
+def test_l3_intent_blocked_repeats_collapse_onto_one_dedupe_key(rules_cfg):
+    """The ~10 s repeat is one bucket: the dedupe identity ignores the payload."""
+    rule = bus.rule_for(rules_cfg, "intent", "blocked", {"name": "set_inhibition"})
+    first = bus.dedupe_key_for("intent", "blocked", {"name": "set_inhibition"}, rule)
+    second = bus.dedupe_key_for("intent", "blocked", {"name": "declare_goal"}, rule)
+    assert first == second == "reflex-held"
+
+
+def test_l3_intent_applied_is_context_only_never_spoken(rules_cfg, raw_rules):
+    assert raw_rules["rules"]["intent/applied"].get("voice") == "silent"
+    text, reason = bus.route_event(rules_cfg, "intent", "applied", {"name": "set_inhibition"})
+    assert reason == bus.REASON_INJECT  # still context — Nova learns it landed
+    assert text.endswith(bus.VOICE_MARKERS["silent"])

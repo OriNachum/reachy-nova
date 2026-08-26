@@ -83,6 +83,8 @@ BROWSE = "browse"
 ENROLL_FACE = "enroll_face"
 LOCK_FACE = "lock_face"
 RELEASE_FACE = "release_face"
+LOOK_AT_FACE = "look_at_face"
+LOOK_AT_SOUND = "look_at_sound"
 FORGE = "forge"
 USE_SKILL = "use_skill"
 AUTHOR_RULE = "author_rule"
@@ -118,6 +120,8 @@ ACTION_SET: tuple[str, ...] = (
     ENROLL_FACE,
     LOCK_FACE,
     RELEASE_FACE,
+    LOOK_AT_FACE,
+    LOOK_AT_SOUND,
     FORGE,
     USE_SKILL,
     AUTHOR_RULE,
@@ -146,6 +150,20 @@ HEAD_AXES: tuple[str, ...] = ("x", "y", "z", "roll", "pitch", "yaw")
 #: published ceiling, re-checked here so a runaway duration is refused where
 #: the model can read the refusal.
 MAX_GOTO_DURATION_S = 10.0
+
+#: The runtime behaviours behind the two gaze alias tools (finding L4). The
+#: TOOL names use underscores because that is what the model reached for live
+#: (2026-08-26: Sonic called ``look_at_face``, got "unknown tool", and gave
+#: up rather than retrying as ``run_behavior(name="look-at-face")``); the WIRE
+#: names keep the engine's own hyphenated library spelling.
+GAZE_ALIAS_BEHAVIORS: dict[str, str] = {
+    LOOK_AT_FACE: "look-at-face",
+    LOOK_AT_SOUND: "look-at-sound",
+}
+
+#: How long a gaze one-shot runs when the model names no duration — the same
+#: "about 2 seconds" the ``run_behavior`` description already advertises.
+DEFAULT_GAZE_DURATION_S = 2.0
 
 #: Top-level fields a goto command may carry.
 _GOTO_FIELDS = frozenset({"label", "head", "antennas", "body_yaw", "duration", "interpolation"})
@@ -543,8 +561,44 @@ TOOL_SPECS: list[dict] = [
         RELEASE_FACE,
         "Stop following a locked face and look away: releases a gaze lock "
         "started with lock_face, so you go back to normal look-around "
-        "behavior.",
+        "behavior. Call it whenever someone says 'look away', 'stop "
+        "following', or 'you can stop looking at me'.",
         {"type": "object", "properties": {}, "required": []},
+    ),
+    _spec(
+        LOOK_AT_FACE,
+        "Glance at the person in front of you: turns your head toward the "
+        "face you can see, once, for a couple of seconds, then back to what "
+        "you were doing. For a lasting gaze that follows them, use lock_face "
+        "instead.",
+        {
+            "type": "object",
+            "properties": {
+                "duration": {
+                    "type": "number",
+                    "description": "Seconds to hold the glance. Omit for the "
+                    f"default ({DEFAULT_GAZE_DURATION_S:g}).",
+                },
+            },
+            "required": [],
+        },
+    ),
+    _spec(
+        LOOK_AT_SOUND,
+        "Turn toward the last sound: swings your head to where you last "
+        "heard something, once, for a couple of seconds. Use it when a noise "
+        "catches your attention.",
+        {
+            "type": "object",
+            "properties": {
+                "duration": {
+                    "type": "number",
+                    "description": "Seconds to hold the turn. Omit for the "
+                    f"default ({DEFAULT_GAZE_DURATION_S:g}).",
+                },
+            },
+            "required": [],
+        },
     ),
     _spec(
         FORGE,
@@ -606,7 +660,8 @@ TOOL_SPECS: list[dict] = [
     ),
     _spec(
         RAISE_VOICE,
-        "Speak a bit louder. Confirm briefly and naturally afterward — "
+        "Speak a bit louder — call it when someone says 'speak up' or "
+        "'louder'. Confirm briefly and naturally afterward — "
         "do not read out the volume number.",
         {
             "type": "object",
@@ -622,8 +677,9 @@ TOOL_SPECS: list[dict] = [
     ),
     _spec(
         LOWER_VOICE,
-        "Speak a bit quieter. Confirm briefly and naturally afterward — "
-        "do not read out the volume number.",
+        "Speak a bit quieter — call it when someone says 'quieter', "
+        "'softer', or 'turn it down'. Confirm briefly and naturally "
+        "afterward — do not read out the volume number.",
         {
             "type": "object",
             "properties": {
@@ -653,8 +709,9 @@ TOOL_SPECS: list[dict] = [
     ),
     _spec(
         RECALL_SENSES,
-        "Recall what you actually just sensed and did: use it when someone "
-        "asks why you moved, what you felt, or what just happened, and answer "
+        "Recall what you actually just sensed and did: call it when someone "
+        "says 'why did you do that', 'what did you feel', or 'what just "
+        "happened' — and whenever they ask why you moved — and answer "
         "from the actual entries in your own words — never describe internal "
         "mechanisms like tools, injects, or rules.",
         {
@@ -914,6 +971,34 @@ def _build_release_face(args: Mapping) -> dict:  # noqa: ARG001 - no arguments t
     return {"op": RELEASE_FACE}
 
 
+def _build_gaze_alias(tool_name: str, args: Mapping) -> dict:
+    """``look_at_face``/``look_at_sound`` — thin aliases over ``run_behavior``.
+
+    They add no capability: each is exactly the ``run_behavior`` spool op for
+    the matching gaze one-shot, with a default duration filled in. They exist
+    because a name the model already reaches for is worth more than the name
+    we would have preferred — live on 2026-08-26 Sonic called ``look_at_face``,
+    was pre-flight refused ("unknown tool"), and abandoned the gesture
+    entirely rather than reaching for ``run_behavior(name="look-at-face")``
+    (finding L4). Building through :func:`_build_run_behavior` rather than
+    hand-rolling the payload keeps the two paths from ever drifting apart.
+    """
+    duration = args.get("duration")
+    if duration is None:
+        duration = DEFAULT_GAZE_DURATION_S
+    return _build_run_behavior({"name": GAZE_ALIAS_BEHAVIORS[tool_name], "duration": duration})
+
+
+def _build_look_at_face(args: Mapping) -> dict:
+    """``look_at_face`` — the ``look-at-face`` one-shot, under the name the model uses."""
+    return _build_gaze_alias(LOOK_AT_FACE, args)
+
+
+def _build_look_at_sound(args: Mapping) -> dict:
+    """``look_at_sound`` — the ``look-at-sound`` one-shot, under the name the model uses."""
+    return _build_gaze_alias(LOOK_AT_SOUND, args)
+
+
 _BUILDERS = {
     RUN_BEHAVIOR: _build_run_behavior,
     DECLARE_GOAL: _build_declare_goal,
@@ -923,6 +1008,8 @@ _BUILDERS = {
     ENROLL_FACE: _build_enroll_face,
     LOCK_FACE: _build_lock_face,
     RELEASE_FACE: _build_release_face,
+    LOOK_AT_FACE: _build_look_at_face,
+    LOOK_AT_SOUND: _build_look_at_sound,
 }
 
 #: Dispatched locally against the daemon client, never through the intents
