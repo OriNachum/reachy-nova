@@ -210,6 +210,74 @@ def test_system_prompt_tells_nova_to_recall_senses():
     assert "recall_senses" in app.HARNESS_SYSTEM_PROMPT
 
 
+# --------------------------------------------------------------------------- #
+# System-prompt rewrite for body cues (t9)                                    #
+# --------------------------------------------------------------------------- #
+
+
+def test_system_prompt_never_narrates_body_mechanics():
+    assert "never describe" in app.HARNESS_SYSTEM_PROMPT
+    assert "mention what you did" not in app.HARNESS_SYSTEM_PROMPT
+
+
+def test_system_prompt_covers_unknown_kind_errors():
+    assert "unknown-kind" in app.HARNESS_SYSTEM_PROMPT
+
+
+def test_system_prompt_names_the_gaze_lock_tools():
+    assert "lock_face" in app.HARNESS_SYSTEM_PROMPT
+    assert "release_face" in app.HARNESS_SYSTEM_PROMPT
+
+
+# --------------------------------------------------------------------------- #
+# Daemon-client wiring (t9) — the shared DaemonClient + restore_volume()      #
+# --------------------------------------------------------------------------- #
+
+
+def test_intent_tools_receive_a_daemon_client_on_the_same_base_url(monkeypatch):
+    from reachy_nova.harness.daemon_client import DaemonClient
+
+    captured: dict = {}
+    real_intent_tools = IntentTools
+
+    def _spy(*args, **kwargs):
+        captured["daemon_client"] = kwargs.get("daemon_client")
+        return real_intent_tools(*args, **kwargs)
+
+    monkeypatch.setattr(app, "IntentTools", _spy)
+
+    components = _build()
+    speaker = components[1]
+
+    assert isinstance(captured["daemon_client"], DaemonClient)
+    assert captured["daemon_client"].base_url == speaker.base_url
+
+
+def test_build_app_calls_restore_volume_on_the_persisted_path_and_client(monkeypatch):
+    from reachy_nova.harness.daemon_client import DaemonClient
+
+    calls = []
+    monkeypatch.setattr(app, "restore_volume", lambda path, client: calls.append((path, client)))
+    _build()
+    assert len(calls) == 1
+    path, client = calls[0]
+    assert path == statedir.volume_state_path()
+    assert isinstance(client, DaemonClient)
+
+
+def test_build_app_never_raises_when_restore_volume_fails(monkeypatch, caplog):
+    def _boom(*_a, **_k):
+        raise RuntimeError("daemon unreachable")
+
+    monkeypatch.setattr(app, "restore_volume", _boom)
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        _build()  # must not raise
+    assert any(
+        "component absent name=volume reason=daemon unreachable" in m
+        for m in _messages(caplog)
+    )
+
+
 def test_bus_and_intents_share_the_same_sense_history(monkeypatch):
     captured: dict = {}
     real_intent_tools = IntentTools

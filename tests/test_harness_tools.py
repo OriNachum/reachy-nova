@@ -58,6 +58,10 @@ EXPECTED_TOOLS = (
     "create_rule",
     "browse",
     "enroll_face",
+    # the gaze-lock pair (task t9) — spool-backed like the original five,
+    # riding the runtime's lock_face/release_face intent kinds.
+    "lock_face",
+    "release_face",
     # the kiro-writer pair (deviation d1) — refused unless a ForgeLeg is wired
     "forge",
     "use_skill",
@@ -173,6 +177,8 @@ VALID_ARGS = {
     "set_mode": {"mode": "calm"},
     "set_inhibition": {"behaviors": ["nod"]},
     "goto": {"head": {"pitch": 5.0}, "duration": 1.0},
+    "lock_face": {},
+    "release_face": {},
 }
 
 
@@ -789,6 +795,160 @@ def test_enroll_face_logs_one_sense_line_on_refusal(tools, caplog):
     (line,) = _sense_lines(caplog)
     assert "[SENSE stage=act source=nova event=enroll_face]" in line
     assert "refused" in line
+
+
+# --------------------------------------------------------------------------- #
+# lock_face / release_face — spool-backed gaze lock (task t9)                 #
+# --------------------------------------------------------------------------- #
+#
+# The runtime (reachy-mini-cli) owns the actual gaze lock; these two tools are
+# plain no-argument ops on the SAME intents spool as run_behavior/goto/etc.
+# Whatever the engine answers — a typed success, a named no-op note, or an
+# older runtime's unknown-kind refusal — reaches the model unchanged.
+
+
+def test_lock_face_tool_spec_takes_no_arguments():
+    (spec,) = [s for s in TOOL_SPECS if s["toolSpec"]["name"] == "lock_face"]
+    schema = json.loads(spec["toolSpec"]["inputSchema"]["json"])
+    assert schema["required"] == []
+    assert schema["properties"] == {}
+
+
+def test_release_face_tool_spec_takes_no_arguments():
+    (spec,) = [s for s in TOOL_SPECS if s["toolSpec"]["name"] == "release_face"]
+    schema = json.loads(spec["toolSpec"]["inputSchema"]["json"])
+    assert schema["required"] == []
+    assert schema["properties"] == {}
+
+
+def test_lock_face_tool_spec_describes_keeping_the_gaze():
+    (spec,) = [s for s in TOOL_SPECS if s["toolSpec"]["name"] == "lock_face"]
+    description = spec["toolSpec"]["description"].lower()
+    assert "look" in description
+    assert "stop" in description
+
+
+def test_release_face_tool_spec_describes_looking_away():
+    (spec,) = [s for s in TOOL_SPECS if s["toolSpec"]["name"] == "release_face"]
+    description = spec["toolSpec"]["description"].lower()
+    assert "look away" in description or "stop" in description
+
+
+def test_lock_face_spools_the_agreed_op(tools):
+    tools.execute("lock_face", {})
+    (payload,) = spool_payloads()
+    assert payload["op"] == "lock_face"
+
+
+def test_release_face_spools_the_agreed_op(tools):
+    tools.execute("release_face", {})
+    (payload,) = spool_payloads()
+    assert payload["op"] == "release_face"
+
+
+def _assert_verbatim(result: dict, answer: dict) -> None:
+    """The engine's typed result reaches the model verbatim (plus its own cmd_id)."""
+    assert answer.items() <= result.items()
+
+
+def test_lock_face_returns_the_engines_success_verbatim(tools):
+    answer = {"ok": True, "op": "lock_face", "locked": True}
+    with intents_engine(response=answer):
+        result = json.loads(tools.execute("lock_face", {}))
+    _assert_verbatim(result, answer)
+
+
+def test_lock_face_already_locked_note_passes_through(tools):
+    answer = {"ok": True, "op": "lock_face", "locked": True, "note": "already locked"}
+    with intents_engine(response=answer):
+        result = json.loads(tools.execute("lock_face", {}))
+    _assert_verbatim(result, answer)
+
+
+def test_lock_face_surfaces_no_face_known_refusal(tools):
+    answer = {"ok": False, "error": "no face known"}
+    with intents_engine(response=answer):
+        result = json.loads(tools.execute("lock_face", {}))
+    _assert_verbatim(result, answer)
+
+
+def test_release_face_returns_the_engines_success_verbatim(tools):
+    answer = {"ok": True, "op": "release_face", "released": True}
+    with intents_engine(response=answer):
+        result = json.loads(tools.execute("release_face", {}))
+    _assert_verbatim(result, answer)
+
+
+def test_release_face_inactive_lock_no_op_passes_through_unchanged(tools):
+    """Releasing when nothing is locked is a named no-op, not a refusal."""
+    answer = {"ok": True, "op": "release_face", "released": False, "note": "not locked"}
+    with intents_engine(response=answer):
+        result = json.loads(tools.execute("release_face", {}))
+    _assert_verbatim(result, answer)
+
+
+def test_lock_face_surfaces_an_older_runtimes_unknown_kind_refusal(tools):
+    """An older runtime that predates the seam answers its unknown-kind refusal."""
+    answer = {"ok": False, "error": "unknown kind 'lock_face'"}
+    with intents_engine(response=answer):
+        result = json.loads(tools.execute("lock_face", {}))
+    _assert_verbatim(result, answer)
+
+
+def test_release_face_surfaces_an_older_runtimes_unknown_kind_refusal(tools):
+    answer = {"ok": False, "error": "unknown kind 'release_face'"}
+    with intents_engine(response=answer):
+        result = json.loads(tools.execute("release_face", {}))
+    _assert_verbatim(result, answer)
+
+
+def test_lock_face_degrades_when_no_engine_confirms(tools):
+    result = json.loads(tools.execute("lock_face", {}))
+    assert result["ok"] is None
+    assert result["note"] == DEGRADED_NOTE
+    payloads = spool_payloads()
+    assert [p["cmd_id"] for p in payloads] == [result["submitted"]]
+    assert payloads[0]["op"] == "lock_face"
+
+
+def test_release_face_degrades_when_no_engine_confirms(tools):
+    result = json.loads(tools.execute("release_face", {}))
+    assert result["ok"] is None
+    assert result["note"] == DEGRADED_NOTE
+    payloads = spool_payloads()
+    assert [p["cmd_id"] for p in payloads] == [result["submitted"]]
+    assert payloads[0]["op"] == "release_face"
+
+
+def test_lock_face_logs_one_sense_line_on_confirmation(tools, caplog):
+    with caplog.at_level(logging.INFO, logger="nova.sensory"):
+        with intents_engine(response={"ok": True, "op": "lock_face", "locked": True}):
+            tools.execute("lock_face", {})
+    (line,) = _sense_lines(caplog)
+    assert "[SENSE stage=act source=nova event=lock_face]" in line
+    assert "confirmed" in line
+
+
+def test_release_face_logs_one_sense_line_on_confirmation(tools, caplog):
+    with caplog.at_level(logging.INFO, logger="nova.sensory"):
+        with intents_engine(response={"ok": True, "op": "release_face", "released": True}):
+            tools.execute("release_face", {})
+    (line,) = _sense_lines(caplog)
+    assert "[SENSE stage=act source=nova event=release_face]" in line
+    assert "confirmed" in line
+
+
+# --------------------------------------------------------------------------- #
+# run_behavior names the gaze one-shots reachable through it (task t9)        #
+# --------------------------------------------------------------------------- #
+
+
+def test_run_behavior_description_names_the_gaze_one_shots():
+    (spec,) = [s for s in TOOL_SPECS if s["toolSpec"]["name"] == "run_behavior"]
+    description = spec["toolSpec"]["description"]
+    assert "look-at-sound" in description
+    assert "look-at-face" in description
+    assert "2" in description  # the 2 s default duration is named
 
 
 # --------------------------------------------------------------------------- #

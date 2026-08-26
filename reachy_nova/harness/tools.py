@@ -75,6 +75,8 @@ GOTO = "goto"
 CREATE_RULE = "create_rule"
 BROWSE = "browse"
 ENROLL_FACE = "enroll_face"
+LOCK_FACE = "lock_face"
+RELEASE_FACE = "release_face"
 FORGE = "forge"
 USE_SKILL = "use_skill"
 AUTHOR_RULE = "author_rule"
@@ -93,7 +95,10 @@ RECALL_SENSES = "recall_senses"
 #: is the third: like the voice-level tools it is dispatched locally rather
 #: than through the intents spool, reading the in-process
 #: :class:`~reachy_nova.harness.sense_history.SenseHistory` ring buffer
-#: instead of talking to the runtime at all.
+#: instead of talking to the runtime at all. ``lock_face``/``release_face``
+#: (task t9) are the fourth and fifth: spool-backed no-argument ops, same
+#: shape as the original five, riding the runtime's own gaze-lock intent
+#: kinds.
 ACTION_SET: tuple[str, ...] = (
     RUN_BEHAVIOR,
     DECLARE_GOAL,
@@ -103,6 +108,8 @@ ACTION_SET: tuple[str, ...] = (
     CREATE_RULE,
     BROWSE,
     ENROLL_FACE,
+    LOCK_FACE,
+    RELEASE_FACE,
     FORGE,
     USE_SKILL,
     AUTHOR_RULE,
@@ -245,9 +252,11 @@ _HEAD_SCHEMA = {
 TOOL_SPECS: list[dict] = [
     _spec(
         RUN_BEHAVIOR,
-        "Move the body once: run a named behaviour (nod, shake, antenna-sway, ...) "
-        "for a bounded time. One-shot — the robot does it and stops. Use this for "
-        "a single reaction right now.",
+        "Move the body once: run a named behaviour (nod, shake, antenna-sway, "
+        "'look-at-sound' to turn toward the last sound you heard, 'look-at-face' "
+        "to glance at the person in front of you, ...) for a bounded time — the "
+        "gaze one-shots default to about 2 seconds. One-shot — the robot does it "
+        "and stops. Use this for a single reaction right now.",
         {
             "type": "object",
             "properties": {
@@ -453,6 +462,20 @@ TOOL_SPECS: list[dict] = [
             },
             "required": ["name"],
         },
+    ),
+    _spec(
+        LOCK_FACE,
+        "Keep looking at the person you are facing until told to stop: locks "
+        "your gaze onto their face so you keep tracking them as they move, "
+        "even past a single glance. Call release_face to stop.",
+        {"type": "object", "properties": {}, "required": []},
+    ),
+    _spec(
+        RELEASE_FACE,
+        "Stop following a locked face and look away: releases a gaze lock "
+        "started with lock_face, so you go back to normal look-around "
+        "behavior.",
+        {"type": "object", "properties": {}, "required": []},
     ),
     _spec(
         FORGE,
@@ -745,6 +768,16 @@ def _build_enroll_face(args: Mapping) -> dict:
     return {"op": ENROLL_OP, "name": name, "face": ENROLL_FACE_TARGET}
 
 
+def _build_lock_face(args: Mapping) -> dict:  # noqa: ARG001 - no arguments to read
+    """``lock_face`` — keep the gaze on whoever the runtime already knows."""
+    return {"op": LOCK_FACE}
+
+
+def _build_release_face(args: Mapping) -> dict:  # noqa: ARG001 - no arguments to read
+    """``release_face`` — stop a standing gaze lock."""
+    return {"op": RELEASE_FACE}
+
+
 _BUILDERS = {
     RUN_BEHAVIOR: _build_run_behavior,
     DECLARE_GOAL: _build_declare_goal,
@@ -752,6 +785,8 @@ _BUILDERS = {
     SET_INHIBITION: _build_set_inhibition,
     GOTO: _build_goto,
     ENROLL_FACE: _build_enroll_face,
+    LOCK_FACE: _build_lock_face,
+    RELEASE_FACE: _build_release_face,
 }
 
 #: Dispatched locally against the daemon client, never through the intents
