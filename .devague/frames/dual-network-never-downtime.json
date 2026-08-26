@@ -4,7 +4,7 @@
   "schema_version": 5,
   "status": "exported",
   "created": "2026-08-26T06:45:47Z",
-  "updated": "2026-08-26T08:33:57Z",
+  "updated": "2026-08-26T08:39:02Z",
   "claims": [
     {
       "id": "c1",
@@ -35,6 +35,12 @@
         {
           "id": "h8",
           "text": "nmcli on the robot shows exactly two Wi-Fi profiles on wlan0 with autoconnect=yes, bar-nachum at higher priority than iPhone (5), and both with a non-zero timestamp",
+          "status": "rejected",
+          "instruction": ""
+        },
+        {
+          "id": "h19",
+          "text": "nmcli on the robot shows exactly two Wi-Fi profiles on wlan0, both autoconnect=yes and non-zero timestamp, with iPhone (5) at HIGHER autoconnect-priority than bar-nachum (c11, revised order)",
           "status": "confirmed",
           "instruction": ""
         }
@@ -85,6 +91,12 @@
         {
           "id": "h1",
           "text": "from spark on the hotspot, 'reachy wireless find' returns the robot's 172.20.10.x address within 30 s of the robot joining, and the registry/pinned alias are refreshed rather than stale",
+          "status": "confirmed",
+          "instruction": ""
+        },
+        {
+          "id": "h21",
+          "text": "spark reaches the robot via its tailnet address on either network within 30 s of the robot's join; the subnet sweep ('reachy wireless find') and the /etc/hosts pin are documented as fallbacks only, refreshed when used",
           "status": "confirmed",
           "instruction": ""
         }
@@ -333,7 +345,7 @@
       ],
       "hard_questions": [],
       "links": [],
-      "instruction": "",
+      "instruction": "dispatcher hook signals the harness (SIGUSR1 or a file in the state dir); harness handles it by restarting Sonic and the Kiro session; verify via journal timestamps vs 'policy: set \u2026 default for IPv4 routing'",
       "revisions": []
     },
     {
@@ -414,7 +426,7 @@
       ],
       "hard_questions": [],
       "links": [],
-      "instruction": "",
+      "instruction": "implement as a NetworkManager dispatcher hook (root) that on 'down'/'connectivity-change' activates the best visible profile and re-runs every \u226430 s while disconnected; measure with the c9 drill and the netwatch logger",
       "revisions": [
         {
           "text": "failover must be bounded in time, not left to NetworkManager's default retry ladder: on link loss NM re-tries the higher-priority profile (bar-nachum) with wpa_supplicant temp-disable backoffs of 10 s, 20 s, \u2026 and only falls through to iPhone (5) after autoconnect-retries are exhausted \u2014 in the 2026-08-26 08:58 away-test the robot sat 48 s with no IP while the hotspot SSID was visible the whole time and never tried it; the spec sets a hard bound (e.g. autoconnect-retries=1 on bar-nachum or a dispatcher hook that activates the visible fallback on link loss) so the hotspot is joined within 30 s of losing home",
@@ -426,14 +438,20 @@
     {
       "id": "c23",
       "kind": "assumption",
-      "text": "the iPhone hotspot SSID stays visible to the robot unattended: during the away-test the robot saw 'iPhone (5)' continuously for ~2 min while Ori carried the phone \u2014 pending Ori's confirmation that the Hotspot screen was closed at the time",
+      "text": "the iPhone hotspot SSID is visible to the robot only while Ori has the Hotspot screen open OR a client is already attached; with the screen closed and no client, iOS stops beaconing within ~30 s (forced-failover probe 09:23:33 ssid-not-found) \u2014 the away-test's 2 min of visibility (08:57:57\u201308:59:47) is explained by Ori opening the screen, not by unattended beaconing",
       "origin": "llm",
       "status": "confirmed",
       "honesty_conditions": [],
       "hard_questions": [],
       "links": [],
       "instruction": "",
-      "revisions": []
+      "revisions": [
+        {
+          "text": "the iPhone hotspot SSID stays visible to the robot unattended: during the away-test the robot saw 'iPhone (5)' continuously for ~2 min while Ori carried the phone \u2014 pending Ori's confirmation that the Hotspot screen was closed at the time",
+          "kind": "assumption",
+          "reason": ""
+        }
+      ]
     },
     {
       "id": "c24",
@@ -449,6 +467,56 @@
           "instruction": ""
         }
       ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c25",
+      "kind": "requirement",
+      "text": "the robot joins the tailnet: tailscale installed on the CM4 (systemd, up at boot after network, key expiry DISABLED for the robot node so it cannot silently drop off the tailnet after the default 180 days), and spark reaches it by tailnet name/address on either network; 'reachy wireless find' remains the subnet fallback; disk impact measured (root 91 % full before install)",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h20",
+          "text": "from spark on bar-nachum, ssh pollen@<robot-tailnet-name> succeeds while the robot is on the hotspot (and vice versa); 'tailscale status' on the robot shows the node with key expiry disabled; root disk free space after install recorded in the delivery",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c26",
+      "kind": "requirement",
+      "text": "return-to-hotspot is explicit and honest about the phone: while on bar-nachum the robot re-evaluates every \u226460 s and moves to iPhone (5) as soon as it is visible (c22 mechanism); because iOS only beacons with the Hotspot screen open or a client attached (v2), a robot that has fallen back to home stays there until Ori opens the Hotspot screen once \u2014 this is the documented, expected manual moment, and the spec never claims an unattended return",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h22",
+          "text": "robot on bar-nachum, Ori opens the Hotspot screen for 30 s: nmcli on the robot shows iPhone (5) activated within 60 s and Sonic answers speech within 60 s after that; with the screen kept closed the robot stays on bar-nachum and logs no attempt storm (\u22641 network line per minute)",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c27",
+      "kind": "non_goal",
+      "text": "uplink loss (home AP up, ISP down) is out of scope this round: with hotspot-first the case only arises while the phone is away, and NM has no policy for it; h6 is satisfied by this declaration, and a connectivity-check-driven switch is a follow-up",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
       "hard_questions": [],
       "links": [],
       "instruction": "",
@@ -487,6 +555,15 @@
       "id": "v4",
       "text": "Sonic's stream-death restart uses a fixed 3 s delay with no backoff: offline it re-opened a Bedrock stream every ~6 s for minutes (DNS failures) \u2014 harmless today but noisy and battery/CPU-costly on the hotspot; belongs plan-side as a risk/task once the plan exists",
       "kind": "follow_up",
+      "claim_id": null,
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v5",
+      "text": "whether Tailscale over the iPhone hotspot's NAT gets a direct path or relays via DERP \u2014 affects SSH latency for deploys, not reachability",
+      "kind": "unknown_nonblocking",
       "claim_id": null,
       "resolved": false,
       "resolution": "",
@@ -606,6 +683,50 @@
       "id": "s15",
       "surface": "challenge probe / lifecycle lens: forced failover 09:23\u201309:27 on the robot (/tmp/force-failover.log, journalctl NetworkManager + wpa_supplicant)",
       "finding": "with bar-nachum made unavailable, NM auto-activated iPhone (5) after 2 s \u2014 fallback SELECTION works \u2014 but the join failed 25 s later with reason ssid-not-found: with the Hotspot screen closed and no client attached, the iPhone stopped beaconing (it had been visible in the scan cache until then). NM made no further attempt for the remaining 3.5 min. Sonic hammered Bedrock every ~6 s with a fixed 3 s restart delay (AWS_IO_DNS_QUERY_FAILED) while offline; recovered on its own 7 s after bar-nachum returned",
+      "seeds": []
+    },
+    {
+      "id": "s16",
+      "surface": "challenge pass 2 / spec-consistency lens: docs/specs/2026-08-26-dual-network-never-downtime.md \u00a7Honesty conditions line 35 vs \u00a7Decisions line 102",
+      "finding": "h8 still says bar-nachum outranks iPhone (5) \u2014 written before c11 was inverted; superseded by h19, h8 should be rejected",
+      "seeds": []
+    },
+    {
+      "id": "s17",
+      "surface": "challenge pass 2 / spec-consistency lens: \u00a7Assumptions line 67 vs \u00a7Resolved vagueness line 120",
+      "finding": "c23 as exported asserts unattended visibility that v2's resolution disproves; amended to the evidenced statement",
+      "seeds": [
+        "c23"
+      ]
+    },
+    {
+      "id": "s18",
+      "surface": "challenge pass 2 / adjacent-systems lens: \u00a7Decisions line 105 (q3) vs \u00a7Requirements \u2014 no claim covers installing/joining Tailscale; tailscale key-expiry default 180 d; robot root disk 1.3 G free",
+      "finding": "q3 decision had no coverage target for the plan to build against; added c25 + h20 and re-based c5's honesty (h1 assumed hotspot-side discovery only)",
+      "seeds": [
+        "c25"
+      ]
+    },
+    {
+      "id": "s19",
+      "surface": "challenge pass 2 / lifecycle lens: \u00a7Honesty line 42 (h17 on decision c11) vs \u00a7Resolved vagueness line 120",
+      "finding": "h17 demands an automatic return to the hotspot that v2 shows is impossible unattended; the return leg needed its own requirement stating the manual moment \u2014 added c26 + h21",
+      "seeds": [
+        "c26"
+      ]
+    },
+    {
+      "id": "s20",
+      "surface": "challenge pass 2 / spec-consistency lens: \u00a7Honesty line 43 (h6 'either \u2026 or the spec explicitly declares uplink loss out of scope')",
+      "finding": "the spec never made the declaration h6 requires \u2014 added c27 non_goal so h6 is satisfiable",
+      "seeds": [
+        "c27"
+      ]
+    },
+    {
+      "id": "s21",
+      "surface": "challenge pass 2 / security lens: tailnet membership (spark 100.127.105.72, Ori's devices), robot SSH as pollen, Kiro full shell",
+      "finding": "clean pass with one note: on the tailnet the robot's SSH becomes reachable from every device on Ori's tailnet, not only the LAN \u2014 same trust domain (Ori's own devices); no ACL work required this round, recorded as examined",
       "seeds": []
     }
   ],

@@ -20,19 +20,26 @@
 
 - operators on spark can find the robot on either network: today the registry pins `last_ip` 192.168.1.162 and reachy-mini.local mDNS does not resolve; on the hotspot the robot gets a 172.20.10.x address that spark only sees if spark is on the hotspot too
   - honesty: from spark on the hotspot, 'reachy wireless find' returns the robot's 172.20.10.x address within 30 s of the robot joining, and the registry/pinned alias are refreshed rather than stale
+  - honesty: spark reaches the robot via its tailnet address on either network within 30 s of the robot's join; the subnet sweep ('reachy wireless find') and the /etc/hosts pin are documented as fallbacks only, refreshed when used
 - the mind survives a network change: the harness (or its unit) retries the kiro writer's initial spawn under the same watchdog/backoff it already uses for later restarts, and Sonic's stream is re-established on address loss instead of waiting for the liveness watchdog; unit ordering no longer relies on network-online.target alone
   - honesty: with Wi-Fi deliberately down at harness start, `kiro_session` is absent at first and then shows 'started' in the journal after Wi-Fi returns, with no manual restart
 - network transitions are visible by name in the journal like every other degradation (\[SENSE stage=supervise ... event=network\] joined=<ssid> ip=<addr> / dropped reason=no-route) so a silent half-dead mind cannot recur
   - honesty: grep '\[SENSE stage=supervise' for event=network yields one joined and one dropped line per transition of the drill, no more
 - an address change is an explicit trigger, not a timeout: the mind reacts to the default route changing (NM dispatcher hook or a harness route poll) by restarting the Sonic stream and the Kiro session immediately — because Sonic's liveness watchdog defaults to 180 s (`NOVA_SONIC_LIVENESS_S`, `nova_sonic.py` `DEFAULT_LIVENESS_S`), which alone cannot meet the 60 s success signal
+  - instruction: dispatcher hook signals the harness (SIGUSR1 or a file in the state dir); harness handles it by restarting Sonic and the Kiro session; verify via journal timestamps vs 'policy: set … default for IPv4 routing'
   - honesty: after a switch, the journal shows the Sonic restart within 10 s of the new default route, not at the liveness deadline
 - failover must be bounded in time AND keep retrying: on link loss NM re-tries the higher-priority profile with `wpa_supplicant` temp-disable backoffs (10 s, 20 s, …) and only falls through after autoconnect-retries are exhausted (48 s with no attempt in the 08:58 test); and after ONE failed fallback attempt (ssid-not-found at 09:23:33) NM stopped trying for 3.5 min. The spec sets a hard bound — the visible fallback is joined within 30 s of losing the current network — and re-evaluates every ≤30 s while disconnected (dispatcher hook or a harness route poll; autoconnect-retries=1 on the preferred profile is not sufficient alone)
+  - instruction: implement as a NetworkManager dispatcher hook (root) that on 'down'/'connectivity-change' activates the best visible profile and re-runs every ≤30 s while disconnected; measure with the c9 drill and the netwatch logger
   - honesty: walking out of bar-nachum range with the hotspot visible, nmcli on the robot shows iPhone (5) activated within 30 s of the 'link timed out' NetworkManager line
+- the robot joins the tailnet: tailscale installed on the CM4 (systemd, up at boot after network, key expiry DISABLED for the robot node so it cannot silently drop off the tailnet after the default 180 days), and spark reaches it by tailnet name/address on either network; 'reachy wireless find' remains the subnet fallback; disk impact measured (root 91 % full before install)
+  - honesty: from spark on bar-nachum, ssh pollen@<robot-tailnet-name> succeeds while the robot is on the hotspot (and vice versa); 'tailscale status' on the robot shows the node with key expiry disabled; root disk free space after install recorded in the delivery
+- return-to-hotspot is explicit and honest about the phone: while on bar-nachum the robot re-evaluates every ≤60 s and moves to iPhone (5) as soon as it is visible (c22 mechanism); because iOS only beacons with the Hotspot screen open or a client attached (v2), a robot that has fallen back to home stays there until Ori opens the Hotspot screen once — this is the documented, expected manual moment, and the spec never claims an unattended return
+  - honesty: robot on bar-nachum, Ori opens the Hotspot screen for 30 s: nmcli on the robot shows iPhone (5) activated within 60 s and Sonic answers speech within 60 s after that; with the screen kept closed the robot stays on bar-nachum and logs no attempt storm (≤1 network line per minute)
 
 ## Honesty conditions
 
 - the drill in c9 passes in both directions on the real robot, with the transitions logged, before the announcement is made
-- nmcli on the robot shows exactly two Wi-Fi profiles on wlan0 with autoconnect=yes, bar-nachum at higher priority than iPhone (5), and both with a non-zero timestamp
+- nmcli on the robot shows exactly two Wi-Fi profiles on wlan0, both autoconnect=yes and non-zero timestamp, with iPhone (5) at HIGHER autoconnect-priority than bar-nachum (c11, revised order)
 - during the c9 drill the runtime never restarts, the engine heartbeat never lapses, and pat/face reactions still fire while Wi-Fi is down (journal + state.json)
 - the drill is executed by Ori with the phone only — no laptop, no SSH — and the robot answers speech afterwards
 - each direction of the switch shows Sonic answering speech and `kiro_session` 'started' within 60 s of the new default route, and 'reachy wireless find' (or the tailnet address) reaches the robot
@@ -59,12 +66,13 @@
 
 - no change to the body: the runtime, rules, senses, tee, spool and local broker are not touched; no new radio or tethering hardware in this round unless q1 decides otherwise
 - spark's own network switching is manual and out of scope: the spec never automates moving spark between bar-nachum and the hotspot (it is a server with docker bridges and tailscale); spark either joins the hotspot by hand or reaches the robot over the tailnet if q3 says yes
+- uplink loss (home AP up, ISP down) is out of scope this round: with hotspot-first the case only arises while the phone is away, and NM has no policy for it; h6 is satisfied by this declaration, and a connectivity-check-driven switch is a follow-up
 
 ## Assumptions
 
 - a live join of iPhone (5) works: 2026-08-26 07:33 the robot activated the hotspot profile (172.20.10.2/28, default route via 172.20.10.1, internet 36 ms) and returned to bar-nachum in ~20 s total; the hotspot must be broadcasting (Ori opens the Personal Hotspot screen) for the SSID to be visible
 - NetworkManager fails over only on association loss: with bar-nachum up but its uplink dead, the robot stays on home with no internet and the hotspot is never tried (nmcli connectivity check is 'full' but no policy acts on it) — 'never downtime' as specced covers AP loss, not ISP loss
-- the iPhone hotspot SSID stays visible to the robot unattended: during the away-test the robot saw 'iPhone (5)' continuously for ~2 min while Ori carried the phone — pending Ori's confirmation that the Hotspot screen was closed at the time
+- the iPhone hotspot SSID is visible to the robot only while Ori has the Hotspot screen open OR a client is already attached; with the screen closed and no client, iOS stops beaconing within ~30 s (forced-failover probe 09:23:33 ssid-not-found) — the away-test's 2 min of visibility (08:57:57–08:59:47) is explained by Ori opening the screen, not by unattended beaconing
 - while the robot is already attached, iOS keeps the Personal Hotspot up with the screen closed — so hotspot-first ordering keeps the robot connected through the day; only a drop-and-rejoin needs the screen opened (untested; test = attach, close screen, wait 10 min, verify still attached)
 
 ## Scope exploration
@@ -96,6 +104,16 @@
 - `s14` — `challenge pass / assumptions lens: NetworkManager autoconnect semantics (priority applies at activation time only; no roaming to a better profile while connected)`: hotspot-first ordering alone gives 'prefer at (re)connect time', not 'always on the hotspot when present' — the return-to-hotspot leg needs explicit logic, and the data-cost question is open
   - seeds: `c11`
 - `s15` — `challenge probe / lifecycle lens: forced failover 09:23–09:27 on the robot (/tmp/force-failover.log, journalctl NetworkManager + wpa_supplicant)`: with bar-nachum made unavailable, NM auto-activated iPhone (5) after 2 s — fallback SELECTION works — but the join failed 25 s later with reason ssid-not-found: with the Hotspot screen closed and no client attached, the iPhone stopped beaconing (it had been visible in the scan cache until then). NM made no further attempt for the remaining 3.5 min. Sonic hammered Bedrock every ~6 s with a fixed 3 s restart delay (`AWS_IO_DNS_QUERY_FAILED`) while offline; recovered on its own 7 s after bar-nachum returned
+- `s16` — `challenge pass 2 / spec-consistency lens: docs/specs/2026-08-26-dual-network-never-downtime.md §Honesty conditions line 35 vs §Decisions line 102`: h8 still says bar-nachum outranks iPhone (5) — written before c11 was inverted; superseded by h19, h8 should be rejected
+- `s17` — `challenge pass 2 / spec-consistency lens: §Assumptions line 67 vs §Resolved vagueness line 120`: c23 as exported asserts unattended visibility that v2's resolution disproves; amended to the evidenced statement
+  - seeds: `c23`
+- `s18` — `challenge pass 2 / adjacent-systems lens: §Decisions line 105 (q3) vs §Requirements — no claim covers installing/joining Tailscale; tailscale key-expiry default 180 d; robot root disk 1.3 G free`: q3 decision had no coverage target for the plan to build against; added c25 + h20 and re-based c5's honesty (h1 assumed hotspot-side discovery only)
+  - seeds: `c25`
+- `s19` — `challenge pass 2 / lifecycle lens: §Honesty line 42 (h17 on decision c11) vs §Resolved vagueness line 120`: h17 demands an automatic return to the hotspot that v2 shows is impossible unattended; the return leg needed its own requirement stating the manual moment — added c26 + h21
+  - seeds: `c26`
+- `s20` — `challenge pass 2 / spec-consistency lens: §Honesty line 43 (h6 'either … or the spec explicitly declares uplink loss out of scope')`: the spec never made the declaration h6 requires — added c27 `non_goal` so h6 is satisfiable
+  - seeds: `c27`
+- `s21` — `challenge pass 2 / security lens: tailnet membership (spark 100.127.105.72, Ori's devices), robot SSH as pollen, Kiro full shell`: clean pass with one note: on the tailnet the robot's SSH becomes reachable from every device on Ori's tailnet, not only the LAN — same trust domain (Ori's own devices); no ACL work required this round, recorded as examined
 
 ## Decisions
 
@@ -113,6 +131,7 @@
 
 - [unknown_nonblocking] whether an in-flight Sonic conversation can be resumed across an IP change, or only restarted with context re-injected — untested
 - [unknown_nonblocking] whether mDNS works across the phone hotspot (avahi is active on the robot; reachy-mini.local never resolved on bar-nachum) — would give spark a stable name on the hotspot; nonblocking, discovery sweep works regardless
+- [unknown_nonblocking] whether Tailscale over the iPhone hotspot's NAT gets a direct path or relays via DERP — affects SSH latency for deploys, not reachability
 - [follow_up] Sonic's stream-death restart uses a fixed 3 s delay with no backoff: offline it re-opened a Bedrock stream every ~6 s for minutes (DNS failures) — harmless today but noisy and battery/CPU-costly on the hotspot; belongs plan-side as a risk/task once the plan exists
 
 ## Resolved vagueness
