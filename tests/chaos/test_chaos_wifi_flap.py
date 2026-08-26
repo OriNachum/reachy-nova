@@ -113,10 +113,21 @@ def test_wifi_flap_full_arc_disconnect_replay_hygiene_and_recovery(caplog) -> No
     caplog.set_level(logging.INFO, logger="nova.sensory")
     injects: list[str] = []
     client = FlappyClient()
+    # A real wifi flap spans well past the (t7) per-key inject dedupe window
+    # (default 10s) — this clock advances 20s per call so the pre- and
+    # post-flap "hear" rule/fire events are correctly treated as two
+    # distinct real-world firings, not a duplicate of the same one.
+    clock_state = {"t": 0.0}
+
+    def flap_clock() -> float:
+        clock_state["t"] += 20.0
+        return clock_state["t"]
+
     nb = bus.NovaBus(
         on_inject=injects.append,
         broker="localhost:1883",
         client_factory=lambda: client,
+        clock=flap_clock,
     )
     stop = threading.Event()
     nb.start(stop)

@@ -293,6 +293,20 @@ rules:
     sense: face
     inject_template: "(a familiar face is in view)"
 
+  "rule/fire:nova-pat-cheer":
+    # A second, Kiro-authored overlay rule that ALSO fires on a pat (live
+    # finding 2026-08-26: one physical pat produced two injects ~8s apart —
+    # the shipped pat-acknowledge fire and this overlay's own fire). Same
+    # sense class as pat-acknowledge so NovaBus's per-key dedupe (t7,
+    # bus.py) collapses both into one inject regardless of which rule name
+    # arrives first.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    voice: brief
+    sense: pat
+    inject_template: "(someone is petting you)"
+
   rule/suppress:
     # A reflex was considered and held back (cooldown/rearming/inhibited).
     # Bookkeeping, not news.
