@@ -152,14 +152,37 @@ schedule_revert() {
 
     if [[ "${REACHY_NET_NO_SYSTEMD_RUN:-0}" != "1" ]] && command -v systemd-run >/dev/null 2>&1; then
         log "scheduling revert via systemd-run in ${seconds}s (unit=$REVERT_UNIT)"
-        systemd-run --user --unit="$REVERT_UNIT" --on-active="${seconds}s" \
-            -- "$SELF" --revert
-    else
-        log "scheduling revert via background job in ${seconds}s (no systemd-run)"
-        nohup bash -c "sleep '$seconds'; exec '$SELF' --revert" >/dev/null 2>&1 &
-        disown
-        echo "$!" > "$REVERT_PID_FILE"
+        if systemd-run --user --unit="$REVERT_UNIT" --on-active="${seconds}s" \
+            -- "$SELF" --revert; then
+            return 0
+        fi
+        warn "systemd-run failed to schedule the revert — falling back to a background job"
     fi
+
+    log "scheduling revert via background job in ${seconds}s (no systemd-run)"
+    nohup bash -c "sleep '$seconds'; exec '$SELF' --revert" >/dev/null 2>&1 &
+    disown
+    echo "$!" > "$REVERT_PID_FILE"
+}
+
+# Restores the previously recorded state (priority + autoconnect) for both
+# profiles and clears the pending-revert bookkeeping. Used both by an
+# explicit/scheduled `--revert` and by `--apply`'s own failure path — assumes
+# the caller already confirmed $REVERT_STATE_FILE exists.
+perform_revert() {
+    local PREFERRED_NAME FALLBACK_NAME
+    local PREFERRED_PRIORITY FALLBACK_PRIORITY
+    local PREFERRED_AUTOCONNECT FALLBACK_AUTOCONNECT
+    # shellcheck source=/dev/null
+    source "$REVERT_STATE_FILE"
+
+    log "reverting: '$PREFERRED_NAME' -> autoconnect $PREFERRED_AUTOCONNECT priority $PREFERRED_PRIORITY, '$FALLBACK_NAME' -> autoconnect $FALLBACK_AUTOCONNECT priority $FALLBACK_PRIORITY"
+    sudo -n "$NMCLI" connection modify "$PREFERRED_NAME" \
+        connection.autoconnect "$PREFERRED_AUTOCONNECT" connection.autoconnect-priority "$PREFERRED_PRIORITY"
+    sudo -n "$NMCLI" connection modify "$FALLBACK_NAME" \
+        connection.autoconnect "$FALLBACK_AUTOCONNECT" connection.autoconnect-priority "$FALLBACK_PRIORITY"
+
+    rm -f "$REVERT_STATE_FILE" "$REVERT_PID_FILE"
 }
 
 cmd_apply() {
@@ -172,26 +195,49 @@ cmd_apply() {
         return 0
     fi
 
-    local cur_p_prio cur_f_prio
+    local cur_p_prio cur_f_prio cur_p_ac cur_f_ac
     cur_p_prio="$(conn_field "$PREFERRED" connection.autoconnect-priority)"
     cur_f_prio="$(conn_field "$FALLBACK" connection.autoconnect-priority)"
+    cur_p_ac="$(conn_field "$PREFERRED" connection.autoconnect)"
+    cur_f_ac="$(conn_field "$FALLBACK" connection.autoconnect)"
     cur_p_prio="${cur_p_prio:-0}"
     cur_f_prio="${cur_f_prio:-0}"
+    cur_p_ac="${cur_p_ac:-yes}"
+    cur_f_ac="${cur_f_ac:-yes}"
 
+    # ARM the rollback FIRST — record the originals and schedule the revert —
+    # before touching NetworkManager at all, so a failure partway through the
+    # mutations (or an unreachable systemd-run) can never leave a stray,
+    # unrevertable change behind.
     {
         printf 'PREFERRED_NAME=%q\n' "$PREFERRED"
         printf 'FALLBACK_NAME=%q\n' "$FALLBACK"
         printf 'PREFERRED_PRIORITY=%q\n' "$cur_p_prio"
         printf 'FALLBACK_PRIORITY=%q\n' "$cur_f_prio"
+        printf 'PREFERRED_AUTOCONNECT=%q\n' "$cur_p_ac"
+        printf 'FALLBACK_AUTOCONNECT=%q\n' "$cur_f_ac"
     } > "$REVERT_STATE_FILE"
 
-    log "applying: '$PREFERRED' priority $cur_p_prio -> $PREFERRED_PRIORITY_TARGET, '$FALLBACK' priority $cur_f_prio -> $FALLBACK_PRIORITY_TARGET"
-    sudo -n "$NMCLI" connection modify "$PREFERRED" \
-        connection.autoconnect yes connection.autoconnect-priority "$PREFERRED_PRIORITY_TARGET"
-    sudo -n "$NMCLI" connection modify "$FALLBACK" \
-        connection.autoconnect yes connection.autoconnect-priority "$FALLBACK_PRIORITY_TARGET"
-
     schedule_revert "$revert_after"
+
+    log "applying: '$PREFERRED' priority $cur_p_prio -> $PREFERRED_PRIORITY_TARGET, '$FALLBACK' priority $cur_f_prio -> $FALLBACK_PRIORITY_TARGET"
+
+    if ! sudo -n "$NMCLI" connection modify "$PREFERRED" \
+        connection.autoconnect yes connection.autoconnect-priority "$PREFERRED_PRIORITY_TARGET"; then
+        warn "failed to modify '$PREFERRED' — rolling back the armed revert immediately"
+        cancel_pending_revert
+        perform_revert
+        exit 1
+    fi
+
+    if ! sudo -n "$NMCLI" connection modify "$FALLBACK" \
+        connection.autoconnect yes connection.autoconnect-priority "$FALLBACK_PRIORITY_TARGET"; then
+        warn "failed to modify '$FALLBACK' — rolling back the armed revert immediately"
+        cancel_pending_revert
+        perform_revert
+        exit 1
+    fi
+
     log "revert scheduled in ${revert_after}s — run '$SELF --commit' to keep this change"
 }
 
@@ -207,17 +253,7 @@ cmd_revert() {
         return 0
     fi
 
-    local PREFERRED_NAME FALLBACK_NAME PREFERRED_PRIORITY FALLBACK_PRIORITY
-    # shellcheck source=/dev/null
-    source "$REVERT_STATE_FILE"
-
-    log "reverting: '$PREFERRED_NAME' priority -> $PREFERRED_PRIORITY, '$FALLBACK_NAME' priority -> $FALLBACK_PRIORITY"
-    sudo -n "$NMCLI" connection modify "$PREFERRED_NAME" \
-        connection.autoconnect-priority "$PREFERRED_PRIORITY"
-    sudo -n "$NMCLI" connection modify "$FALLBACK_NAME" \
-        connection.autoconnect-priority "$FALLBACK_PRIORITY"
-
-    rm -f "$REVERT_STATE_FILE" "$REVERT_PID_FILE"
+    perform_revert
 }
 
 main() {
