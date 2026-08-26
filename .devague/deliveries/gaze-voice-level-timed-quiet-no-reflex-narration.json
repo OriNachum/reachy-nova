@@ -2,7 +2,7 @@
   "plan_slug": "gaze-voice-level-timed-quiet-no-reflex-narration",
   "schema_version": 1,
   "created": "2026-08-26T14:28:47Z",
-  "updated": "2026-08-26T14:28:47Z",
+  "updated": "2026-08-26T18:12:15Z",
   "deviations": [
     {
       "id": "d1",
@@ -15,6 +15,31 @@
       ],
       "origin": "user",
       "status": "approved",
+      "classification": "acceptable"
+    },
+    {
+      "id": "d2",
+      "what": "Add voice: none to rules.yaml \u2014 the cue is recorded in SenseHistory (so recall_senses can still explain it) but never injected; applied to intent/applied, intent/blocked and rule/fire:look-toward-sound. c29's 'silent still injects' is unchanged for silent; none is a new, stricter level.",
+      "task_ref": "t6",
+      "reason": "live 2026-08-26 19:05-19:08: silent cues for intent/applied and the runtime's look-toward-sound rule were still narrated ('a standing intention called set_inhibition is now active', 'I'm still following that sound') and triggered self-initiated glances; a marker cannot stop a model from reacting to a cue it receives every few seconds",
+      "affects": [
+        "t6",
+        "t7"
+      ],
+      "origin": "llm",
+      "status": "approved",
+      "classification": "acceptable"
+    },
+    {
+      "id": "d3",
+      "what": "Chaos case 5 injects the fault by moving kiro-cli out of ~/.local/bin (the fallback lookup in kiro_acp.py:269-277 is a live filesystem check on every spawn) and recovers by moving it back; the same start()-raises -> degraded -> watchdog -> recovered path is exercised. Ran live 2026-08-26 18:24-18:25: recovered after 5 watchdog attempts, NRestarts unchanged.",
+      "task_ref": "t14",
+      "reason": "KIRO_CLI_BIN is read from os.environ, populated once by load_dotenv at harness start (supervisor.py:357-364); restoring it on disk cannot reach the running process, so the plan's literal fault knob needs a harness restart to recover \u2014 contradicting 'recovered with no manual restart'",
+      "affects": [
+        "t14"
+      ],
+      "origin": "llm",
+      "status": "proposed",
       "classification": "acceptable"
     }
   ]

@@ -1,6 +1,7 @@
 # Delivery Summary — gaze, voice-level, timed quiet, no reflex narration
 
-plan: `gaze-voice-level-timed-quiet-no-reflex-narration` · run: `complete` · date: `2026-08-26`
+plan: `gaze-voice-level-timed-quiet-no-reflex-narration` · run: `complete` ·
+date: `2026-08-26`
 baseline: `devague summary skeleton`
 
 ## Intent
@@ -60,14 +61,39 @@ Quoted verbatim from the `devague summary` skeleton:
 
 ## Mid-work Decisions
 
-- `d1` — Add runtime task t17: a mute/unmute intent kind gating SpeechActuator.say for the quiet window, plus a retained mind-presence subscriber wired into FaceLockDriver.mind_online — the runtime has no MQTT subscriber (mind_online shipped as a None seam; only max-hold binds) and rule `say` bypasses the speak behavior (rule_engine.py:493 → speech_act.py:468), so inhibiting 'speak' only mutes rules that run=speak. Approved.
-- `d2` — Add `voice: none` to rules.yaml — the cue is recorded in SenseHistory but never injected; applied to `intent/applied`, `intent/blocked` and `rule/fire:look-toward-sound` — live 19:05–19:08 the silent cues were still narrated ("a standing intention called set_inhibition is now active", "I'm still following that sound") and triggered self-initiated glances. Approved.
-- `d3` — Chaos case 5 injects the fault by moving `kiro-cli` out of `~/.local/bin` instead of `KIRO_CLI_BIN=/nonexistent` — `KIRO_CLI_BIN` is read from `os.environ`, populated once by `load_dotenv` at harness start, so the plan's knob cannot recover without a harness restart. **Proposed, awaiting approval** at the time of writing.
-- The mind-presence topic is `nova/harness/state` (`harness/bus.py:144`), not `reachy/state/nova/*` as `docs/architecture.md` said; t17 subscribed to the real one and the doc was corrected — no record, captured here.
-- `nova-face-noticed` moved from `brief` to `silent` after the second live round: on its 30 s cooldown it produced a glance + greeting loop ("Hello again!") — commit `6d7f666`. No record; a rules.yaml value change within c29's schema.
-- Review round (Qodo, 7 findings) and SonarCloud round (6 findings) were fixed on the PR before acceptance — `af47c08`, `6f4d464`, `1d97674`, `9d9c3cc`.
-- The device's runtime checkout is branch `wireless-motor-enable` (motor-enable + `enroll` #166, both absent from `main`); `origin/main` was merged into it on spark (enroll vs gaze conflicts in `face_sense.py`/`intents.py` were additive) — reachy-mini-cli `d2a41ff`, then `82cbd3c` with #173.
-- The robot's SD card was 100 % full (pip cache) and the engine was in an ENOSPC crash loop (NRestarts 11) when deployment started; freed 1.5 G + 1.8 G, installed both packages `--no-deps` (the device never had `nemo_toolkit`; a full install pulls CUDA wheels).
+- `d1` — Add runtime task t17: a mute/unmute intent kind gating
+  SpeechActuator.say for the quiet window, plus a retained mind-presence
+  subscriber wired into FaceLockDriver.mind_online — the runtime has no MQTT
+  subscriber (mind_online shipped as a None seam; only max-hold binds) and rule
+  `say` bypasses the speak behavior (rule_engine.py:493 → speech_act.py:468), so
+  inhibiting 'speak' only mutes rules that run=speak. Approved.
+- `d2` — Add `voice: none` to rules.yaml — the cue is recorded in SenseHistory
+  but never injected; applied to `intent/applied`, `intent/blocked` and
+  `rule/fire:look-toward-sound` — live 19:05–19:08 the silent cues were still
+  narrated ("a standing intention called set_inhibition is now active", "I'm
+  still following that sound") and triggered self-initiated glances. Approved.
+- `d3` — Chaos case 5 injects the fault by moving `kiro-cli` out of
+  `~/.local/bin` instead of `KIRO_CLI_BIN=/nonexistent` — `KIRO_CLI_BIN` is read
+  from `os.environ`, populated once by `load_dotenv` at harness start, so the
+  plan's knob cannot recover without a harness restart. **Proposed, awaiting
+  approval** at the time of writing.
+- The mind-presence topic is `nova/harness/state` (`harness/bus.py:144`), not
+  `reachy/state/nova/*` as `docs/architecture.md` said; t17 subscribed to the
+  real one and the doc was corrected — no record, captured here.
+- `nova-face-noticed` moved from `brief` to `silent` after the second live
+  round: on its 30 s cooldown it produced a glance + greeting loop ("Hello
+  again!") — commit `6d7f666`. No record; a rules.yaml value change within c29's
+  schema.
+- Review round (Qodo, 7 findings) and SonarCloud round (6 findings) were fixed
+  on the PR before acceptance — `af47c08`, `6f4d464`, `1d97674`, `9d9c3cc`.
+- The device's runtime checkout is branch `wireless-motor-enable` (motor-enable
+  + `enroll` #166, both absent from `main`); `origin/main` was merged into it on
+  spark (enroll vs gaze conflicts in `face_sense.py`/`intents.py` were additive)
+  — reachy-mini-cli `d2a41ff`, then `82cbd3c` with #173.
+- The robot's SD card was 100 % full (pip cache) and the engine was in an ENOSPC
+  crash loop (NRestarts 11) when deployment started; freed 1.5 G + 1.8 G,
+  installed both packages `--no-deps` (the device never had `nemo_toolkit`; a
+  full install pulls CUDA wheels).
 
 ## Drift From Plan
 
@@ -85,18 +111,44 @@ Quoted verbatim from the `devague summary` skeleton:
 
 ## Evidence
 
-- tests (harness, branch head `6a2bb59`): `uv run pytest` — 1387 passed (baseline on main: 1077)
-- tests (runtime, device branch `82cbd3c`): `uv run pytest -n auto` — 5636 passed, 8 pre-existing skips; #173 branch — 5628 passed
-- lint: `workflow.sh lint` (agex) clean in both repos; SonarCloud on #21 — Quality Gate OK, 0 open issues, 0 hotspots (after `9d9c3cc`); black/isort/flake8 clean on the runtime
+- tests (harness, branch head `6a2bb59`): `uv run pytest` — 1387 passed
+  (baseline on main: 1077)
+- tests (runtime, device branch `82cbd3c`): `uv run pytest -n auto` — 5636
+  passed, 8 pre-existing skips; #173 branch — 5628 passed
+- lint: `workflow.sh lint` (agex) clean in both repos; SonarCloud on #21 —
+  Quality Gate OK, 0 open issues, 0 hotspots (after `9d9c3cc`);
+  black/isort/flake8 clean on the runtime
 - reviews: Qodo on #21 — 7 findings, 7 threads resolved (`6f4d464`)
-- commits (harness): `e85772e` (spec) … `6a2bb59` on `spec/gaze-voice-quiet-no-reflex-narration`; live-round fixes `8c9bbf5`, `6d7f666`, `6a2bb59`
-- commits (runtime): #172 merge `9d1b39e` (v0.51.0); #173 `df37236` + `a0c0ebc` (v0.51.1); device branch `82cbd3c`
-- PRs / issues: OriNachum/reachy-nova#21, #22 (face-focus follow-up); agentculture/reachy-mini-cli#172 (merged), #173 (CI green)
-- on-robot journal, 2026-08-26 (BST), harness pid 5538/7614: chaos case 5 18:24:19 `kiro session unit started degraded (initial spawn failed: [Errno 2] … 'kiro-cli') — retrying under watchdog`, `started name=kiro_session`, 4 × `restart failed:`, 18:25:16 `kiro session unit recovered (session live after 5 watchdog attempt(s))`, NRestarts 0→0
-- on-robot journal, acceptance round 1 (18:26–18:31): `event=volume old=62 new=72`, `72→82`; `run_behavior look-at-sound` applied; `lock_face … inhibited ['feel-alive','orient-to-sound']`; `motion/face-lost` cue; `stay_silent … body_muted:true`, `set_inhibition ['feel-alive','orient-to-sound','speak']`, `mute … muted:true`, `quiet-drop`, `quiet-resume count=4`; `end_silence … body_restored:true`; cues rendered as `(body cue: look-toward-sound)`, `(a familiar face is in view)`
-- round 2 (18:35–18:39): `event=volume old=82 new=72`; `release_face` called by Sonic (lock:4); `look-at-face` applied ×3; pat: `pat-acknowledge` + `nova-pat-cheer` fired, one `(someone is petting you)` cue
-- round 3 (19:05–19:08, after `8c9bbf5`): `recall_senses` called ×3; `stay_silent` armed 19:07:49, acknowledgement **played** 19:07:58; pat during quiet → `dedupe suppressed key=pat-touch`, `quiet-drop`, runtime `say utt1 dropped reason=voice-muted`; `end_silence`, `quiet-resume count=1`, `voice restored, voice-muted count=1`
-- spool self-test on the robot (no motion): `release_face` → `{"released": false, "note": "not locked"}`, `mute` → `muted: true`, `unmute` → `muted: false`
+- commits (harness): `e85772e` (spec) … `6a2bb59` on
+  `spec/gaze-voice-quiet-no-reflex-narration`; live-round fixes `8c9bbf5`,
+  `6d7f666`, `6a2bb59`
+- commits (runtime): #172 merge `9d1b39e` (v0.51.0); #173 `df37236` + `a0c0ebc`
+  (v0.51.1); device branch `82cbd3c`
+- PRs / issues: OriNachum/reachy-nova#21, #22 (face-focus follow-up);
+  agentculture/reachy-mini-cli#172 (merged), #173 (CI green)
+- on-robot journal, 2026-08-26 (BST), harness pid 5538/7614: chaos case 5
+  18:24:19 `kiro session unit started degraded (initial spawn failed: [Errno 2]
+  … 'kiro-cli') — retrying under watchdog`, `started name=kiro_session`, 4 ×
+  `restart failed:`, 18:25:16 `kiro session unit recovered (session live after 5
+  watchdog attempt(s))`, NRestarts 0→0
+- on-robot journal, acceptance round 1 (18:26–18:31): `event=volume old=62
+  new=72`, `72→82`; `run_behavior look-at-sound` applied; `lock_face … inhibited
+  ['feel-alive','orient-to-sound']`; `motion/face-lost` cue; `stay_silent …
+  body_muted:true`, `set_inhibition ['feel-alive','orient-to-sound','speak']`,
+  `mute … muted:true`, `quiet-drop`, `quiet-resume count=4`; `end_silence …
+  body_restored:true`; cues rendered as `(body cue: look-toward-sound)`, `(a
+  familiar face is in view)`
+- round 2 (18:35–18:39): `event=volume old=82 new=72`; `release_face` called by
+  Sonic (lock:4); `look-at-face` applied ×3; pat: `pat-acknowledge` +
+  `nova-pat-cheer` fired, one `(someone is petting you)` cue
+- round 3 (19:05–19:08, after `8c9bbf5`): `recall_senses` called ×3;
+  `stay_silent` armed 19:07:49, acknowledgement **played** 19:07:58; pat during
+  quiet → `dedupe suppressed key=pat-touch`, `quiet-drop`, runtime `say utt1
+  dropped reason=voice-muted`; `end_silence`, `quiet-resume count=1`, `voice
+  restored, voice-muted count=1`
+- spool self-test on the robot (no motion): `release_face` → `{"released":
+  false, "note": "not locked"}`, `mute` → `muted: true`, `unmute` → `muted:
+  false`
 
 ## Delivery Claims
 
@@ -117,10 +169,21 @@ Quoted verbatim from the `devague summary` skeleton:
 ## Remaining Work / Follow-up
 
 - `t5` / `t17` — mind-offline lock release: events-cli's client needs a `subscribe` API (or the runtime needs its own subscriber client); until then `MindPresence` stays `client-incompatible` and only max-hold (30 min) bounds a lock whose mind died. Owner: reachy-mini-cli.
-- `d3` — awaiting Ori's approval of the case-5 mechanism; the record cites it as proposed.
-- #22 — face-focus aim quality (calibrated bbox→angle, head-pose compensation, closed loop while locked).
-- Engine tick overruns (146 ms vs 20 ms budget) and the resulting 2 s heartbeat flap under load on the CM4 — pre-existing; the harness now tolerates it (5 s grace) but the runtime should be profiled (face detection cadence, `MindPresence`/lock on_tick cost).
-- `nemo_toolkit[asr]` is a hard dependency of `reachy-nova` used only by the legacy `main.py` path; on the robot it must be installed `--no-deps` or it pulls CUDA wheels. Move it to an optional extra.
-- reachy-mini-cli `version-bump` should run `uv lock`; a stale lock made CI re-resolve and hit the `pycairo 1.29.1` sdist (main's Tests run after #172 is red for the same reason; #173 refreshes the lock).
-- Merge order: #173 → `main` (runtime), then #21 → `main` (harness) and publish 0.3.0; the device already runs both.
-- Unprompted Sonic monologues about "sensitive video file details" appeared twice with no inject behind them — not chased; watch for recurrence.
+- `d3` — awaiting Ori's approval of the case-5 mechanism; the record cites it as
+  proposed.
+- #22 — face-focus aim quality (calibrated bbox→angle, head-pose compensation,
+  closed loop while locked).
+- Engine tick overruns (146 ms vs 20 ms budget) and the resulting 2 s heartbeat
+  flap under load on the CM4 — pre-existing; the harness now tolerates it (5 s
+  grace) but the runtime should be profiled (face detection cadence,
+  `MindPresence`/lock on_tick cost).
+- `nemo_toolkit[asr]` is a hard dependency of `reachy-nova` used only by the
+  legacy `main.py` path; on the robot it must be installed `--no-deps` or it
+  pulls CUDA wheels. Move it to an optional extra.
+- reachy-mini-cli `version-bump` should run `uv lock`; a stale lock made CI
+  re-resolve and hit the `pycairo 1.29.1` sdist (main's Tests run after #172 is
+  red for the same reason; #173 refreshes the lock).
+- Merge order: #173 → `main` (runtime), then #21 → `main` (harness) and publish
+  0.3.0; the device already runs both.
+- Unprompted Sonic monologues about "sensitive video file details" appeared
+  twice with no inject behind them — not chased; watch for recurrence.
