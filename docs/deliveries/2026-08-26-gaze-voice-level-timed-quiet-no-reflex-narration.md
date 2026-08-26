@@ -132,6 +132,15 @@ Quoted verbatim from the `devague summary` skeleton:
   from `os.environ`, populated once by `load_dotenv` at harness start, so the
   plan's knob cannot recover without a harness restart. **Proposed, awaiting
   approval** at the time of writing.
+- Qodo on reachy-mini-cli #173 found that lock ownership frozen at
+  acquisition breaks the lock invariant when a required name was already
+  operator-held; ownership is now recomputed on every replacement
+  (`0b199d9`): the live set is always `new_set ∪ LOCK_INHIBITS` while locked;
+  a replacement re-listing *all* lock names is treated as a `state.json` echo
+  (ownership survives), one keeping only *some* hands those to the caller —
+  a heuristic, because the mind cannot tell lock-held names apart from
+  operator-held ones. A principled fix (runtime exposes lock-owned names in
+  `state.json`) is follow-up.
 - The mind-presence topic is `nova/harness/state` (`harness/bus.py:144`), not
   `reachy/state/nova/*` as `docs/architecture.md` said; t17 subscribed to the
   real one and the doc was corrected — no record, captured here.
@@ -238,6 +247,7 @@ Quoted verbatim from the `devague summary` skeleton:
 - reachy-mini-cli `version-bump` should run `uv lock`; a stale lock made CI
   re-resolve and hit the `pycairo 1.29.1` sdist (main's Tests run after #172 is
   red for the same reason; #173 refreshes the lock).
+- Lock ownership vs the mind's whole-set `set_inhibition`: expose lock-owned names in `state.json` so the harness can merge without re-listing them (removes the echo heuristic). Owner: reachy-mini-cli.
 - Merge order: #173 → `main` (runtime), then #21 → `main` (harness) and publish
   0.3.0; the device already runs both.
 - Unprompted Sonic monologues about "sensitive video file details" appeared
