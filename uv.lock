@@ -4440,7 +4440,7 @@ wheels = [
 
 [[package]]
 name = "reachy-nova"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "aws-sdk-bedrock-runtime" },
@@ -4484,6 +4484,7 @@ requires-dist = [
     { name = "slack-bolt", specifier = ">=1.18.0" },
     { name = "ultralytics" },
 ]
+provides-extras = ["kiro"]
 
 [package.metadata.requires-dev]
 dev = [
