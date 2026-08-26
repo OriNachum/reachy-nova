@@ -2,7 +2,7 @@
   "plan_slug": "gaze-voice-level-timed-quiet-no-reflex-narration",
   "schema_version": 1,
   "created": "2026-08-26T14:28:47Z",
-  "updated": "2026-08-26T18:12:15Z",
+  "updated": "2026-08-26T18:54:18Z",
   "deviations": [
     {
       "id": "d1",
@@ -39,7 +39,7 @@
         "t14"
       ],
       "origin": "llm",
-      "status": "proposed",
+      "status": "approved",
       "classification": "acceptable"
     }
   ]
