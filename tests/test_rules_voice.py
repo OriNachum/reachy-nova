@@ -11,6 +11,17 @@ Covers the two things test_rules_coverage.py / test_harness_bus.py don't:
 2. ``route_event`` appends the right voice marker (silent/brief/free/absent)
    to the rendered inject text, per rule entry.
 
+t14 adds a fourth voice level, ``none`` — a cue that reaches SenseHistory
+but never Sonic. ``route_event`` itself treats it like ``free`` (no marker;
+VOICE_MARKERS has no ``none`` entry), because the actual suppression lives
+one layer up in ``NovaBus._handle_message``/``_deliver_muted`` — see
+test_harness_bus.py for that half. This file only pins that ``intent/applied``
+and ``intent/blocked``, previously ``silent`` (t6), are now ``none``: LIVE
+FOLLOW-UP evidence from 2026-08-26 19:05-19:08 showed ``silent`` alone still
+let Sonic narrate a standing-intention cue and keep announcing
+"I'm still following that sound" on every ``rule/fire:look-toward-sound``
+— a marker only hints, it never stops the model choosing to speak.
+
 Runs against the real ``config/nervous-system/rules.yaml`` and the real
 ``reachy_nova.harness.bus`` module — no broker, no network.
 """
@@ -175,6 +186,39 @@ def test_lock_released_is_silent_and_names_the_reason_in_plain_words(rules_cfg, 
         assert forbidden not in lowered
 
 
+def test_look_toward_sound_override_is_voice_none_and_sense_sound(rules_cfg, raw_rules):
+    """t14: the new rule/fire:look-toward-sound override — LIVE FOLLOW-UP
+    (2026-08-26 19:05-19:08) showed even `voice: silent` let Sonic call
+    look_at_sound and narrate "I'm still following that sound" on every
+    fire, so this ships straight to `voice: none`."""
+    entry = raw_rules["rules"]["rule/fire:look-toward-sound"]
+    assert entry.get("voice") == "none"
+    assert entry.get("sense") == "sound"
+    assert entry.get("priority") == raw_rules["rules"]["rule/fire"]["priority"]
+    assert entry.get("urgency") == raw_rules["rules"]["rule/fire"]["urgency"]
+
+    text, reason = bus.route_event(
+        rules_cfg, "rule", "fire", {"rule": "look-toward-sound"}
+    )
+    assert reason == bus.REASON_INJECT
+    assert text == "(you glanced toward a sound)"
+
+
+def test_route_event_none_voice_appends_no_marker():
+    """route_event itself doesn't know `none` is special — VOICE_MARKERS has
+    no entry for it, so it falls through to the same "" as `free`. The
+    actual suppression (never reaching on_inject) happens one layer up in
+    NovaBus._handle_message/_deliver_muted — see test_harness_bus.py."""
+    cfg = {
+        "rules": {"src/type": {"inject_template": "context", "voice": "none"}},
+        "default": {},
+    }
+    text, reason = bus.route_event(cfg, "src", "type", {})
+    assert reason == bus.REASON_INJECT
+    assert text == "context"
+    assert "none" not in bus.VOICE_MARKERS
+
+
 def test_route_event_absent_voice_defaults_to_free():
     cfg = {
         "rules": {"src/type": {"inject_template": "context"}},
@@ -198,16 +242,21 @@ def test_route_event_absent_voice_defaults_to_free():
 # --------------------------------------------------------------------------- #
 
 
-def test_l3_intent_blocked_is_a_silent_deduped_body_cue(rules_cfg, raw_rules):
+def test_l3_intent_blocked_is_a_none_deduped_body_cue(rules_cfg, raw_rules):
+    """t14: `silent` still let Sonic narrate this live (2026-08-26 19:05-
+    19:08) — moved to `voice: none` so it is recorded but never spoken."""
     entry = raw_rules["rules"]["intent/blocked"]
-    assert entry.get("voice") == "silent"
+    assert entry.get("voice") == "none"
     assert entry.get("dedupe") == "reflex-held"
 
     text, reason = bus.route_event(
         rules_cfg, "intent", "blocked", {"name": "set_inhibition", "reason": "inhibited"}
     )
     assert reason == bus.REASON_INJECT
-    assert text.endswith(bus.VOICE_MARKERS["silent"])
+    # `none` carries no VOICE_MARKERS suffix (route_event doesn't know it's
+    # "none" is special — the suppression happens one layer up, in
+    # NovaBus._handle_message/_deliver_muted).
+    assert not text.endswith(bus.VOICE_MARKERS["silent"])
     # It no longer accuses Nova of having its own intention refused.
     assert "set_inhibition" not in text
     assert "intention" not in text.lower()
@@ -232,7 +281,10 @@ def test_l3_intent_blocked_repeats_collapse_onto_one_dedupe_key(rules_cfg):
 
 
 def test_l3_intent_applied_is_context_only_never_spoken(rules_cfg, raw_rules):
-    assert raw_rules["rules"]["intent/applied"].get("voice") == "silent"
+    """t14: `silent` still let Sonic narrate this live (2026-08-26 19:05-
+    19:08 — "a standing intention called 'set_inhibition' is now active"
+    after end_silence) — moved to `voice: none`."""
+    assert raw_rules["rules"]["intent/applied"].get("voice") == "none"
     text, reason = bus.route_event(rules_cfg, "intent", "applied", {"name": "set_inhibition"})
     assert reason == bus.REASON_INJECT  # still context — Nova learns it landed
-    assert text.endswith(bus.VOICE_MARKERS["silent"])
+    assert not text.endswith(bus.VOICE_MARKERS["silent"])

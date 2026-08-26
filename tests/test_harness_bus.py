@@ -605,12 +605,18 @@ def test_route_event_rule_fire_nova_face_noticed_reads_as_sight(real_rules):
 def test_route_event_rule_fire_unknown_rule_keeps_the_generic_template(real_rules):
     """t6: the generic rule/fire template dropped "reflex fired" narration
     in favor of quiet situational context, but still names the rule that
-    fired and still always injects (voice: silent, not dropped)."""
+    fired and still always injects (voice: silent, not dropped).
+
+    Uses a rule id with no per-rule override — NOT "look-toward-sound",
+    which t14 gave its own `rule/fire:look-toward-sound` override (see
+    test_rules_voice.py) precisely so it stops falling through to this
+    generic template.
+    """
     text, reason = bus.route_event(
-        real_rules, "rule", "fire", {"t": "rule", "rule": "look-toward-sound"}
+        real_rules, "rule", "fire", {"t": "rule", "rule": "some-unmapped-behavior"}
     )
     assert reason == bus.REASON_INJECT
-    assert "look-toward-sound" in text
+    assert "some-unmapped-behavior" in text
     assert "reflex" not in text.lower()
     assert text.endswith(bus.VOICE_MARKERS["silent"])
 
@@ -849,6 +855,138 @@ def test_history_does_not_record_a_deduped_suppressed_inject(tmp_path):
     nb.on_message(None, None, msg)
     assert len(rec.injects) == 1
     assert len(history.recent(10)) == 1
+
+
+# --------------------------------------------------------------------------- #
+# voice: none (t14) — recorded in SenseHistory, never delivered to Sonic     #
+# --------------------------------------------------------------------------- #
+
+
+def _none_rules_path(tmp_path):
+    cfg = {
+        "rules": {
+            "rule/fire": {
+                "priority": "NORMAL",
+                "urgency": "NOW",
+                "inject_template": "(body cue: {rule})",
+                "sense": "sound",
+                "voice": "none",
+            },
+            "intent/applied": {
+                "priority": "NORMAL",
+                "urgency": "DEFERRABLE",
+                "inject_template": "Your standing intention '{name}' is now in effect.",
+                "voice": "none",
+            },
+        },
+        "default": {"priority": "NORMAL", "urgency": "DEFERRABLE"},
+    }
+    path = tmp_path / "rules.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    return path
+
+
+def test_voice_none_never_reaches_on_inject_but_is_recorded(tmp_path):
+    rec = Recorder()
+    history = SenseHistory()
+    nb = make_bus(rec, rules_path=_none_rules_path(tmp_path), history=history, sources="intent")
+    nb.on_message(
+        None,
+        None,
+        fake_msg(
+            "reachy/events/intent/applied",
+            {"t": "intent", "ts": 1.0, "name": "set_inhibition"},
+        ),
+    )
+    assert rec.injects == []
+    (entry,) = history.recent()
+    assert entry["source"] == "intent"
+    assert entry["type"] == "applied"
+    assert entry["voice"] == "none"
+    assert "set_inhibition" in entry["text"]
+
+
+def test_voice_none_muted_line_logs_once_per_key_across_three_events(caplog, tmp_path):
+    clock_state = {"t": 0.0}
+    rec = Recorder()
+    history = SenseHistory()
+    nb = make_bus(
+        rec,
+        rules_path=_none_rules_path(tmp_path),
+        history=history,
+        sources="rule",
+        clock=lambda: clock_state["t"],
+    )
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        for i in range(3):
+            # Each event clears the dedupe window (10s default) so all three
+            # are genuinely-distinct fires, each recorded in history — the
+            # muted senselog line is latched separately and must still only
+            # appear once.
+            clock_state["t"] += 20.0
+            nb.on_message(
+                None,
+                None,
+                fake_msg(
+                    "reachy/events/rule/fire",
+                    {"t": "rule", "ts": clock_state["t"], "rule": "look-toward-sound"},
+                ),
+            )
+    assert rec.injects == []
+    assert len(history.recent(10)) == 3
+    muted_lines = [r for r in caplog.records if "muted voice=none" in r.getMessage()]
+    assert len(muted_lines) == 1
+
+
+def test_voice_none_respects_the_dedupe_window_for_history_too(tmp_path):
+    """A rapid repeat within the dedupe window is suppressed before it ever
+    reaches history — `none` still shares `_deliver`'s dedupe reservation,
+    just without ever calling on_inject."""
+    clock_state = {"t": 0.0}
+    rec = Recorder()
+    history = SenseHistory()
+    nb = make_bus(
+        rec,
+        rules_path=_none_rules_path(tmp_path),
+        history=history,
+        sources="intent",
+        clock=lambda: clock_state["t"],
+    )
+    msg = fake_msg(
+        "reachy/events/intent/applied", {"t": "intent", "ts": 1.0, "name": "set_inhibition"}
+    )
+    nb.on_message(None, None, msg)
+    clock_state["t"] += 1.0  # well inside the default 10s dedupe window
+    nb.on_message(None, None, msg)
+    assert rec.injects == []
+    assert len(history.recent(10)) == 1
+
+
+def test_voice_silent_regression_still_injects(tmp_path):
+    """Regression guard: `silent` is unaffected by the `none` addition — it
+    still always reaches on_inject, just carrying the quiet marker (unlike
+    `none`, which reaches SenseHistory only)."""
+    cfg = {
+        "rules": {
+            "intent/declare": {
+                "priority": "NORMAL",
+                "urgency": "BACKGROUND",
+                "inject_template": "a standing goal was declared",
+                "voice": "silent",
+            },
+        },
+        "default": {"priority": "NORMAL", "urgency": "DEFERRABLE"},
+    }
+    path = tmp_path / "rules.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    rec = Recorder()
+    history = SenseHistory()
+    nb = make_bus(rec, rules_path=path, history=history, sources="intent")
+    nb.on_message(
+        None, None, fake_msg("reachy/events/intent/declare", {"t": "intent", "ts": 1.0})
+    )
+    assert rec.injects == ["a standing goal was declared" + bus.VOICE_MARKERS["silent"]]
+    assert len(history.recent()) == 1
 
 
 def test_bus_with_no_history_wired_never_raises():
