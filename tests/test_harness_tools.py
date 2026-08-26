@@ -24,6 +24,8 @@ import time
 import pytest
 
 from reachy_nova.harness import statedir
+from reachy_nova.harness import tools as tools_module
+from reachy_nova.harness.daemon_client import restore_volume
 from reachy_nova.harness.quiet import QuietState
 from reachy_nova.harness.tools import (
     BROWSE_DISABLED_REASON,
@@ -1547,3 +1549,348 @@ def test_end_silence_spools_unmute_after_a_mute(quiet_tools):
         result = json.loads(quiet_tools.execute("end_silence", {}))
     assert result["body_restored"] is True
     assert len(_ops(engine, "unmute")) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Voice level: persistence (finding F4) + concurrency (finding F7)            #
+#                                                                             #
+# The daemon forgets its volume across a restart, so ``restore_volume`` reads #
+# ``<state>/nova-volume.json`` on harness start — which is only worth reading #
+# if the tools that CHANGE the level also write it.                           #
+# --------------------------------------------------------------------------- #
+
+
+def _volume_file():
+    return statedir.volume_state_path()
+
+
+def _persisted_volume():
+    return json.loads(_volume_file().read_text(encoding="utf-8"))
+
+
+def test_raise_voice_persists_the_new_level(voice_tools, daemon_client):
+    daemon_client.volume = 50
+    result = json.loads(voice_tools.execute("raise_voice", {}))
+    assert result == {"ok": True, "volume": 60}
+    assert _persisted_volume() == {"volume": 60}
+
+
+def test_set_voice_level_persists_the_new_level(voice_tools, daemon_client):
+    daemon_client.volume = 20
+    voice_tools.execute("set_voice_level", {"volume": 77})
+    assert _persisted_volume() == {"volume": 77}
+
+
+def test_a_no_op_set_still_creates_an_absent_persisted_file(voice_tools, daemon_client):
+    daemon_client.volume = 50
+    assert not _volume_file().exists()
+    result = json.loads(voice_tools.execute("set_voice_level", {"volume": 50}))
+    assert result == {"ok": True, "volume": 50}
+    # Still no daemon call (the confirmation sound is unsuppressible)...
+    assert daemon_client.set_calls == []
+    # ...but the level the person asked for is now durable.
+    assert _persisted_volume() == {"volume": 50}
+
+
+def test_a_no_op_set_refreshes_a_stale_persisted_file(voice_tools, daemon_client):
+    _volume_file().parent.mkdir(parents=True, exist_ok=True)
+    _volume_file().write_text(json.dumps({"volume": 42}), encoding="utf-8")
+    daemon_client.volume = 50
+    voice_tools.execute("set_voice_level", {"volume": 50})
+    assert daemon_client.set_calls == []
+    assert _persisted_volume() == {"volume": 50}
+
+
+def test_a_failed_set_leaves_the_persisted_level_untouched(voice_tools, daemon_client):
+    _volume_file().parent.mkdir(parents=True, exist_ok=True)
+    _volume_file().write_text(json.dumps({"volume": 42}), encoding="utf-8")
+    daemon_client.set_error = TimeoutError("daemon timed out")
+    result = json.loads(voice_tools.execute("raise_voice", {}))
+    assert result["ok"] is False
+    assert _persisted_volume() == {"volume": 42}
+
+
+def test_a_failed_get_never_writes_a_persisted_level(voice_tools, daemon_client):
+    daemon_client.get_error = ConnectionError("no route to daemon")
+    result = json.loads(voice_tools.execute("raise_voice", {}))
+    assert result["ok"] is False
+    assert not _volume_file().exists()
+
+
+def test_a_persistence_failure_is_reported_not_claimed(
+    voice_tools, daemon_client, monkeypatch
+):
+    def boom(path, text):
+        raise OSError("read-only state dir")
+
+    monkeypatch.setattr(tools_module, "_atomic_write", boom)
+    daemon_client.volume = 50
+    result = json.loads(voice_tools.execute("raise_voice", {}))
+    # The daemon really did apply it, so ok stays True — but the caller is
+    # told, in the payload, that it will not survive a restart.
+    assert result["ok"] is True
+    assert result["volume"] == 60
+    assert result["persisted"] is False
+    assert tools_module.VOLUME_NOT_PERSISTED_NOTE in result["note"]
+
+
+def test_a_persistence_failure_keeps_a_clamp_note_visible(
+    voice_tools, daemon_client, monkeypatch
+):
+    def boom(path, text):
+        raise OSError("read-only state dir")
+
+    monkeypatch.setattr(tools_module, "_atomic_write", boom)
+    daemon_client.volume = 95
+    result = json.loads(voice_tools.execute("raise_voice", {}))
+    assert result["volume"] == 100
+    assert "at maximum" in result["note"]
+    assert tools_module.VOLUME_NOT_PERSISTED_NOTE in result["note"]
+
+
+def test_a_successful_set_does_not_advertise_persistence(voice_tools, daemon_client):
+    daemon_client.volume = 50
+    result = json.loads(voice_tools.execute("lower_voice", {}))
+    # Durable is the contract, not a field: only a FAILURE is announced.
+    assert result == {"ok": True, "volume": 40}
+    assert "persisted" not in result
+
+
+def test_the_persisted_shape_is_what_restore_volume_reads(voice_tools, daemon_client):
+    daemon_client.volume = 50
+    voice_tools.execute("set_voice_level", {"volume": 33})
+    # A "restart": the daemon came back at its own default.
+    fresh = FakeDaemonClient(volume=50)
+    assert restore_volume(_volume_file(), fresh) == 33
+    assert fresh.set_calls == [33]
+
+
+class SlowReadDaemonClient(FakeDaemonClient):
+    """A client whose read is slow enough for two threads to interleave.
+
+    Tool calls arrive on their own threads (``app.py``'s ``_on_tool_use``), so
+    a relative volume change is a read-compute-set transaction two callers can
+    genuinely be inside at once.
+    """
+
+    def get_volume(self) -> int:
+        time.sleep(0.02)
+        return super().get_volume()
+
+
+def test_concurrent_raises_do_not_overwrite_each_other(state_dir):
+    client = SlowReadDaemonClient(volume=50)
+    tools = IntentTools(await_timeout=0.15, daemon_client=client)
+    threads = [
+        threading.Thread(target=tools.execute, args=("raise_voice", {}))
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5.0)
+    # Two +10 steps from 50 is 70. An unlocked read-compute-set gives 60:
+    # both threads read 50 and both write 60, and one request vanishes.
+    assert client.set_calls == [60, 70]
+    assert client.volume == 70
+    assert _persisted_volume() == {"volume": 70}
+
+
+def test_concurrent_raise_and_lower_serialize(state_dir):
+    client = SlowReadDaemonClient(volume=50)
+    tools = IntentTools(await_timeout=0.15, daemon_client=client)
+    threads = [
+        threading.Thread(target=tools.execute, args=("raise_voice", {})),
+        threading.Thread(target=tools.execute, args=("lower_voice", {})),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5.0)
+    # Whichever order they run in, +10 and -10 from 50 must land back on 50.
+    assert client.volume == 50
+
+
+# --------------------------------------------------------------------------- #
+# Quiet: expiry, acknowledgement timing and restart ownership (F2, F5, F1)    #
+# --------------------------------------------------------------------------- #
+
+
+class PerOpEngine(FakeEngine):
+    """A fake engine that answers differently per ``op``.
+
+    Needed for the half-degraded cases: a runtime that refuses the inhibition
+    but accepts the mute (or the other way round) is exactly where the
+    harness's ownership bookkeeping gets it wrong.
+    """
+
+    def __init__(self, commands_dir, results_dir, answers):
+        super().__init__(commands_dir, results_dir)
+        self.answers = answers
+
+    def _answer(self, payload: dict) -> dict:
+        op = payload.get("op")
+        base = self.answers.get(op, {"ok": True})
+        return {**base, "cmd_id": payload.get("cmd_id"), "op": op}
+
+
+def per_op_engine(answers):
+    return PerOpEngine(
+        statedir.intents_commands_dir(), statedir.intents_results_dir(), answers
+    )
+
+
+# -- F2: a mute-only quiet must still expire -------------------------------- #
+
+
+def test_expiry_unmutes_when_only_the_mute_latch_is_owned(quiet_tools, quiet, clock):
+    answers = {"set_inhibition": {"ok": False, "error": "refused"}}
+    with per_op_engine(answers) as engine:
+        result = json.loads(quiet_tools.execute("stay_silent", {"minutes": 10}))
+        assert result["body_muted"] is False  # the inhibition half was refused
+        assert len(_ops(engine, "mute")) == 1  # ...but the mute half landed
+        clock.advance(11 * 60)
+        quiet_tools.tick()
+        quiet_tools.tick()
+    # The mute is ours and only we can lift it — exactly once.
+    assert len(_ops(engine, "unmute")) == 1
+
+
+def test_expiry_unmutes_when_only_the_inhibition_latch_is_owned(
+    quiet_tools, quiet, clock
+):
+    answers = {"mute": {"ok": False, "error": "unknown kind"}}
+    with per_op_engine(answers) as engine:
+        quiet_tools.execute("stay_silent", {"minutes": 10})
+        clock.advance(11 * 60)
+        quiet_tools.tick()
+    first, second = _inhibition_payloads(engine)
+    assert first["behaviors"] == ["speak"]
+    assert second["behaviors"] == []
+    assert _ops(engine, "unmute") == []  # never ours to undo
+
+
+# -- F5: the acknowledgement must outlive a slow body mute ------------------ #
+
+
+def test_the_acknowledgement_survives_a_slow_body_mute(quiet_tools, quiet, clock):
+    def slow_submit(payload):
+        # Each body round-trip eats most of the 2 s acknowledgement grace.
+        clock.advance(1.5)
+        return {"ok": True, "op": payload.get("op")}
+
+    quiet_tools.submit_and_await = slow_submit
+    result = json.loads(quiet_tools.execute("stay_silent", {"minutes": 10}))
+    assert result["ok"] is True
+    assert result["body_muted"] is True
+    # "okay, quiet for ten minutes" must still be allowed out.
+    assert quiet.pending_first_utterance is True
+    assert quiet.allow_utterance() is True
+
+
+def test_stay_silent_result_field_order_is_unchanged(quiet_tools):
+    with intents_engine():
+        result = json.loads(quiet_tools.execute("stay_silent", {"minutes": 10}))
+    assert list(result) == ["ok", "until", "note", "body_muted"]
+
+
+def test_the_mind_side_quiet_holds_when_the_body_mute_raises(quiet_tools, quiet):
+    def boom(payload):
+        raise OSError("spool is gone")
+
+    quiet_tools.submit_and_await = boom
+    result = json.loads(quiet_tools.execute("stay_silent", {"minutes": 10}))
+    assert result["ok"] is True
+    assert result["body_muted"] is False
+    assert quiet.active() is True
+
+
+# -- F1: ownership survives a harness restart ------------------------------- #
+
+
+def _write_quiet_file(path, until, latches=None):
+    payload = {"until": until}
+    if latches is not None:
+        payload["body"] = {"added_speak": latches[0], "muted_voice": latches[1]}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _restarted_tools(state_dir, clock):
+    """A brand-new IntentTools over the persisted quiet — a harness restart."""
+    restored = QuietState(clock=clock, path=state_dir / "nova-quiet.json")
+    return IntentTools(await_timeout=0.5, quiet=restored), restored
+
+
+def test_stay_silent_persists_the_body_ownership_latches(quiet_tools, state_dir):
+    with intents_engine():
+        quiet_tools.execute("stay_silent", {"minutes": 10})
+    payload = json.loads((state_dir / "nova-quiet.json").read_text(encoding="utf-8"))
+    assert payload["body"] == {"added_speak": True, "muted_voice": True}
+
+
+def test_end_silence_clears_the_persisted_latches(quiet_tools, state_dir):
+    with intents_engine():
+        quiet_tools.execute("stay_silent", {"minutes": 10})
+        quiet_tools.execute("end_silence", {})
+    assert not (state_dir / "nova-quiet.json").exists()
+
+
+def test_a_restart_inside_a_quiet_re_mutes_and_reclaims_ownership(state_dir, clock):
+    _write_quiet_file(state_dir / "nova-quiet.json", clock.now + 600, (True, True))
+    _write_inhibitions(["speak"])  # the runtime kept the mute across our restart
+    tools, restored = _restarted_tools(state_dir, clock)
+    with intents_engine() as engine:
+        tools.tick()
+    # Idempotent re-issue: one set_inhibition (still just 'speak') and one mute.
+    (payload,) = _inhibition_payloads(engine)
+    assert payload["behaviors"] == ["speak"]
+    assert len(_ops(engine, "mute")) == 1
+    # Ownership is ours again, so the expiry can undo it.
+    clock.advance(11 * 60)
+    with intents_engine() as engine2:
+        tools.tick()
+    assert _inhibition_payloads(engine2)[0]["behaviors"] == []
+    assert len(_ops(engine2, "unmute")) == 1
+    assert restored.active() is False
+
+
+def test_a_restart_re_mutes_a_runtime_that_came_back_talking(state_dir, clock):
+    _write_quiet_file(state_dir / "nova-quiet.json", clock.now + 600, (True, True))
+    _write_inhibitions([])  # the runtime restarted too: nothing held back
+    tools, _restored = _restarted_tools(state_dir, clock)
+    with per_op_engine({"mute": {"ok": True, "note": "not muted"}}) as engine:
+        tools.tick()
+    (payload,) = _inhibition_payloads(engine)
+    assert payload["behaviors"] == ["speak"]
+    assert len(_ops(engine, "mute")) == 1
+
+
+def test_a_restart_after_the_deadline_mutes_nothing(state_dir, clock):
+    _write_quiet_file(state_dir / "nova-quiet.json", clock.now - 1, (True, True))
+    tools, restored = _restarted_tools(state_dir, clock)
+    with intents_engine() as engine:
+        tools.tick()
+    assert restored.active() is False
+    assert engine.seen == []
+
+
+def test_a_restart_over_an_old_shape_file_still_mutes_the_body(state_dir, clock):
+    # No latches recorded (pre-F1 file): quiet is still on, so the body must be.
+    _write_quiet_file(state_dir / "nova-quiet.json", clock.now + 600, None)
+    tools, restored = _restarted_tools(state_dir, clock)
+    with intents_engine() as engine:
+        tools.tick()
+    assert restored.active() is True
+    assert len(_inhibition_payloads(engine)) == 1
+    assert len(_ops(engine, "mute")) == 1
+
+
+def test_the_restart_re_mute_happens_only_once(state_dir, clock):
+    _write_quiet_file(state_dir / "nova-quiet.json", clock.now + 600, (True, True))
+    tools, _restored = _restarted_tools(state_dir, clock)
+    with intents_engine() as engine:
+        tools.tick()
+        tools.tick()
+        tools.tick()
+    assert len(_ops(engine, "mute")) == 1

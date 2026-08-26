@@ -216,6 +216,14 @@ DEFAULT_VOICE_STEP = 10
 #: (mirrors ``FORGE_NOT_WIRED_REASON``'s component-absent shape).
 VOICE_NOT_WIRED_REASON = "voice level control is not wired up yet"
 
+#: Appended to a voice tool's ``note`` when the daemon applied the new level
+#: but writing :func:`~reachy_nova.harness.statedir.volume_state_path` failed.
+#: The change is real RIGHT NOW, so ``ok`` stays True — but it will not
+#: survive a restart (``daemon_client.restore_volume`` reads only that file),
+#: and a payload that stayed silent about it would be claiming a durability it
+#: does not have. ``persisted: false`` rides along as a machine-readable flag.
+VOLUME_NOT_PERSISTED_NOTE = "not saved for next restart"
+
 #: ``recall_senses`` (task t8) — bounds on how many recent senses a call may
 #: ask for. Out-of-range values are CLAMPED, never refused: a model asking for
 #: too much/too little history should still get a usable answer, same
@@ -918,6 +926,13 @@ class IntentTools:
         # a DaemonClient handle directly — not spool-backed, refused with a
         # named reason when absent, same shape as the browser/forge legs.
         self._daemon_client = daemon_client
+        # Tool calls arrive on their own threads (app.py's _on_tool_use), so a
+        # relative change ("a bit louder") is a read-compute-set-persist
+        # transaction two callers can be inside at once. Unlocked, two
+        # concurrent +10s from 50 both read 50 and both write 60: one request
+        # silently vanishes. This lock covers the WHOLE transaction, shared by
+        # raise/lower/set.
+        self._voice_lock = threading.Lock()
         # ``recall_senses`` (task t8) reads a SenseHistory ring buffer
         # directly — same absent-component shape again, never half-working.
         self._history = history
@@ -937,6 +952,10 @@ class IntentTools:
         self._quiet_lock = threading.RLock()
         self._quiet_added_speak = False
         self._quiet_muted_voice = False
+        # Have we already reconciled with a quiet that outlived our process?
+        # See _reclaim_body_ownership; any mute/unmute we perform ourselves
+        # counts as the reconciliation.
+        self._reclaimed = False
         self._tick_stop: threading.Event | None = None
         self._ticker: threading.Thread | None = None
         self._commands_dir = Path(commands_dir) if commands_dir is not None else None
@@ -1173,37 +1192,56 @@ class IntentTools:
         return payload
 
     def _voice_apply(self, tool_name: str, params: Mapping) -> tuple[dict, int, int]:
-        """Compute + apply the new level; raises :class:`ToolRefused` on any failure."""
+        """Compute + apply the new level; raises :class:`ToolRefused` on any failure.
+
+        The whole read -> compute -> set -> persist run is held under
+        :attr:`_voice_lock`; see its comment for why a relative change is not
+        safe to interleave.
+        """
         if self._daemon_client is None:
             raise ToolRefused(VOICE_NOT_WIRED_REASON)
-        try:
-            current = int(self._daemon_client.get_volume())
-        except Exception as err:  # noqa: BLE001 - any client failure is a refusal
-            raise ToolRefused(f"could not read current volume: {err}") from err
-
-        if tool_name == SET_VOICE_LEVEL:
-            target = _number(params.get("volume"), "'volume'")
-        else:
-            raw_step = params.get("step")
-            step = DEFAULT_VOICE_STEP if raw_step is None else _number(raw_step, "'step'")
-            target = current + step if tool_name == RAISE_VOICE else current - step
-
-        clamped = int(round(max(MIN_VOICE_LEVEL, min(MAX_VOICE_LEVEL, target))))
-        note = None
-        if target > MAX_VOICE_LEVEL:
-            note = "at maximum"
-        elif target < MIN_VOICE_LEVEL:
-            note = "at minimum"
-
-        if clamped == current:
-            applied = current
-        else:
+        with self._voice_lock:
             try:
-                applied = int(self._daemon_client.set_volume(clamped))
+                current = int(self._daemon_client.get_volume())
             except Exception as err:  # noqa: BLE001 - any client failure is a refusal
-                raise ToolRefused(f"could not set volume: {err}") from err
+                raise ToolRefused(f"could not read current volume: {err}") from err
+
+            if tool_name == SET_VOICE_LEVEL:
+                target = _number(params.get("volume"), "'volume'")
+            else:
+                raw_step = params.get("step")
+                step = (
+                    DEFAULT_VOICE_STEP if raw_step is None else _number(raw_step, "'step'")
+                )
+                target = current + step if tool_name == RAISE_VOICE else current - step
+
+            clamped = int(round(max(MIN_VOICE_LEVEL, min(MAX_VOICE_LEVEL, target))))
+            note = None
+            if target > MAX_VOICE_LEVEL:
+                note = "at maximum"
+            elif target < MIN_VOICE_LEVEL:
+                note = "at minimum"
+
+            if clamped == current:
+                applied = current
+            else:
+                try:
+                    applied = int(self._daemon_client.set_volume(clamped))
+                except Exception as err:  # noqa: BLE001 - any client failure is a refusal
+                    raise ToolRefused(f"could not set volume: {err}") from err
+
+            persisted = _persist_volume(applied)
 
         payload: dict = {"ok": True, "volume": applied}
+        if not persisted:
+            # ok stays True — the daemon really did apply it — but the payload
+            # must not imply it will still be there after a restart.
+            payload["persisted"] = False
+            note = (
+                VOLUME_NOT_PERSISTED_NOTE
+                if not note
+                else f"{note}; {VOLUME_NOT_PERSISTED_NOTE}"
+            )
         if note:
             payload["note"] = note
         return payload, current, applied
@@ -1245,25 +1283,39 @@ class IntentTools:
            back (see that constant for exactly how much of the runtime's own
            voice that reaches, and what it does not).
 
-        The order is the contract. ``set_inhibition`` REPLACES the whole
-        inhibited set on the engine, so it is a round-trip over the spool and
-        can degrade (no engine, slow engine) — and a degraded body mute must
-        never undo the mind-side quiet, which is the half the person actually
-        asked for and the half that always works. So the quiet is armed first,
-        unconditionally, and the body's verdict is reported as ``body_muted``
-        rather than folded into ``ok``.
+        The BODY goes first, and that ordering is load-bearing.
+        ``set_inhibition`` REPLACES the whole inhibited set on the engine, so
+        it is a round-trip over the spool and each of the two ops can take up
+        to the await timeout — comfortably longer than the 2 s acknowledgement
+        grace :meth:`QuietState.arm` starts. Arming first therefore let a slow
+        or absent engine eat the entire grace, and "okay, quiet for ten
+        minutes" got swallowed by the quiet it was announcing. Arming after
+        the spools starts that grace when there is actually a mouth free to
+        use it.
+
+        Nothing about the mind-side quiet is made conditional by this: the
+        body mute cannot refuse it and cannot raise past it (a spool fault
+        reads as ``body_muted: False``), so the half the person actually asked
+        for still always happens, and the body's verdict is still reported as
+        ``body_muted`` rather than folded into ``ok``. The result fields are
+        unchanged, in the same order.
         """
         if self._quiet is None:
             raise ToolRefused(QUIET_NOT_WIRED_REASON)
         minutes = _number(params.get("minutes"), "'minutes'")
         if not (MIN_QUIET_MINUTES <= minutes <= MAX_QUIET_MINUTES):
             raise ToolRefused(QUIET_MINUTES_REASON)
+        try:
+            body_muted = self._mute_body()
+        except Exception as err:  # noqa: BLE001 - the mind-side quiet still holds
+            logger.warning("tools: body mute failed: %s", err, exc_info=True)
+            body_muted = False
         armed = self._quiet.arm(minutes)
         return {
             "ok": True,
             "until": self._quiet.until_iso(),
             "note": armed["note"],
-            "body_muted": self._mute_body(),
+            "body_muted": body_muted,
         }
 
     def _end_silence(self, params: Mapping) -> dict:  # noqa: ARG002 - no arguments
@@ -1285,10 +1337,44 @@ class IntentTools:
         """
         if self._quiet is None:
             return
+        self._reclaim_body_ownership()
         with self._quiet_lock:
-            if not self._quiet_added_speak or self._quiet.active():
+            # EITHER latch is enough. They are set independently — an engine
+            # that refuses the inhibition but accepts the mute leaves only
+            # ``_quiet_muted_voice`` owned — and gating on the inhibition
+            # alone meant that quiet expired for the mind and never for the
+            # runtime's voice: a robot mute until somebody rebooted it.
+            if not (self._quiet_added_speak or self._quiet_muted_voice):
+                return
+            if self._quiet.active():
                 return
         self._unmute_body()
+
+    def _reclaim_body_ownership(self) -> None:
+        """Once, on the first tick: take back a quiet that outlived our process.
+
+        A restart inside a quiet window restores the DEADLINE from
+        ``nova-quiet.json`` but starts with both ownership latches False, which
+        breaks in both directions: if the runtime kept our mute, nothing here
+        believes it may lift it (the quiet ends and the body stays mute
+        forever); if the runtime restarted too, its mouth is open inside a
+        quiet the person is still in. So we restore the persisted latches and
+        re-issue :meth:`_mute_body`, which is idempotent on the runtime side —
+        ``set_inhibition`` with the already-merged set is a no-op and ``mute``
+        answers "already muted". A pre-ownership file (no latches recorded)
+        still re-mutes: the quiet is on, so the body must be.
+        """
+        with self._quiet_lock:
+            if self._reclaimed:
+                return
+            self._reclaimed = True
+        if self._quiet is None or not self._quiet.active():
+            return
+        added_speak, muted_voice = self._quiet.body_latches()
+        with self._quiet_lock:
+            self._quiet_added_speak = self._quiet_added_speak or added_speak
+            self._quiet_muted_voice = self._quiet_muted_voice or muted_voice
+        self._mute_body()
 
     # -- the runtime's own mouth -------------------------------------------
 
@@ -1312,6 +1398,8 @@ class IntentTools:
                 self._quiet_added_speak = True
             if muted:
                 self._quiet_muted_voice = True
+            self._reclaimed = True
+        self._sync_quiet_latches()
         return ok and muted
 
     def _unmute_body(self) -> bool:
@@ -1319,6 +1407,7 @@ class IntentTools:
         with self._quiet_lock:
             added_speak = self._quiet_added_speak
             muted_voice = self._quiet_muted_voice
+            self._reclaimed = True
         if not added_speak and not muted_voice:
             return False
         ok = True
@@ -1336,7 +1425,23 @@ class IntentTools:
                     self._quiet_muted_voice = False
             else:
                 ok = False
+        self._sync_quiet_latches()
         return ok
+
+    def _sync_quiet_latches(self) -> None:
+        """Mirror the ownership latches into the persisted quiet file.
+
+        The latches are only useful across a restart if they are written down
+        next to the deadline they belong to — see
+        :meth:`~reachy_nova.harness.quiet.QuietState.set_body_latches` and
+        :meth:`_reclaim_body_ownership`.
+        """
+        if self._quiet is None:
+            return
+        with self._quiet_lock:
+            added_speak = self._quiet_added_speak
+            muted_voice = self._quiet_muted_voice
+        self._quiet.set_body_latches(added_speak, muted_voice)
 
     # -- supervisor component ----------------------------------------------
 
@@ -1397,6 +1502,36 @@ def _atomic_write(path: Path, text: str) -> None:
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _persist_volume(volume: int) -> bool:
+    """Make the applied voice level survive a restart. Returns whether it did.
+
+    The daemon forgets its volume when it restarts, so
+    ``daemon_client.restore_volume`` re-applies ``<state>/nova-volume.json``
+    on harness start — a file only worth reading if the tools that CHANGE the
+    level write it. Skipped when the file already holds this level, which is
+    what makes a no-op request (asking for the level you are already at) still
+    create or refresh a missing/stale file without a daemon call.
+
+    Never raises: a state dir we cannot write is worth reporting in the
+    payload (see :data:`VOLUME_NOT_PERSISTED_NOTE`), not worth turning a
+    volume change the person can already hear into a refusal.
+    """
+    path = statedir.volume_state_path()
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        if int(stored["volume"]) == int(volume):
+            return True
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(path, json.dumps({"volume": int(volume)}))
+    except OSError as err:
+        logger.warning("tools: could not persist voice level %s: %s", volume, err)
+        return False
+    return True
 
 
 def _safe_unlink(path: Path) -> None:

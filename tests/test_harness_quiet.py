@@ -251,3 +251,77 @@ def test_an_unarmed_state_allows_everything(state_dir, clock):
     quiet.allow_utterance()  # consume the acknowledgement
     clock.advance(61.0)
     assert quiet.allow_utterance() is True
+
+
+# --------------------------------------------------------------------------- #
+# 6. body-ownership latches (finding F1)                                      #
+#                                                                             #
+# The deadline alone is not enough to survive a restart: whoever muted the    #
+# runtime's own mouth has to be remembered too, or the restored quiet ends    #
+# with nobody willing to undo the mute.                                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_fresh_state_owns_no_body_latches(state_dir, clock):
+    q = QuietState(clock=clock, path=statedir.quiet_state_path())
+    assert q.body_latches() == (False, False)
+
+
+def test_body_latches_round_trip_through_the_file(state_dir, clock):
+    path = statedir.quiet_state_path()
+    q = QuietState(clock=clock, path=path)
+    q.arm(10)
+    q.set_body_latches(True, False)
+    assert json.loads(path.read_text(encoding="utf-8"))["body"] == {
+        "added_speak": True,
+        "muted_voice": False,
+    }
+    assert QuietState(clock=clock, path=path).body_latches() == (True, False)
+
+
+def test_arm_keeps_already_owned_latches_in_the_file(state_dir, clock):
+    path = statedir.quiet_state_path()
+    q = QuietState(clock=clock, path=path)
+    q.arm(10)
+    q.set_body_latches(True, True)
+    q.arm(20)
+    assert json.loads(path.read_text(encoding="utf-8"))["body"] == {
+        "added_speak": True,
+        "muted_voice": True,
+    }
+
+
+def test_an_old_shape_file_without_latches_still_loads(state_dir, clock):
+    path = statedir.quiet_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"until": clock.t + 600}), encoding="utf-8")
+    q = QuietState(clock=clock, path=path)
+    assert q.active() is True
+    assert q.body_latches() == (False, False)
+
+
+def test_a_malformed_body_field_reads_as_unowned(state_dir, clock):
+    path = statedir.quiet_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"until": clock.t + 600, "body": "yes"}), encoding="utf-8"
+    )
+    q = QuietState(clock=clock, path=path)
+    assert q.active() is True
+    assert q.body_latches() == (False, False)
+
+
+def test_release_clears_the_body_latches(state_dir, clock):
+    q = QuietState(clock=clock, path=statedir.quiet_state_path())
+    q.arm(10)
+    q.set_body_latches(True, True)
+    q.release()
+    assert q.body_latches() == (False, False)
+
+
+def test_latches_set_while_unarmed_are_not_persisted(state_dir, clock):
+    path = statedir.quiet_state_path()
+    q = QuietState(clock=clock, path=path)
+    q.set_body_latches(True, True)
+    assert q.body_latches() == (True, True)
+    assert not path.exists()

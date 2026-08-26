@@ -16,6 +16,10 @@ from that:
   reloaded on construction. A harness restart at 02:05 inside a quiet armed at
   02:00 must not loudly reintroduce itself; a deadline already in the past is
   ignored and the stale file removed, so quiet can never outlive its own clock.
+  The file also carries ``body`` — whether WE are the ones holding the
+  runtime's own mouth shut (:meth:`set_body_latches`) — because a restored
+  deadline with forgotten ownership is a mute nobody will ever lift. Files
+  written before ``body`` existed still load, owning nothing.
 * **The acknowledgement is heard.** :meth:`arm` leaves
   :attr:`pending_first_utterance` set, so the FIRST utterance after arming is
   spoken ("okay, quiet for ten minutes") and the mouth closes behind it. If no
@@ -120,12 +124,22 @@ class QuietState:
         #: True between arm() and the acknowledgement utterance (or the grace).
         self.pending_first_utterance = False
         self._pending_deadline = 0.0
+        # Who closed the BODY's mouth (the runtime's own voice) for this quiet.
+        # Persisted alongside the deadline: a harness restart that restored the
+        # deadline but forgot the ownership would either never lift the mute
+        # (nobody left who thinks it is theirs) or let the body talk through a
+        # quiet the person is still inside. See IntentTools._mute_body.
+        self._body = {"added_speak": False, "muted_voice": False}
         self.load()
 
     # -- persistence --------------------------------------------------------
 
     def load(self) -> None:
-        """Restore a still-future deadline; drop an expired or corrupt file."""
+        """Restore a still-future deadline; drop an expired or corrupt file.
+
+        Tolerant of the pre-ownership file shape (``{"until": ...}`` with no
+        ``body``): an older file simply comes back owning nothing.
+        """
         try:
             payload = json.loads(self._path.read_text(encoding="utf-8"))
             until = float(payload["until"])
@@ -138,11 +152,40 @@ class QuietState:
             # Quiet must never outlive its own clock.
             _safe_unlink(self._path)
             return
+        body = payload.get("body")
         with self._lock:
             self._until = until
+            if isinstance(body, dict):
+                self._body = {
+                    "added_speak": bool(body.get("added_speak")),
+                    "muted_voice": bool(body.get("muted_voice")),
+                }
 
     def _persist(self) -> None:
-        _atomic_write(self._path, json.dumps({"until": self._until}))
+        _atomic_write(
+            self._path, json.dumps({"until": self._until, "body": dict(self._body)})
+        )
+
+    # -- the body's mouth ---------------------------------------------------
+
+    def body_latches(self) -> tuple[bool, bool]:
+        """``(added_speak, muted_voice)`` — what WE are holding on the runtime."""
+        with self._lock:
+            return (self._body["added_speak"], self._body["muted_voice"])
+
+    def set_body_latches(self, added_speak: bool, muted_voice: bool) -> None:
+        """Record the body-mute ownership, persisting it with the deadline.
+
+        Only written to disk while a deadline is armed — the file IS the quiet,
+        so ownership with no deadline behind it has nothing to survive into.
+        """
+        with self._lock:
+            self._body = {
+                "added_speak": bool(added_speak),
+                "muted_voice": bool(muted_voice),
+            }
+            if self._until > 0.0:
+                self._persist()
 
     # -- the deadline -------------------------------------------------------
 
@@ -189,6 +232,7 @@ class QuietState:
             self._until = 0.0
             self.pending_first_utterance = False
             self._pending_deadline = 0.0
+            self._body = {"added_speak": False, "muted_voice": False}
             _safe_unlink(self._path)
         return was_armed
 
