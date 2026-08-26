@@ -36,11 +36,21 @@
 #     device, so this step is guarded on both sides (repo config present,
 #     kiro-cli on PATH, ~/.kiro writable) and never fails the whole install —
 #     see install_nova_writer_agent_config() below.
+#   - installs the NetworkManager dispatcher hook for dual-network failover
+#     (config/network/90-reachy-failover -> /etc/NetworkManager/dispatcher.d/,
+#     task t3). Guarded, self-testing and SELF-REVERTING: if the hook's
+#     dry-run self-test fails, the hook is removed again and the install
+#     continues with a warning — a broken network hook is worse than no hook.
+#     Skip it with --no-failover; see install_failover_hook() below.
 #
 # Idempotent: every step tolerates already-applied state. Safe to re-run.
 #
 # Usage:
-#   scripts/install-device-units.sh [cli-venv-python] [nova-venv-python]
+#   scripts/install-device-units.sh [--no-failover] [cli-venv-python] [nova-venv-python]
+#
+# Flags:
+#   --no-failover    skip installing the NetworkManager failover dispatcher
+#                    hook (everything else is installed as usual)
 #
 # Defaults:
 #   cli-venv-python  = $HOME/reachy-mini-cli/.venv/bin/python
@@ -49,8 +59,17 @@
 
 set -euo pipefail
 
-CLI_PYTHON="${1:-$HOME/reachy-mini-cli/.venv/bin/python}"
-NOVA_PYTHON="${2:-python3}"
+INSTALL_FAILOVER=1
+POSITIONAL=()
+for arg in "$@"; do
+    case "$arg" in
+        --no-failover) INSTALL_FAILOVER=0 ;;
+        *) POSITIONAL+=("$arg") ;;
+    esac
+done
+
+CLI_PYTHON="${POSITIONAL[0]:-$HOME/reachy-mini-cli/.venv/bin/python}"
+NOVA_PYTHON="${POSITIONAL[1]:-python3}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -154,5 +173,73 @@ install_nova_writer_agent_config() {
 
 log "provisioning nova-writer Kiro agent config (optional — guarded, non-fatal if kiro is absent)"
 install_nova_writer_agent_config
+
+# --- 6. NetworkManager failover dispatcher hook (optional) ----------------
+# Copies config/network/90-reachy-failover to
+# /etc/NetworkManager/dispatcher.d/90-reachy-failover (root:root, 0755) so the
+# dual-network failover policy (reachy_nova.netpolicy, driven by
+# reachy_nova.netfailover) runs as root on wlan0 events — task t3, spec claims
+# c22/h16/c26/h22.
+#
+# The step is guarded on both sides (repo script present, dispatcher.d
+# present, sudo -n usable) and never fails the whole install.
+#
+# It is also SELF-REVERTING, which is the point of the self-test: after
+# copying the hook we run `python -m reachy_nova.netfailover --self-test`,
+# a DRY-RUN decision against the live scan that activates nothing and writes
+# nothing. If that fails — a missing venv, an unimportable reachy_nova, no
+# nmcli — the hook is REMOVED again and we warn. A dispatcher hook that
+# errors on every network event is strictly worse than no hook at all, and
+# this is the network we would otherwise be breaking while breaking it.
+# Skipped entirely with --no-failover.
+install_failover_hook() {
+    local repo_hook="$REPO_ROOT/config/network/90-reachy-failover"
+    local dispatcher_dir="/etc/NetworkManager/dispatcher.d"
+    local installed="$dispatcher_dir/90-reachy-failover"
+
+    if [ ! -f "$repo_hook" ]; then
+        warn "no $repo_hook — skipping failover hook install"
+        return 0
+    fi
+
+    if [ ! -d "$dispatcher_dir" ]; then
+        warn "no $dispatcher_dir (NetworkManager dispatcher absent) — skipping failover hook install"
+        return 0
+    fi
+
+    if ! sudo -n true 2>/dev/null; then
+        warn "passwordless sudo unavailable — skipping failover hook install"
+        return 0
+    fi
+
+    # `install` sets owner, group and mode in one atomic step, so the hook is
+    # never briefly world-writable in the directory NM executes as root.
+    if ! sudo -n install -o root -g root -m 0755 "$repo_hook" "$installed" 2>/dev/null; then
+        warn "could not install $installed — skipping failover hook install"
+        return 0
+    fi
+    log "installed $installed (root:root 0755)"
+
+    log "running failover self-test (dry run — activates nothing, writes nothing)"
+    if "$NOVA_PYTHON" -m reachy_nova.netfailover --self-test; then
+        log "failover self-test passed — hook left in place"
+        return 0
+    fi
+
+    warn "failover self-test FAILED — reverting: removing $installed"
+    if sudo -n rm -f "$installed" 2>/dev/null; then
+        warn "removed $installed (the robot is left exactly as it was before this step)"
+    else
+        warn "could NOT remove $installed — remove it by hand before the next network event"
+    fi
+    return 0
+}
+
+if [ "$INSTALL_FAILOVER" -eq 1 ]; then
+    log "installing NetworkManager failover hook (guarded, self-testing, self-reverting)"
+    install_failover_hook
+else
+    log "--no-failover given — skipping the NetworkManager failover hook"
+fi
 
 log "install-device-units.sh completed successfully"
