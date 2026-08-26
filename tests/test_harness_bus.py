@@ -601,11 +601,16 @@ def test_route_event_rule_fire_nova_face_noticed_reads_as_sight(real_rules):
 
 
 def test_route_event_rule_fire_unknown_rule_keeps_the_generic_template(real_rules):
+    """t6: the generic rule/fire template dropped "reflex fired" narration
+    in favor of quiet situational context, but still names the rule that
+    fired and still always injects (voice: silent, not dropped)."""
     text, reason = bus.route_event(
         real_rules, "rule", "fire", {"t": "rule", "rule": "look-toward-sound"}
     )
     assert reason == bus.REASON_INJECT
-    assert "look-toward-sound" in text and "reflex" in text
+    assert "look-toward-sound" in text
+    assert "reflex" not in text.lower()
+    assert text.endswith(bus.VOICE_MARKERS["silent"])
 
 
 # --------------------------------------------------------------------------- #

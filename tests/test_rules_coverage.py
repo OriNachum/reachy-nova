@@ -41,6 +41,14 @@ Special cases handled explicitly while scanning:
 If a future change adds a genuinely new dynamic (non-literal) source or
 type, the scanner raises loudly instead of silently under-counting, so
 this test fails closed rather than open.
+
+t6 note — before/after state of the generic ``rule/fire`` inject_template:
+before this task, the rendered text narrated the reflex mechanism itself:
+"Your body just reacted on its own — the '{rule}' reflex fired." (observed
+live 2026-08-26). t6 replaced it with a quiet, situational template and
+added optional ``voice``/``sense`` fields to the rules.yaml schema (see
+tests/test_rules_voice.py for the quiet-wording and voice-marker coverage);
+this test additionally pins that ``rule/fire`` carries ``voice: silent``.
 """
 
 from __future__ import annotations
@@ -181,3 +189,12 @@ def test_default_rule_still_exists_as_the_fallback():
         raw = yaml.safe_load(f)
     assert "default" in raw
     assert raw["default"].get("llm_evaluate") is True
+
+
+def test_generic_rule_fire_is_voice_silent():
+    """t6: the generic ``rule/fire`` entry (the reflex-fired fallback) is
+    marked ``voice: silent`` — Nova gets the situational context but is
+    told not to narrate it, per bus.py's VOICE_MARKERS.
+    """
+    rules = _load_rules_section()
+    assert rules["rule/fire"].get("voice") == "silent"

@@ -298,6 +298,16 @@ def rule_for(
     return rules_cfg.get("default") or {}
 
 
+#: Marker text ``route_event`` appends to a rendered inject, keyed by the
+#: rule entry's optional ``voice`` field. ``free`` (and any absent/unknown
+#: value) appends nothing. See rules.yaml's header comment for the field.
+VOICE_MARKERS: dict[str, str] = {
+    "silent": " (quiet: do not speak about this)",
+    "brief": " (react briefly if at all)",
+    "free": "",
+}
+
+
 def route_event(
     rules_cfg: dict[str, Any],
     source: str,
@@ -310,6 +320,12 @@ def route_event(
     named verdicts above. The template is rendered with ``str.format_map``
     over a ``defaultdict(str)``, so a field the runtime omitted renders empty
     instead of raising — a partial sentence beats a lost sense.
+
+    When the rule entry carries a ``voice`` field, its marker (see
+    ``VOICE_MARKERS``) is appended to the rendered text — a hint to Nova
+    about how much it should say about the event, not whether the event
+    happened at all. Absent or unrecognized values behave like ``free``
+    (no marker).
     """
     rule = rule_for(rules_cfg, source, event_type, payload)
     template = rule.get("inject_template")
@@ -324,6 +340,7 @@ def route_event(
     text = text.strip()
     if not text:
         return None, REASON_NO_TEMPLATE
+    text += VOICE_MARKERS.get(rule.get("voice", "free"), "")
     return text, REASON_INJECT
 
 
