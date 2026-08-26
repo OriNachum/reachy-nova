@@ -27,6 +27,7 @@ from reachy_nova.harness import statedir
 from reachy_nova.harness.tools import (
     BROWSE_DISABLED_REASON,
     BROWSE_NOT_WIRED_REASON,
+    DEFAULT_VOICE_STEP,
     DEGRADED_NOTE,
     ENROLL_FACE_TARGET,
     ENROLL_NAME_INVALID_REASON,
@@ -34,7 +35,10 @@ from reachy_nova.harness.tools import (
     ENROLL_NAME_UNPRINTABLE_REASON,
     ENROLL_OP,
     MAX_ENROLL_NAME_LEN,
+    MAX_VOICE_LEVEL,
+    MIN_VOICE_LEVEL,
     TOOL_SPECS,
+    VOICE_NOT_WIRED_REASON,
     IntentTools,
 )
 
@@ -56,6 +60,11 @@ EXPECTED_TOOLS = (
     # author_rule (qodo review comment 3812045168): the kiro-authored-rule
     # pipeline's production caller, refused the same way as forge/use_skill.
     "author_rule",
+    # voice-level tools (task t10) — dispatched locally against the daemon
+    # client, never through the intents spool.
+    "raise_voice",
+    "lower_voice",
+    "set_voice_level",
 )
 
 #: ``<time.time_ns()>-<uuid4.hex>.json``
@@ -773,3 +782,166 @@ def test_enroll_face_logs_one_sense_line_on_refusal(tools, caplog):
     (line,) = _sense_lines(caplog)
     assert "[SENSE stage=act source=nova event=enroll_face]" in line
     assert "refused" in line
+
+
+# --------------------------------------------------------------------------- #
+# Voice level tools (task t10) — dispatched locally, not through the spool    #
+# --------------------------------------------------------------------------- #
+
+
+class FakeDaemonClient:
+    """Stub of ``daemon_client.DaemonClient`` — no network, records calls."""
+
+    def __init__(self, volume: int = 50, get_error: Exception | None = None,
+                 set_error: Exception | None = None):
+        self.volume = volume
+        self.get_error = get_error
+        self.set_error = set_error
+        self.set_calls: list[int] = []
+
+    def get_volume(self) -> int:
+        if self.get_error is not None:
+            raise self.get_error
+        return self.volume
+
+    def set_volume(self, volume: int) -> int:
+        if self.set_error is not None:
+            raise self.set_error
+        self.set_calls.append(volume)
+        self.volume = volume
+        return volume
+
+
+@pytest.fixture
+def daemon_client():
+    return FakeDaemonClient(volume=50)
+
+
+@pytest.fixture
+def voice_tools(state_dir, daemon_client):
+    return IntentTools(await_timeout=0.15, daemon_client=daemon_client)
+
+
+def test_raise_voice_normal_step(voice_tools, daemon_client):
+    daemon_client.volume = 50
+    result = json.loads(voice_tools.execute("raise_voice", {}))
+    assert result == {"ok": True, "volume": 60}
+    assert daemon_client.set_calls == [60]
+
+
+def test_raise_voice_clamps_to_maximum(voice_tools, daemon_client):
+    daemon_client.volume = 95
+    result = json.loads(voice_tools.execute("raise_voice", {}))
+    assert result == {"ok": True, "volume": 100, "note": "at maximum"}
+
+
+def test_lower_voice_normal_step(voice_tools, daemon_client):
+    daemon_client.volume = 50
+    result = json.loads(voice_tools.execute("lower_voice", {}))
+    assert result == {"ok": True, "volume": 40}
+    assert daemon_client.set_calls == [40]
+
+
+def test_lower_voice_clamps_to_minimum(voice_tools, daemon_client):
+    daemon_client.volume = 15
+    result = json.loads(voice_tools.execute("lower_voice", {}))
+    assert result == {"ok": True, "volume": 10, "note": "at minimum"}
+
+
+def test_raise_voice_with_explicit_step(voice_tools, daemon_client):
+    daemon_client.volume = 30
+    result = json.loads(voice_tools.execute("raise_voice", {"step": 25}))
+    assert result == {"ok": True, "volume": 55}
+
+
+def test_set_voice_level_absolute(voice_tools, daemon_client):
+    daemon_client.volume = 20
+    result = json.loads(voice_tools.execute("set_voice_level", {"volume": 77}))
+    assert result == {"ok": True, "volume": 77}
+    assert daemon_client.set_calls == [77]
+
+
+def test_set_voice_level_clamps_above_maximum(voice_tools, daemon_client):
+    daemon_client.volume = 20
+    result = json.loads(voice_tools.execute("set_voice_level", {"volume": 150}))
+    assert result == {"ok": True, "volume": 100, "note": "at maximum"}
+
+
+def test_set_voice_level_clamps_below_minimum(voice_tools, daemon_client):
+    daemon_client.volume = 20
+    result = json.loads(voice_tools.execute("set_voice_level", {"volume": -5}))
+    assert result == {"ok": True, "volume": 10, "note": "at minimum"}
+
+
+def test_set_voice_level_no_op_when_already_at_target(voice_tools, daemon_client):
+    daemon_client.volume = 50
+    result = json.loads(voice_tools.execute("set_voice_level", {"volume": 50}))
+    assert result == {"ok": True, "volume": 50}
+    # No daemon set call — avoids the (unsuppressible) confirmation sound.
+    assert daemon_client.set_calls == []
+
+
+def test_set_voice_level_rejects_non_numeric(voice_tools, daemon_client):
+    result = json.loads(voice_tools.execute("set_voice_level", {"volume": "loud"}))
+    assert result["ok"] is False
+    assert "volume" in result["error"]
+    assert daemon_client.set_calls == []
+
+
+def test_voice_tool_surfaces_get_volume_failure(voice_tools, daemon_client):
+    daemon_client.get_error = ConnectionError("no route to daemon")
+    result = json.loads(voice_tools.execute("raise_voice", {}))
+    assert result["ok"] is False
+    assert "no route to daemon" in result["error"]
+
+
+def test_voice_tool_surfaces_set_volume_failure(voice_tools, daemon_client):
+    daemon_client.set_error = TimeoutError("daemon timed out")
+    result = json.loads(voice_tools.execute("raise_voice", {}))
+    assert result["ok"] is False
+    assert "daemon timed out" in result["error"]
+
+
+def test_voice_tool_refused_when_client_not_wired(state_dir):
+    tools = IntentTools(await_timeout=0.15)
+    result = json.loads(tools.execute("raise_voice", {}))
+    assert result == {"ok": False, "error": VOICE_NOT_WIRED_REASON}
+
+
+def test_voice_tools_never_touch_the_spool(voice_tools, daemon_client):
+    voice_tools.execute("raise_voice", {})
+    voice_tools.execute("lower_voice", {})
+    voice_tools.execute("set_voice_level", {"volume": 33})
+    assert spooled() == []
+
+
+def test_voice_tool_logs_exactly_one_sense_line_on_success(voice_tools, daemon_client, caplog):
+    daemon_client.volume = 50
+    with caplog.at_level(logging.INFO, logger="nova.sensory"):
+        voice_tools.execute("raise_voice", {})
+    (line,) = _sense_lines(caplog)
+    assert "[SENSE stage=act source=nova event=volume]" in line
+    assert "old=50 new=60" in line
+
+
+def test_voice_tool_logs_exactly_one_sense_line_on_failure(voice_tools, daemon_client, caplog):
+    daemon_client.get_error = ConnectionError("boom")
+    with caplog.at_level(logging.INFO, logger="nova.sensory"):
+        voice_tools.execute("lower_voice", {})
+    (line,) = _sense_lines(caplog)
+    assert "[SENSE stage=act source=nova event=volume]" in line
+    assert "refused" in line
+
+
+def test_voice_tool_logs_exactly_one_sense_line_when_not_wired(state_dir, caplog):
+    tools = IntentTools(await_timeout=0.15)
+    with caplog.at_level(logging.INFO, logger="nova.sensory"):
+        tools.execute("set_voice_level", {"volume": 50})
+    (line,) = _sense_lines(caplog)
+    assert "[SENSE stage=act source=nova event=volume]" in line
+
+
+def test_voice_level_bounds_are_sane():
+    assert MIN_VOICE_LEVEL == 10
+    assert MAX_VOICE_LEVEL == 100
+    assert DEFAULT_VOICE_STEP == 10
