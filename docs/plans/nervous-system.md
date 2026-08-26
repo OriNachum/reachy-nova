@@ -233,6 +233,14 @@ pyyaml>=6.0
 
 The rules table maps `(source, type)` pairs to baseline priority and urgency. Rules are loaded from a YAML config file and can be updated without rebuilding.
 
+> **Shipped addition (t6+):** the live `config/nervous-system/rules.yaml`
+> also carries two optional per-entry fields beyond priority/urgency —
+> `voice: silent|brief|free` (a hint for how much to say about an event,
+> never whether it happened) and `sense: <class>` (e.g. `pat`, `face`,
+> naming the sensory class an entry belongs to, used for cross-rule inject
+> dedupe — see `docs/architecture.md` §5.2 and `docs/components/quiet-mode.md`).
+> The example rules below predate both fields.
+
 ### Priority Levels
 
 | Level | Meaning |
