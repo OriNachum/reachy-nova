@@ -56,7 +56,7 @@ Quoted verbatim from the `devague summary` skeleton:
   builders; statedir.py nova-volume.json; tests/test_harness_daemon_client.py +
   test_harness_tools.py)
 - `t11` — harness: timed quiet — QuietState (deadline, later-wins extension,
-  persistence to <state>/nova-quiet.json) + SonicSpeaker gate at `_play_one`
+  persistence to `<state>`/nova-quiet.json) + SonicSpeaker gate at `_play_one`
   with drop-not-failure semantics and post-acknowledgement arming +
   supervisor.status() quiet_until (reachy_nova/harness/quiet.py new;
   speaking.py; supervisor.py; tests/test_harness_quiet.py +
@@ -142,7 +142,7 @@ Quoted verbatim from the `devague summary` skeleton:
 - Review round (Qodo, 7 findings) and SonarCloud round (6 findings) were fixed
   on the PR before acceptance — `af47c08`, `6f4d464`, `1d97674`, `9d9c3cc`.
 - The device's runtime checkout is branch `wireless-motor-enable` (motor-enable
-  + `enroll` #166, both absent from `main`); `origin/main` was merged into it on
+  \+ `enroll` #166, both absent from `main`); `origin/main` was merged into it on
   spark (enroll vs gaze conflicts in `face_sense.py`/`intents.py` were additive)
   — reachy-mini-cli `d2a41ff`, then `82cbd3c` with #173.
 - The robot's SD card was 100 % full (pip cache) and the engine was in an ENOSPC
