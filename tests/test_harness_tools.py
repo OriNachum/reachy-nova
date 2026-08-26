@@ -24,6 +24,7 @@ import time
 import pytest
 
 from reachy_nova.harness import statedir
+from reachy_nova.harness.quiet import QuietState
 from reachy_nova.harness.tools import (
     BROWSE_DISABLED_REASON,
     BROWSE_NOT_WIRED_REASON,
@@ -37,10 +38,13 @@ from reachy_nova.harness.tools import (
     ENROLL_OP,
     HISTORY_NOT_WIRED_REASON,
     MAX_ENROLL_NAME_LEN,
+    MAX_QUIET_MINUTES,
     MAX_RECALL_SENSES_N,
     MAX_VOICE_LEVEL,
+    MIN_QUIET_MINUTES,
     MIN_RECALL_SENSES_N,
     MIN_VOICE_LEVEL,
+    QUIET_NOT_WIRED_REASON,
     TOOL_SPECS,
     VOICE_NOT_WIRED_REASON,
     IntentTools,
@@ -76,6 +80,10 @@ EXPECTED_TOOLS = (
     # recall_senses (task t8) — reads the SenseHistory ring buffer directly,
     # never through the intents spool.
     "recall_senses",
+    # the timed-quiet pair (task t12) — mind-side quiet (QuietState) AND a
+    # merged set_inhibition that closes the body's own 'speak' mouth.
+    "stay_silent",
+    "end_silence",
 )
 
 #: ``<time.time_ns()>-<uuid4.hex>.json``
@@ -1215,3 +1223,259 @@ def test_recall_senses_bounds_are_sane():
     assert MIN_RECALL_SENSES_N == 1
     assert MAX_RECALL_SENSES_N == 20
     assert DEFAULT_RECALL_SENSES_N == 5
+
+
+# --------------------------------------------------------------------------- #
+# stay_silent / end_silence (task t12)                                        #
+# --------------------------------------------------------------------------- #
+
+
+class FakeClock:
+    """A wall clock a test can move by hand — quiet is a deadline, not a mode."""
+
+    def __init__(self, now: float = 1_700_000_000.0) -> None:
+        self.now = float(now)
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += float(seconds)
+
+
+@pytest.fixture
+def clock():
+    return FakeClock()
+
+
+@pytest.fixture
+def quiet(state_dir, clock):
+    return QuietState(clock=clock, path=state_dir / "nova-quiet.json")
+
+
+@pytest.fixture
+def quiet_tools(state_dir, quiet):
+    return IntentTools(await_timeout=0.5, quiet=quiet)
+
+
+def _write_inhibitions(names):
+    """Publish an engine ``intents`` view — the merge source for set_inhibition."""
+    path = statedir.state_json_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"intents": {"inhibitions": list(names)}}), encoding="utf-8")
+
+
+def _inhibition_payloads(engine):
+    return [p for p in engine.seen if p.get("op") == "set_inhibition"]
+
+
+def test_stay_silent_arms_the_deadline_and_reports_it(quiet_tools, quiet):
+    with intents_engine():
+        result = json.loads(quiet_tools.execute("stay_silent", {"minutes": 10}))
+    assert result["ok"] is True
+    assert result["note"] == "armed"
+    assert result["until"] == quiet.until_iso()
+    assert quiet.active() is True
+
+
+def test_stay_silent_leaves_one_acknowledgement_utterance_pending(quiet_tools, quiet):
+    with intents_engine():
+        quiet_tools.execute("stay_silent", {"minutes": 10})
+    assert quiet.pending_first_utterance is True
+
+
+def test_stay_silent_mutes_the_body_voice_by_adding_speak_to_the_inhibitions(quiet_tools):
+    with intents_engine() as engine:
+        result = json.loads(quiet_tools.execute("stay_silent", {"minutes": 5}))
+    (payload,) = _inhibition_payloads(engine)
+    assert payload["behaviors"] == ["speak"]
+    assert result["body_muted"] is True
+
+
+def test_stay_silent_merges_speak_into_the_runtimes_current_inhibitions(quiet_tools):
+    _write_inhibitions(["nod"])
+    with intents_engine() as engine:
+        quiet_tools.execute("stay_silent", {"minutes": 5})
+    (payload,) = _inhibition_payloads(engine)
+    assert payload["behaviors"] == ["nod", "speak"]
+
+
+def test_stay_silent_spools_exactly_one_set_inhibition(quiet_tools):
+    with intents_engine() as engine:
+        quiet_tools.execute("stay_silent", {"minutes": 5})
+    assert len(_inhibition_payloads(engine)) == 1
+
+
+@pytest.mark.parametrize("minutes", [0, 0.5, 181, 10_000, -5])
+def test_stay_silent_out_of_bounds_is_refused_without_arming(quiet_tools, quiet, minutes):
+    result = json.loads(quiet_tools.execute("stay_silent", {"minutes": minutes}))
+    assert result["ok"] is False
+    assert result["error"]
+    assert quiet.active() is False
+    assert spooled() == []
+
+
+def test_stay_silent_non_numeric_minutes_is_refused(quiet_tools, quiet):
+    result = json.loads(quiet_tools.execute("stay_silent", {"minutes": "ten"}))
+    assert result["ok"] is False
+    assert quiet.active() is False
+
+
+def test_stay_silent_at_the_bounds_is_accepted(quiet_tools, quiet):
+    with intents_engine():
+        low = json.loads(quiet_tools.execute("stay_silent", {"minutes": MIN_QUIET_MINUTES}))
+        quiet_tools.execute("end_silence", {})
+        high = json.loads(quiet_tools.execute("stay_silent", {"minutes": MAX_QUIET_MINUTES}))
+    assert low["ok"] is True
+    assert high["ok"] is True
+
+
+def test_stay_silent_again_with_a_longer_duration_extends(quiet_tools):
+    with intents_engine():
+        quiet_tools.execute("stay_silent", {"minutes": 5})
+        result = json.loads(quiet_tools.execute("stay_silent", {"minutes": 20}))
+    assert result["note"] == "extended"
+
+
+def test_stay_silent_again_with_a_shorter_duration_keeps_the_longer_one(quiet_tools):
+    with intents_engine():
+        quiet_tools.execute("stay_silent", {"minutes": 30})
+        result = json.loads(quiet_tools.execute("stay_silent", {"minutes": 5}))
+    assert result["note"] == "kept"
+
+
+def test_stay_silent_holds_the_mind_side_quiet_even_when_the_body_mute_degrades(
+    quiet_tools, quiet
+):
+    # No engine at all: the set_inhibition degrades to submitted-but-unconfirmed.
+    result = json.loads(quiet_tools.execute("stay_silent", {"minutes": 10}))
+    assert result["ok"] is True
+    assert result["body_muted"] is False
+    assert quiet.active() is True
+
+
+def test_stay_silent_without_a_wired_quiet_state_is_refused(tools):
+    result = json.loads(tools.execute("stay_silent", {"minutes": 10}))
+    assert result["ok"] is False
+    assert result["error"] == QUIET_NOT_WIRED_REASON
+
+
+def test_stay_silent_logs_exactly_one_sense_line(quiet_tools, caplog):
+    with intents_engine(), caplog.at_level(logging.INFO, logger="nova.sensory"):
+        quiet_tools.execute("stay_silent", {"minutes": 10})
+    lines = [ln for ln in _sense_lines(caplog) if "event=stay_silent" in ln]
+    assert len(lines) == 1
+    assert "[SENSE stage=act source=nova event=stay_silent]" in lines[0]
+
+
+def test_end_silence_when_nothing_is_armed_is_accepted_and_named(quiet_tools):
+    result = json.loads(quiet_tools.execute("end_silence", {}))
+    assert result["ok"] is True
+    assert result["note"] == "not silent"
+    assert spooled() == []
+
+
+def test_end_silence_ends_an_armed_quiet(quiet_tools, quiet):
+    with intents_engine():
+        quiet_tools.execute("stay_silent", {"minutes": 10})
+        result = json.loads(quiet_tools.execute("end_silence", {}))
+    assert result["ok"] is True
+    assert result["note"] == "ended"
+    assert quiet.active() is False
+
+
+def test_end_silence_restores_the_body_voice(quiet_tools):
+    with intents_engine() as engine:
+        quiet_tools.execute("stay_silent", {"minutes": 10})
+        result = json.loads(quiet_tools.execute("end_silence", {}))
+    first, second = _inhibition_payloads(engine)
+    assert first["behaviors"] == ["speak"]
+    assert second["behaviors"] == []
+    assert result["body_restored"] is True
+
+
+def test_end_silence_leaves_an_inhibition_we_did_not_add_alone(quiet_tools):
+    _write_inhibitions(["speak"])
+    with intents_engine() as engine:
+        quiet_tools.execute("stay_silent", {"minutes": 10})
+        result = json.loads(quiet_tools.execute("end_silence", {}))
+    # One spool for the (idempotent) arm; NONE for the release — somebody else
+    # is holding 'speak' down and un-muting them would be a silent override.
+    assert len(_inhibition_payloads(engine)) == 1
+    assert result["body_restored"] is False
+
+
+def test_end_silence_without_a_wired_quiet_state_is_refused(tools):
+    result = json.loads(tools.execute("end_silence", {}))
+    assert result["ok"] is False
+    assert result["error"] == QUIET_NOT_WIRED_REASON
+
+
+def test_end_silence_logs_exactly_one_sense_line(quiet_tools, caplog):
+    with caplog.at_level(logging.INFO, logger="nova.sensory"):
+        quiet_tools.execute("end_silence", {})
+    lines = [ln for ln in _sense_lines(caplog) if "event=end_silence" in ln]
+    assert len(lines) == 1
+
+
+def test_tick_restores_the_body_voice_when_the_quiet_expires(quiet_tools, quiet, clock):
+    with intents_engine() as engine:
+        quiet_tools.execute("stay_silent", {"minutes": 10})
+        clock.advance(11 * 60)
+        quiet_tools.tick()
+    first, second = _inhibition_payloads(engine)
+    assert first["behaviors"] == ["speak"]
+    assert second["behaviors"] == []
+    assert quiet.active() is False
+
+
+def test_tick_while_still_quiet_changes_nothing(quiet_tools, clock):
+    with intents_engine() as engine:
+        quiet_tools.execute("stay_silent", {"minutes": 10})
+        clock.advance(60)
+        quiet_tools.tick()
+    assert len(_inhibition_payloads(engine)) == 1
+
+
+def test_tick_restores_only_once_after_an_expiry(quiet_tools, clock):
+    with intents_engine() as engine:
+        quiet_tools.execute("stay_silent", {"minutes": 10})
+        clock.advance(11 * 60)
+        quiet_tools.tick()
+        quiet_tools.tick()
+        quiet_tools.tick()
+    assert len(_inhibition_payloads(engine)) == 2
+
+
+def test_tick_is_a_no_op_without_a_wired_quiet_state(tools):
+    tools.tick()
+    assert spooled() == []
+
+
+def test_quiet_tools_tool_specs_are_shaped_for_the_model():
+    (stay,) = [s for s in TOOL_SPECS if s["toolSpec"]["name"] == "stay_silent"]
+    schema = json.loads(stay["toolSpec"]["inputSchema"]["json"])
+    assert schema["required"] == ["minutes"]
+    assert set(schema["properties"]) == {"minutes"}
+    (end,) = [s for s in TOOL_SPECS if s["toolSpec"]["name"] == "end_silence"]
+    end_schema = json.loads(end["toolSpec"]["inputSchema"]["json"])
+    assert end_schema["required"] == []
+
+
+def test_stay_silent_description_asks_for_one_brief_acknowledgement():
+    (stay,) = [s for s in TOOL_SPECS if s["toolSpec"]["name"] == "stay_silent"]
+    description = stay["toolSpec"]["description"].lower()
+    assert "quiet" in description
+    assert "once" in description
+
+
+def test_end_silence_description_says_leaving_is_silent():
+    (end,) = [s for s in TOOL_SPECS if s["toolSpec"]["name"] == "end_silence"]
+    description = end["toolSpec"]["description"].lower()
+    assert "talk again" in description
+    assert "announce" in description or "silent" in description
+
+
+def test_quiet_bounds_are_sane():
+    assert MIN_QUIET_MINUTES == 1
+    assert MAX_QUIET_MINUTES == 180

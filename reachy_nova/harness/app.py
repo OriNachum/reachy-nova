@@ -46,6 +46,7 @@ from .daemon_client import DaemonClient, restore_volume
 from .gate import EchoGate, resolve_policy
 from .hearing import TeeHearing
 from .network import NetworkUnit
+from .quiet import QuietState
 from .rules_overlay import upsert_rule
 from .sense_history import SenseHistory
 from .speaking import SonicSpeaker
@@ -317,7 +318,16 @@ def build_app() -> list[object]:
     gate = EchoGate()
     feed = CognitionFeed()
 
-    speaker = SonicSpeaker(gate=gate)
+    # timed quiet (t11/t12) — ONE object, three readers: the speaker gates
+    # playback on it, the bus marks every inject with it, and the
+    # stay_silent/end_silence tools arm and release it. Constructed here
+    # rather than inside any of the three so they can never disagree about
+    # whether the robot is currently supposed to be quiet. It reloads a
+    # still-future deadline off disk, so a restart inside a quiet window
+    # comes back quiet instead of loudly reintroducing itself.
+    quiet = QuietState()
+
+    speaker = SonicSpeaker(gate=gate, quiet=quiet)
 
     sonic = NovaSonic(
         system_prompt=HARNESS_SYSTEM_PROMPT,
@@ -399,6 +409,7 @@ def build_app() -> list[object]:
         forge_leg=forge_leg,
         daemon_client=daemon_client,
         history=history,
+        quiet=quiet,
     )
 
     # volume restore (t10) — re-apply a persisted level if the daemon disagrees.
@@ -457,7 +468,10 @@ def build_app() -> list[object]:
         feed=sonic.feed_audio, gate=gate, echo_gate_policy=resolve_policy()
     )
 
-    components: list[object] = [sonic, speaker, hearing]
+    # ``intents`` is in the component list for ONE reason: its tick() poll is
+    # what restores the runtime's own voice when a quiet EXPIRES rather than
+    # being ended by hand (see IntentTools.tick).
+    components: list[object] = [sonic, speaker, hearing, intents]
 
     # kiro writer — the standing session restarts under the supervisor like
     # any other component; the forge/use_skill tools above already hold it.
@@ -480,7 +494,7 @@ def build_app() -> list[object]:
     try:
         from .bus import NovaBus
 
-        bus_component = NovaBus(on_inject=sonic.inject_text, history=history)
+        bus_component = NovaBus(on_inject=sonic.inject_text, history=history, quiet=quiet)
         components.append(bus_component)
     except Exception as err:  # noqa: BLE001
         _stage("supervise", "nova", "component", f"component absent name=bus reason={err}")
