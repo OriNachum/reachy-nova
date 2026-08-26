@@ -170,7 +170,7 @@ Quoted verbatim from the `devague summary` skeleton:
 | `t6` / `t7` (`d2`) | silent cues for intent/applied and the runtime's look-toward-sound rule were still narrated and triggered self-initiated glances; a marker cannot stop a model from reacting to a cue it receives every few seconds | acceptable |
 | `t11` | the 2 s acknowledgement grace was shorter than Sonic's real latency (9 s live) — raised to 15 s, reservation spent only by an utterance (`8c9bbf5`) | acceptable |
 | `t13` | engine heartbeat flaps every ~2 s on the loaded CM4 (pre-existing), which cleared the lock belief immediately — 5 s drop grace added (`8c9bbf5`) | acceptable |
-| `t14` (`d3`) | `KIRO_CLI_BIN` is read from os.environ, populated once by load_dotenv at harness start; restoring it on disk cannot reach the running process, so the plan's literal fault knob needs a harness restart to recover | acceptable (proposed) |
+| `t14` (`d3`) | `KIRO_CLI_BIN` is read from os.environ, populated once by load_dotenv at harness start; restoring it on disk cannot reach the running process, so the plan's literal fault knob needs a harness restart to recover | acceptable |
 | `t16` | delivery record file is named after the plan slug (`…-gaze-voice-level-timed-quiet-no-reflex-narration.md`), not the plan's `…-gaze-voice-quiet.md` | acceptable |
 
 ## Evidence
@@ -233,8 +233,6 @@ Quoted verbatim from the `devague summary` skeleton:
 ## Remaining Work / Follow-up
 
 - `t5` / `t17` — mind-offline lock release: events-cli's client needs a `subscribe` API (or the runtime needs its own subscriber client); until then `MindPresence` stays `client-incompatible` and only max-hold (30 min) bounds a lock whose mind died. Owner: reachy-mini-cli.
-- `d3` — awaiting Ori's approval of the case-5 mechanism; the record cites it as
-  proposed.
 - #22 — face-focus aim quality (calibrated bbox→angle, head-pose compensation,
   closed loop while locked).
 - Engine tick overruns (146 ms vs 20 ms budget) and the resulting 2 s heartbeat
