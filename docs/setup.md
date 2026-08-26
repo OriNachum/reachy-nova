@@ -62,6 +62,79 @@ Ensure your Reachy Mini is connected via USB or properly networked. The `reachy-
 -   **Microphone**: Ensure the microphone is set as the default input or properly selected by `pyaudio`.
 -   **Speakers**: Ensure audio output is configured.
 
+## Networks
+
+On the Reachy Mini Wireless (CM4, ReachyMiniOS, NetworkManager, single
+`wlan0` radio) there are two Wi-Fi connection profiles the robot can hold:
+
+-   **`iPhone (5)`** — Ori's phone hotspot, the *travelling* network. Decided
+    2026-08-26 to be the **preferred** profile (higher
+    `autoconnect-priority`), so the robot rides the phone wherever Ori goes
+    and falls back to home Wi-Fi only when the phone leaves.
+-   **`bar-nachum`** — the home Wi-Fi network, the **fallback**.
+
+Both profiles keep `autoconnect=yes`; only the relative
+`autoconnect-priority` changes to decide which one NetworkManager prefers at
+(re)connect time. Note the iPhone hotspot is only *joinable* while Ori has
+the Personal Hotspot screen open, or while a client (including the robot
+itself) is already attached — iOS stops beaconing the SSID otherwise, so a
+robot that has fallen back to home Wi-Fi needs Ori to open the Hotspot
+screen once to get picked back up; there is no unattended return.
+
+### Why hotspot-first
+
+With hotspot-first ordering, the robot stays on the phone as long as it's
+reachable, and only drops back to `bar-nachum` when the phone is out of
+range or its hotspot is off. This matches how Ori actually uses the robot
+(carried around, not fixed at home).
+
+### The revert-timer rule
+
+The robot has **no console**. Every device-side network change (profile
+priority edits, dispatcher hooks, Tailscale install, …) must be applied with
+a scheduled automatic revert, so a mistake in a change can never strand an
+operator without an SSH path back in. This is why
+`scripts/device-network.sh --apply` never applies a change permanently on
+its own — it always schedules a revert (default 300s) that undoes the
+change unless `--commit` is called within the window.
+
+### `scripts/device-network.sh`
+
+Idempotent script to inspect and flip the two profiles' relative priority:
+
+```bash
+# print both profiles' autoconnect / autoconnect-priority / timestamp;
+# exits 0 iff iPhone (5) outranks bar-nachum and both autoconnect=yes
+scripts/device-network.sh --check
+
+# print (without running) the nmcli commands --apply would issue
+scripts/device-network.sh --dry-run
+
+# apply the priority flip (sudo -n nmcli connection modify), with an
+# automatic revert after 300s (override with --revert-after SECONDS)
+# unless --commit is run first
+scripts/device-network.sh --apply --revert-after 300
+
+# cancel the pending revert once you've confirmed SSH still works
+scripts/device-network.sh --commit
+
+# or restore the previous priorities immediately
+scripts/device-network.sh --revert
+```
+
+`--check` and `--dry-run` never require root and never mutate anything;
+`--apply`/`--revert` use `sudo -n nmcli connection modify` (the `pollen`
+user has passwordless `sudo -n nmcli` on the device). The revert timer uses
+`systemd-run --on-active` when available, falling back to a background
+`sleep` + revert job tracked by a pidfile under
+`${XDG_STATE_HOME:-$HOME/.local/state}/reachy/`.
+
+Profile names, target priorities, and the nmcli binary are overridable via
+`REACHY_NET_PREFERRED`, `REACHY_NET_FALLBACK`,
+`REACHY_NET_PREFERRED_PRIORITY`, `REACHY_NET_FALLBACK_PRIORITY`, and
+`REACHY_NMCLI` — mainly used by the test suite
+(`tests/test_device_network_script.py`) to stub `nmcli` out.
+
 ## Troubleshooting
 
 ### Voice Not Working
