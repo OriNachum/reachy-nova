@@ -38,10 +38,22 @@ State files, both under the state dir
   short-lived process on every single NM event, and what latches the log line
   so a tight loop costs at most one line per minute (h22's "≤1 network line
   per minute").
-- ``network-change`` — ``{"ssid", "ip", "ts"}``, written atomically on every
-  successful activation. The harness's ``NetworkUnit`` (task t4, running as
-  ``pollen``) watches this file; the dispatcher hook chowns it to pollen after
-  each root-side run.
+- ``network-change`` — ``{"ssid", "ip", "ts"}``, written atomically whenever
+  the OBSERVED network differs from what the file already holds — not only
+  after one of *our* activations. NetworkManager (or a human with ``nmcli``)
+  can join a network without us, and the harness's ``NetworkUnit`` (task t4,
+  running as ``pollen``) treats this file as its *only* SSID source, so a
+  stale file means a wrong ssid in every ``joined``/``moved`` line. Never
+  written while disconnected: ``NetworkUnit`` derives ``dropped`` from the
+  route itself. The dispatcher hook chowns it to pollen after each root-side
+  run.
+- ``netfailover.lock`` — the ``flock`` that serialises the whole
+  read->decide->activate->write round. The dispatcher starts a *distinct*
+  transient ``--once`` unit per NM event while the ``--loop`` unit is also
+  running, so overlapping rounds are the normal case, not the exotic one:
+  unserialised they read the same stale ``last_attempt_at``, both activate the
+  same SSID, and each overwrites the other's record — exactly the attempt
+  storm ``Policy.min_attempt_gap_s`` exists to prevent.
 
 Environment:
 
@@ -60,6 +72,8 @@ CLI::
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -85,6 +99,7 @@ WIFI_IFACE = "wlan0"
 
 RECORD_FILENAME = "netfailover.json"
 NETWORK_CHANGE_FILENAME = "network-change"
+LOCK_FILENAME = "netfailover.lock"
 
 ROUTE_PATH = Path("/proc/net/route")
 
@@ -92,6 +107,17 @@ ROUTE_PATH = Path("/proc/net/route")
 #: hotspot join, so it gets its own, much longer budget than a read command.
 NMCLI_TIMEOUT_S = 15.0
 NMCLI_ACTIVATE_TIMEOUT_S = 45.0
+
+#: How long a round waits for the inter-process round lock before giving up.
+#: Bounded, and deliberately a little longer than the slowest thing the lock
+#: is ever held across (one ``nmcli connection up``): a waiter that timed out
+#: earlier than that would routinely skip rounds that were about to be free,
+#: and one that waited forever would pile transient ``--once`` units up behind
+#: a wedged round.
+LOCK_TIMEOUT_S = NMCLI_ACTIVATE_TIMEOUT_S + 5.0
+
+#: Poll cadence while waiting for the lock (flock has no timed variant).
+LOCK_POLL_S = 0.05
 
 #: ``--loop`` clamps whatever the policy asks for into this band, so a bad
 #: policy value can never busy-spin nor effectively hang the transient unit.
@@ -354,6 +380,53 @@ def network_change_path(statedir: Path) -> Path:
     return statedir / NETWORK_CHANGE_FILENAME
 
 
+def lock_path(statedir: Path) -> Path:
+    return statedir / LOCK_FILENAME
+
+
+@contextlib.contextmanager
+def round_lock(statedir: Path, timeout: float | None = None):
+    """Hold an exclusive ``flock`` on ``<state>/netfailover.lock``.
+
+    Yields ``True`` when the lock was taken and ``False`` when *timeout*
+    seconds elapsed without it — the caller then skips the round entirely
+    rather than running it unserialised, because an unserialised round is
+    precisely the bug the lock exists for.
+
+    ``flock`` (not ``lockf``) on a dedicated file, because the lock has to
+    hold between *processes*: the transient ``--once`` unit NM's dispatcher
+    starts per event, and the long-lived ``--loop`` unit. It is released by
+    the kernel if the process dies mid-round, so a killed activation can never
+    wedge the next event's round.
+    """
+    budget = LOCK_TIMEOUT_S if timeout is None else float(timeout)
+    path = lock_path(statedir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+")
+    try:
+        deadline = time.monotonic() + budget
+        acquired = False
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(LOCK_POLL_S)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:  # pragma: no cover - defensive
+                    pass
+    finally:
+        handle.close()
+
+
 def load_record(statedir: Path) -> Record:
     """Read the record, tolerating absence, corruption and the wrong shape.
 
@@ -433,6 +506,44 @@ def write_network_change(statedir: Path, ssid: str | None, ip: str | None, ts: f
     _atomic_write_json(network_change_path(statedir), {"ssid": ssid, "ip": ip, "ts": ts})
 
 
+def read_network_change(statedir: Path) -> dict | None:
+    """The current ``network-change`` payload, or ``None`` if absent/unreadable.
+
+    A corrupt file reads as ``None``, which makes the next round rewrite it —
+    the same "prefer acting to being stuck" bias as :func:`load_record`.
+    """
+    try:
+        payload = json.loads(network_change_path(statedir).read_text())
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def sync_network_change(
+    statedir: Path,
+    ssid: str | None,
+    ip: str | None,
+    ts: float,
+) -> bool:
+    """Refresh ``network-change`` iff the observed ``(ssid, ip)`` differs.
+
+    Returns whether it wrote. Called on EVERY connected round, not only after
+    one of our own activations: NetworkManager auto-connects and manual
+    ``nmcli`` joins are invisible to this driver, and ``NetworkUnit`` has no
+    other source for the SSID — left alone, it reports the previous network's
+    name for as long as the robot stays on the new one.
+
+    Rewriting only on a real difference is what keeps the file's mtime and
+    ``ts`` meaningful ("when the network last changed", not "when we last
+    looked").
+    """
+    current = read_network_change(statedir)
+    if current is not None and current.get("ssid") == ssid and current.get("ip") == ip:
+        return False
+    write_network_change(statedir, ssid, ip, ts)
+    return True
+
+
 # --------------------------------------------------------------------------
 # logging
 # --------------------------------------------------------------------------
@@ -471,22 +582,76 @@ def run_once(
     statedir: Path | None = None,
     policy: netpolicy.Policy | None = None,
     route_path: Path | None = None,
+    lock_timeout_s: float | None = None,
 ) -> netpolicy.Decision:
     """Observe, decide, act, record — one full round of the failover driver.
 
     Returns the :class:`netpolicy.Decision` (which says what it *would* do
     even under *dry_run*, so ``--self-test`` and ``--dry-run`` are honest).
 
+    The whole read->decide->activate->write transaction is serialised by
+    :func:`round_lock`, so the per-event ``--once`` units and the ``--loop``
+    unit can never interleave. A round that cannot take the lock within
+    *lock_timeout_s* (default :data:`LOCK_TIMEOUT_S`) logs one line and
+    returns a ``lock-busy`` no-op decision: skipping is safe (another round is
+    right now doing this work), running unserialised is not.
+
     Under *dry_run* nothing at all is executed and **nothing is written** —
-    not the record, not ``network-change``. That is what makes the installer's
-    self-test safe to run against the live network on a robot that is
-    currently working fine.
+    not the record, not ``network-change``, not even the lock file, and no
+    lock is taken. That is what makes the installer's self-test safe to run
+    against the live network on a robot that is currently working fine, even
+    while a real round holds the lock.
     """
-    call = nmcli or run_nmcli
     now = time.time() if now is None else now
     statedir = default_statedir() if statedir is None else statedir
     policy = policy_from_env() if policy is None else policy
 
+    if dry_run:
+        return _round(
+            now=now,
+            call=nmcli or run_nmcli,
+            rescan=rescan,
+            dry_run=True,
+            statedir=statedir,
+            policy=policy,
+            route_path=route_path,
+        )
+
+    with round_lock(statedir, timeout=lock_timeout_s) as acquired:
+        if not acquired:
+            logger.warning(
+                "netfailover: another round still holds %s after %gs — skipping this round",
+                lock_path(statedir),
+                LOCK_TIMEOUT_S if lock_timeout_s is None else lock_timeout_s,
+            )
+            return netpolicy.Decision(
+                action="none",
+                target=None,
+                reason="lock-busy",
+                next_check_s=MIN_INTERVAL_S,
+                ts=now,
+            )
+        return _round(
+            now=now,
+            call=nmcli or run_nmcli,
+            rescan=rescan,
+            dry_run=False,
+            statedir=statedir,
+            policy=policy,
+            route_path=route_path,
+        )
+
+
+def _round(
+    now: float,
+    call: NmcliFn,
+    rescan: bool,
+    dry_run: bool,
+    statedir: Path,
+    policy: netpolicy.Policy,
+    route_path: Path | None,
+) -> netpolicy.Decision:
+    """One round's body. Always called with the round lock held (or dry-run)."""
     record = load_record(statedir)
     visible = scan(nmcli=call, rescan=rescan)
     active = active_ssid(nmcli=call)
@@ -508,6 +673,7 @@ def run_once(
     if dry_run:
         return decision
 
+    changed = False
     if decision.action == "activate" and decision.target:
         # The attempt is recorded whether or not it succeeds: a FAILED attempt
         # is precisely the one that must be gapped (probe s15 — the hotspot
@@ -523,6 +689,16 @@ def run_once(
         if ok:
             record.last_change_at = now
             write_network_change(statedir, decision.target, current_ip(nmcli=call), now)
+            changed = True
+
+    if not changed and routed:
+        # Reconcile with the network we actually observe. NM auto-connects and
+        # manual `nmcli connection up` never pass through this driver, and the
+        # harness has no other SSID source (see sync_network_change). Only
+        # while routed: `dropped` is NetworkUnit's own route-derived verdict,
+        # and re-announcing an SSID we have no route to would contradict it.
+        if sync_network_change(statedir, active, current_ip(nmcli=call), now):
+            record.last_change_at = now
 
     record.last_decision = decision
     save_record(statedir, record)
@@ -560,11 +736,17 @@ def run_loop(
     network for :data:`PREFERRED_SETTLE_S` — that self-termination is what
     lets the dispatcher hook fire-and-forget a transient
     ``reachy-netfailover-loop`` systemd unit without ever having to stop it.
-    Also exits on SIGTERM (wired by :func:`main`) via *stop_event*.
+    Also exits on SIGTERM (wired by :func:`main`) via *stop_event* —
+    *promptly*: the production wait is ``stop_event.wait(timeout)``, never a
+    blind sleep. On the preferred network ``next_check_s`` is 300 s, so a
+    plain ``time.sleep`` would have made a ``systemctl stop`` (or the shutdown
+    SIGTERM) hang for up to five minutes before systemd escalated to SIGKILL.
+    *sleep* stays injectable purely as a test seam for the settle logic.
     """
     clock = time.time if clock is None else clock
-    sleep = time.sleep if sleep is None else sleep
     stop_event = threading.Event() if stop_event is None else stop_event
+    if sleep is None:
+        sleep = stop_event.wait
 
     preferred_since: float | None = None
     while not stop_event.is_set():

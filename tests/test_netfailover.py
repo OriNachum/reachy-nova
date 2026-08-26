@@ -16,12 +16,20 @@ Covers:
     survives the dispatcher hook being a fresh process every time)
   - a corrupt/missing record file is tolerated
   - --dry-run executes nothing and writes nothing
+  - the whole read->decide->activate->write round is serialised by an
+    inter-process lock, so the per-event `--once` units and the `--loop` unit
+    can never interleave (two concurrent rounds => exactly one activation)
+  - <state>/network-change tracks the OBSERVED network on every round, not
+    only this driver's own activations (an autonomous NM join updates it too)
   - the CLI: --self-test exit codes, --once, --dry-run
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -269,7 +277,10 @@ def test_run_once_does_nothing_on_preferred(statedir, tmp_path):
     assert decision.action == "none"
     assert decision.reason == "on-preferred"
     assert fake.activations == []
-    assert not (statedir / netfailover.NETWORK_CHANGE_FILENAME).exists()
+    # nothing was activated, but the observed network is still recorded — see
+    # test_run_once_records_an_ssid_it_did_not_activate_itself below.
+    payload = json.loads((statedir / netfailover.NETWORK_CHANGE_FILENAME).read_text())
+    assert payload["ssid"] == "iPhone (5)"
 
 
 def test_run_once_writes_network_change_on_activation(statedir, tmp_path):
@@ -384,6 +395,175 @@ def test_run_once_logs_only_when_should_log(statedir, tmp_path, caplog):
 
 
 # --------------------------------------------------------------------------
+# round serialisation (the inter-process lock)
+# --------------------------------------------------------------------------
+
+
+class SlowActivateNmcli(FakeNmcli):
+    """A FakeNmcli whose `connection up` takes long enough to overlap rounds."""
+
+    def __init__(self, *args, up_delay=0.3, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.up_delay = up_delay
+
+    def __call__(self, args, timeout=None):
+        if "up" in args:
+            time.sleep(self.up_delay)
+        return super().__call__(args, timeout=timeout)
+
+
+def test_two_concurrent_rounds_activate_exactly_once(statedir, tmp_path):
+    """The dispatcher fires a distinct --once unit per NM event while --loop
+    runs too. Without a lock both read the same stale record, both activate,
+    and each overwrites the other's attempt record — the storm guard is gone.
+    """
+    route = tmp_path / "route"
+    route.write_text(ROUTE_NO_DEFAULT)
+
+    fakes = [
+        SlowActivateNmcli(scan=SCAN_BOTH, active="", ip=IP_OUT, up_rc=4),
+        SlowActivateNmcli(scan=SCAN_BOTH, active="", ip=IP_OUT, up_rc=4),
+    ]
+    ready = threading.Barrier(len(fakes))
+    decisions: list[netpolicy.Decision] = []
+    lock = threading.Lock()
+
+    def worker(fake):
+        ready.wait(timeout=5)
+        decision = _run(statedir, fake, now=1000.0, route=route)
+        with lock:
+            decisions.append(decision)
+
+    threads = [threading.Thread(target=worker, args=(f,)) for f in fakes]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+        assert not t.is_alive()
+
+    assert sum(len(f.activations) for f in fakes) == 1
+    # the loser saw the winner's attempt record and gapped itself
+    assert sorted(d.reason for d in decisions) == ["attempt-gap", "link-lost-hotspot-visible"]
+    assert netfailover.load_record(statedir).last_attempt_at["iPhone (5)"] == 1000.0
+
+
+def test_run_once_skips_the_round_when_the_lock_is_held(statedir, tmp_path, caplog):
+    """A round that cannot take the lock within its bounded timeout logs one
+    line and skips — it never falls through to an unserialised round."""
+    route = tmp_path / "route"
+    route.write_text(ROUTE_NO_DEFAULT)
+    fake = FakeNmcli(scan=SCAN_BOTH, active="", ip=IP_OUT)
+
+    holder = (statedir / netfailover.LOCK_FILENAME).open("a+")
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+    try:
+        with caplog.at_level("WARNING"):
+            decision = _run(statedir, fake, now=1000.0, route=route, lock_timeout_s=0.05)
+    finally:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()
+
+    assert decision.action == "none"
+    assert decision.reason == "lock-busy"
+    assert fake.activations == []
+    assert not (statedir / netfailover.RECORD_FILENAME).exists()
+    assert not (statedir / netfailover.NETWORK_CHANGE_FILENAME).exists()
+    assert [r for r in caplog.records if "lock" in r.getMessage()]
+
+
+def test_lock_timeout_outlives_an_activation():
+    """The bound must exceed the slowest thing the lock is held across."""
+    assert netfailover.LOCK_TIMEOUT_S > netfailover.NMCLI_ACTIVATE_TIMEOUT_S
+
+
+def test_dry_run_takes_no_lock_and_creates_no_lock_file(statedir, tmp_path):
+    route = tmp_path / "route"
+    route.write_text(ROUTE_NO_DEFAULT)
+    fake = FakeNmcli(scan=SCAN_BOTH, active="", ip=IP_OUT)
+
+    holder = (statedir / netfailover.LOCK_FILENAME).open("a+")
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+    try:
+        decision = _run(statedir, fake, now=1000.0, route=route, dry_run=True)
+    finally:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()
+
+    # a held lock never blocks the installer's self-test
+    assert decision.action == "activate"
+    assert fake.activations == []
+
+
+# --------------------------------------------------------------------------
+# network-change tracks the OBSERVED network, not just our own activations
+# --------------------------------------------------------------------------
+
+
+def _write_change(statedir: Path, ssid, ip, ts) -> Path:
+    path = statedir / netfailover.NETWORK_CHANGE_FILENAME
+    path.write_text(json.dumps({"ssid": ssid, "ip": ip, "ts": ts}))
+    return path
+
+
+def test_run_once_records_an_ssid_it_did_not_activate_itself(statedir, tmp_path):
+    """NetworkManager (or a human) can join a network without us. NetworkUnit
+    treats network-change as its ONLY SSID source, so a round that observes a
+    different active SSID must refresh it even with action=none."""
+    route = tmp_path / "route"
+    route.write_text(ROUTE_WITH_DEFAULT)
+    path = _write_change(statedir, "bar-nachum", "192.0.2.9", 1.0)
+    fake = FakeNmcli(scan=SCAN_BOTH, active=ACTIVE_PREFERRED, ip=IP_OUT)
+
+    decision = _run(statedir, fake, now=2000.0, route=route)
+
+    assert decision.action == "none"
+    assert decision.reason == "on-preferred"
+    payload = json.loads(path.read_text())
+    assert payload == {"ssid": "iPhone (5)", "ip": "198.51.100.4", "ts": 2000.0}
+
+
+def test_run_once_leaves_network_change_alone_when_nothing_changed(statedir, tmp_path):
+    route = tmp_path / "route"
+    route.write_text(ROUTE_WITH_DEFAULT)
+    path = _write_change(statedir, "iPhone (5)", "198.51.100.4", 1.0)
+    before = path.stat().st_mtime_ns
+    fake = FakeNmcli(scan=SCAN_BOTH, active=ACTIVE_PREFERRED, ip=IP_OUT)
+
+    _run(statedir, fake, now=2000.0, route=route)
+
+    assert path.stat().st_mtime_ns == before
+    assert json.loads(path.read_text())["ts"] == 1.0
+
+
+def test_run_once_never_writes_network_change_while_disconnected(statedir, tmp_path):
+    """NetworkUnit derives 'dropped' from the route itself; a rewrite here
+    while offline would only advertise a network we do not have."""
+    route = tmp_path / "route"
+    route.write_text(ROUTE_NO_DEFAULT)
+    path = _write_change(statedir, "bar-nachum", "192.0.2.9", 1.0)
+    before = path.stat().st_mtime_ns
+    fake = FakeNmcli(scan="some-cafe-wifi:40:no\n", active="", ip="")
+
+    decision = _run(statedir, fake, now=2000.0, route=route)
+
+    assert decision.reason == "waiting-no-candidate"
+    assert path.stat().st_mtime_ns == before
+    assert json.loads(path.read_text())["ssid"] == "bar-nachum"
+
+
+def test_run_once_creates_network_change_when_missing_and_routed(statedir, tmp_path):
+    route = tmp_path / "route"
+    route.write_text(ROUTE_WITH_DEFAULT)
+    fake = FakeNmcli(scan=SCAN_BOTH, active="other-net:wlan0\n", ip=IP_OUT)
+
+    decision = _run(statedir, fake, now=2000.0, route=route)
+
+    assert decision.reason == "on-unknown-network"
+    payload = json.loads((statedir / netfailover.NETWORK_CHANGE_FILENAME).read_text())
+    assert payload == {"ssid": "other-net", "ip": "198.51.100.4", "ts": 2000.0}
+
+
+# --------------------------------------------------------------------------
 # policy construction from the environment
 # --------------------------------------------------------------------------
 
@@ -460,9 +640,39 @@ def test_run_loop_exits_after_preferred_settle(statedir, tmp_path):
     assert all(netfailover.MIN_INTERVAL_S <= s <= netfailover.MAX_INTERVAL_S for s in slept)
 
 
-def test_run_loop_stops_on_stop_event(statedir, tmp_path):
-    import threading
+def test_run_loop_wakes_immediately_on_stop_event(statedir, tmp_path):
+    """SIGTERM must not wait out a 300 s next_check: the production wait is
+    stop_event.wait(timeout), not a blind sleep."""
+    route = tmp_path / "route"
+    route.write_text(ROUTE_WITH_DEFAULT)
+    fake = FakeNmcli(scan=SCAN_BOTH, active=ACTIVE_PREFERRED, ip=IP_OUT)
+    stop = threading.Event()
 
+    thread = threading.Thread(
+        target=netfailover.run_loop,
+        kwargs=dict(
+            nmcli=fake,
+            statedir=statedir,
+            route_path=route,
+            policy=netpolicy.Policy(preferred="iPhone (5)", fallback="bar-nachum"),
+            stop_event=stop,
+        ),
+        daemon=True,
+    )
+    thread.start()
+    time.sleep(0.2)  # let it get into the 300 s wait
+    assert thread.is_alive()
+
+    t0 = time.monotonic()
+    stop.set()
+    thread.join(timeout=5.0)
+    elapsed = time.monotonic() - t0
+
+    assert not thread.is_alive()
+    assert elapsed <= 1.0, f"loop took {elapsed:.2f}s to notice stop_event"
+
+
+def test_run_loop_stops_on_stop_event(statedir, tmp_path):
     route = tmp_path / "route"
     route.write_text(ROUTE_NO_DEFAULT)
     fake = FakeNmcli(scan="", active="", ip="")

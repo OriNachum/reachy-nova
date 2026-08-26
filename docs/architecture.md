@@ -377,7 +377,20 @@ lives under `~/.reachy_nova/skills-active/`.
   eyes on this (`harness/network.py`): a 2 s poll of the default route, the
   wlan address and the dispatcher's `network-change` file, latched into one
   `[SENSE stage=supervise … event=network] joined=… / dropped …` line per
-  transition. The unit's FIRST observation is flagged `initial` — it reaches
+  transition. That file is the harness's *only* source for the SSID, so the
+  root-side driver (`netfailover.py`) refreshes it whenever the **observed**
+  network differs from what it holds — not only after one of its own
+  activations, since NetworkManager auto-connects and manual `nmcli` joins
+  never pass through the driver. It is never rewritten while disconnected:
+  `dropped` is the harness's own route-derived verdict. Every round
+  (read → decide → activate → write) is serialised by an `flock` on
+  `<state>/netfailover.lock`, because the dispatcher starts one transient
+  `--once` unit *per NM event* alongside the long-lived `--loop` unit, and
+  overlapping rounds would otherwise share a stale attempt record and storm
+  the same SSID. The hook's per-device config (interpreter, state dir, user)
+  is rendered by the installer into `/etc/default/reachy-failover`, which the
+  hook sources — the values compiled into the hook itself are only the
+  reference device's defaults. The unit's FIRST observation is flagged `initial` — it reaches
   the journal (the boot state must be visible) but restarts nothing, since both
   legs were just constructed against that very network. On a **join or move**
   it restarts both cloud legs at once —

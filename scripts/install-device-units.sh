@@ -76,6 +76,56 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 log() { printf '[install-device-units] %s\n' "$*"; }
 warn() { printf '[install-device-units] WARN: %s\n' "$*" >&2; }
 
+# --- 0. resolve what the failover hook will actually run ------------------
+# The dispatcher hook (config/network/90-reachy-failover) carries the
+# REFERENCE DEVICE's defaults compiled in. This install may not be that
+# device: a different user, a different checkout, a different venv. So the
+# installer resolves the three values the hook needs and renders them into
+# /etc/default/reachy-failover, which the hook sources. Without this the
+# installer would happily self-test a custom NOVA_PYTHON and then install a
+# hook pointing at the hardcoded /home/pollen venv, which fails its own
+# `[ -x ]` guard and silently skips every network event.
+FAILOVER_DEFAULTS_FILE="${FAILOVER_DEFAULTS_FILE:-/etc/default/reachy-failover}"
+
+resolve_python() {
+    # An absolute path if we can find one: the hook guards on `[ -x ]`, which
+    # a bare `python3` can never satisfy.
+    local raw="$1" resolved=""
+    resolved="$(command -v -- "$raw" 2>/dev/null || true)"
+    [ -n "$resolved" ] || resolved="$raw"
+    case "$resolved" in
+        /*) ;;
+        *) resolved="$(readlink -f -- "$resolved" 2>/dev/null || printf '%s' "$resolved")" ;;
+    esac
+    printf '%s\n' "$resolved"
+}
+
+NOVA_PYTHON_RESOLVED="$(resolve_python "$NOVA_PYTHON")"
+# Same cascade as reachy_nova.netfailover.default_statedir().
+FAILOVER_STATE_DIR="${REACHY_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/reachy}"
+FAILOVER_USER="${REACHY_NOVA_USER:-$(id -un)}"
+
+render_failover_defaults() {
+    cat <<EOF
+# /etc/default/reachy-failover — rendered by scripts/install-device-units.sh.
+# Sourced by /etc/NetworkManager/dispatcher.d/90-reachy-failover so the hook
+# runs the interpreter this install actually resolved. Re-rendered on every
+# re-run of the installer; edit the installer, not this file.
+REACHY_NOVA_PYTHON=$NOVA_PYTHON_RESOLVED
+REACHY_STATE_DIR=$FAILOVER_STATE_DIR
+REACHY_NOVA_USER=$FAILOVER_USER
+EOF
+}
+
+# Testing seam (tests/test_failover_hook.py): print what the failover step
+# would render, then stop — no units written, no sudo, no systemctl.
+if [ "${INSTALL_DRY_RUN:-0}" = "1" ]; then
+    log "dry run: would write $FAILOVER_DEFAULTS_FILE containing:"
+    render_failover_defaults
+    log "dry run: would self-test with $NOVA_PYTHON_RESOLVED"
+    exit 0
+fi
+
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 mkdir -p "$UNIT_DIR"
 
@@ -212,6 +262,17 @@ install_failover_hook() {
         return 0
     fi
 
+    # The hook's own defaults are the reference device's. Render this
+    # install's real values first, so the hook that lands one line below is
+    # already pointing at the interpreter we are about to self-test.
+    if render_failover_defaults | sudo -n tee "$FAILOVER_DEFAULTS_FILE" >/dev/null 2>&1; then
+        log "wrote $FAILOVER_DEFAULTS_FILE (python=$NOVA_PYTHON_RESOLVED state=$FAILOVER_STATE_DIR user=$FAILOVER_USER)"
+    else
+        warn "could not write $FAILOVER_DEFAULTS_FILE — skipping failover hook install"
+        warn "(the hook's compiled-in defaults are the reference device's and may not match this install)"
+        return 0
+    fi
+
     # `install` sets owner, group and mode in one atomic step, so the hook is
     # never briefly world-writable in the directory NM executes as root.
     if ! sudo -n install -o root -g root -m 0755 "$repo_hook" "$installed" 2>/dev/null; then
@@ -220,13 +281,18 @@ install_failover_hook() {
     fi
     log "installed $installed (root:root 0755)"
 
+    # Self-test through EXACTLY the interpreter and state dir the installed
+    # hook will use — a self-test that passes under a different interpreter
+    # than the hook runs proves nothing about the hook.
     log "running failover self-test (dry run — activates nothing, writes nothing)"
-    if "$NOVA_PYTHON" -m reachy_nova.netfailover --self-test; then
+    if REACHY_STATE_DIR="$FAILOVER_STATE_DIR" \
+        "$NOVA_PYTHON_RESOLVED" -m reachy_nova.netfailover --self-test; then
         log "failover self-test passed — hook left in place"
         return 0
     fi
 
     warn "failover self-test FAILED — reverting: removing $installed"
+    sudo -n rm -f "$FAILOVER_DEFAULTS_FILE" 2>/dev/null || true
     if sudo -n rm -f "$installed" 2>/dev/null; then
         warn "removed $installed (the robot is left exactly as it was before this step)"
     else
