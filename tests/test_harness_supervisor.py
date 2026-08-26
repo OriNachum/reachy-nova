@@ -365,3 +365,20 @@ def test_cmd_run_refuses_when_no_components_compose(tmp_path, monkeypatch):
     assert rc == supervisor.EXIT_NO_COMPONENTS
     # the pid file is released so the retry can claim it
     assert supervisor.read_pid() is None
+
+
+def test_status_reports_the_quiet_deadline_when_one_is_armed(state_dir):
+    from reachy_nova.harness.quiet import QuietState
+
+    assert supervisor.status()["quiet_until"] is None
+
+    quiet = QuietState()
+    quiet.arm(10)
+    try:
+        # In-process seam: the harness hands its own instance to status().
+        assert supervisor.status(quiet=quiet)["quiet_until"].startswith("2")
+        # Out-of-process (the `status` CLI): the persisted deadline is read.
+        assert supervisor.status()["quiet_until"] == quiet.until_iso()
+    finally:
+        quiet.release()
+    assert supervisor.status()["quiet_until"] is None

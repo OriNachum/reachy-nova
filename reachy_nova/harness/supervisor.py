@@ -53,6 +53,7 @@ from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
 from .. import sensory_log
+from . import quiet as quiet_mod
 from . import statedir, unit
 
 # Exit codes (operator-facing contract; 1 stays "unexpected error").
@@ -410,16 +411,25 @@ def cmd_run(env_file: str | None = None) -> int:
     return EXIT_OK
 
 
-def status() -> dict[str, object]:
-    """Engine / embody / own-PID liveness — the whole attachment picture."""
+def status(quiet: "quiet_mod.QuietState | None" = None) -> dict[str, object]:
+    """Engine / embody / own-PID liveness — the whole attachment picture.
+
+    *quiet* is the running harness's own :class:`~reachy_nova.harness.quiet.QuietState`
+    when there is one in this process. The ``status`` CLI runs in a DIFFERENT
+    process from the harness, so with no instance to hand the persisted
+    deadline is read side-effect-free instead — "why is it not talking?" must
+    be answerable from outside the harness, which is where the operator is.
+    """
     pid = read_pid()
     running = pid is not None and _is_alive(pid) and _is_our_harness(pid)
+    quiet_until = quiet.until_iso() if quiet is not None else quiet_mod.peek_until_iso()
     return {
         "state_dir": str(statedir.state_dir()),
         "engine_live": statedir.engine_is_live(),
         "embody_live": statedir.embody_is_live(),
         "harness_pid": pid,
         "harness_running": running,
+        "quiet_until": quiet_until,
         "unit": unit.HARNESS_UNIT,
     }
 

@@ -80,6 +80,15 @@ def volume_state_path() -> Path:
     return state_dir() / "nova-volume.json"
 
 
+def quiet_state_path() -> Path:
+    """Persisted timed-quiet deadline — ``<state>/nova-quiet.json``.
+
+    See :mod:`reachy_nova.harness.quiet`: a deadline, so a restart inside a
+    quiet window comes back quiet instead of reintroducing itself out loud.
+    """
+    return state_dir() / "nova-quiet.json"
+
+
 def harness_pid_path() -> Path:
     return state_dir() / "nova-harness.pid"
 
