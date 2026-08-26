@@ -135,6 +135,32 @@ Profile names, target priorities, and the nmcli binary are overridable via
 `REACHY_NMCLI` — mainly used by the test suite
 (`tests/test_device_network_script.py`) to stub `nmcli` out.
 
+### Reaching the robot: tailnet first
+
+The robot is a node on Ori's Tailscale tailnet (`reachy-mini`, installed from
+`pkgs.tailscale.com`, `tailscaled` enabled at boot). Reach it by tailnet name
+or address from any tailnet device **regardless of which Wi‑Fi the robot is
+on** — including the phone hotspot, whose subnet spark can never see:
+
+```bash
+ssh pollen@reachy-mini            # MagicDNS
+ssh pollen@"$(tailscale ip -4 reachy-mini)"   # tailnet address, resolved at use
+tailscale ip -4 reachy-mini       # from any tailnet member
+```
+
+Two operator rules:
+
+- **Disable key expiry** for the `reachy-mini` node in the Tailscale admin
+  console (Machines → reachy-mini → … → Disable key expiry). With the default
+  180‑day expiry the robot would silently drop off the tailnet one day.
+- The subnet sweep (`reachy wireless find`) and the `/etc/hosts` pin
+  (`reachy wireless pin`) are **fallbacks** for when the tailnet is down;
+  they only work when spark and the robot share a subnet, and the pin goes
+  stale on every network switch — refresh it when you use it.
+
+Disk note: the install cost ~50 MB on the CM4's root filesystem (1.3 G → 1.2 G
+free on 2026‑08‑26); keep an eye on it alongside the journald cap.
+
 ## Troubleshooting
 
 ### Voice Not Working

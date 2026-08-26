@@ -242,4 +242,19 @@ else
     log "--no-failover given — skipping the NetworkManager failover hook"
 fi
 
+# --- 7. tailnet presence check (informational, never fatal) ---------------
+# The robot is meant to be a Tailscale node (docs/setup.md "tailnet first",
+# spec c25). Installing tailscale is a documented operator step, not this
+# script's job — it only reports whether the node is up so a fresh device
+# cannot silently ship without its primary reachability path.
+if command -v tailscale >/dev/null 2>&1; then
+    if tailscale status --json 2>/dev/null | grep -q '"BackendState": *"Running"'; then
+        log "tailscale: node is up ($(tailscale ip -4 2>/dev/null | head -1))"
+    else
+        warn "tailscale is installed but not logged in — run: sudo tailscale up --hostname reachy-mini"
+    fi
+else
+    warn "tailscale not installed — see docs/setup.md 'Reaching the robot: tailnet first'"
+fi
+
 log "install-device-units.sh completed successfully"
