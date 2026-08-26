@@ -18,8 +18,8 @@
 
 ## Requirements
 
-- operators on spark can find the robot on either network: today the registry pins `last_ip` 192.168.1.162 and reachy-mini.local mDNS does not resolve; on the hotspot the robot gets a 172.20.10.x address that spark only sees if spark is on the hotspot too
-  - honesty: from spark on the hotspot, 'reachy wireless find' returns the robot's 172.20.10.x address within 30 s of the robot joining, and the registry/pinned alias are refreshed rather than stale
+- operators on spark can find the robot on either network: today the registry pins `last_ip` <home-lan-ip> and reachy-mini.local mDNS does not resolve; on the hotspot the robot gets a <hotspot-ip> address that spark only sees if spark is on the hotspot too
+  - honesty: from spark on the hotspot, 'reachy wireless find' returns the robot's <hotspot-ip> address within 30 s of the robot joining, and the registry/pinned alias are refreshed rather than stale
   - honesty: spark reaches the robot via its tailnet address on either network within 30 s of the robot's join; the subnet sweep ('reachy wireless find') and the /etc/hosts pin are documented as fallbacks only, refreshed when used
 - the mind survives a network change: the harness (or its unit) retries the kiro writer's initial spawn under the same watchdog/backoff it already uses for later restarts, and Sonic's stream is re-established on address loss instead of waiting for the liveness watchdog; unit ordering no longer relies on network-online.target alone
   - honesty: with Wi-Fi deliberately down at harness start, `kiro_session` is absent at first and then shows 'started' in the journal after Wi-Fi returns, with no manual restart
@@ -50,11 +50,11 @@
 - with the home AP powered but its WAN unplugged, either the robot switches to the hotspot within 60 s, or the spec explicitly declares uplink loss out of scope
 - starting the harness with Wi-Fi disabled yields 'component absent' lines for Sonic/Kiro within 30 s and a running harness (pid claimed, engine live), not a hung start
 - every network-changing command in the plan's runbook carries an explicit revert timer, and the drill confirms SSH returns on bar-nachum without intervention
-- robot attached to iPhone (5), Hotspot screen closed, phone in pocket for 10 min: robot still has its 172.20.10.x address and Sonic answers speech
+- robot attached to iPhone (5), Hotspot screen closed, phone in pocket for 10 min: robot still has its <hotspot-ip> address and Sonic answers speech
 
 ## Success signals
 
-- live drill, both directions, zero SSH: with the harness running, remove bar-nachum (power the AP off or walk out of range) while the hotspot broadcasts -> robot on 172.20.10.x, answers a spoken question and shows `kiro_session` started in the journal within 60 s; restore bar-nachum -> robot back on 192.168.1.162 with the same; 'reachy wireless find' from spark on the same network returns it each time
+- live drill, both directions, zero SSH: with the harness running, remove bar-nachum (power the AP off or walk out of range) while the hotspot broadcasts -> robot on <hotspot-ip>, answers a spoken question and shows `kiro_session` started in the journal within 60 s; restore bar-nachum -> robot back on <home-lan-ip> with the same; 'reachy wireless find' from spark on the same network returns it each time
 
 ## Scope / boundaries
 
@@ -70,7 +70,7 @@
 
 ## Assumptions
 
-- a live join of iPhone (5) works: 2026-08-26 07:33 the robot activated the hotspot profile (172.20.10.2/28, default route via 172.20.10.1, internet 36 ms) and returned to bar-nachum in ~20 s total; the hotspot must be broadcasting (Ori opens the Personal Hotspot screen) for the SSID to be visible
+- a live join of iPhone (5) works: 2026-08-26 07:33 the robot activated the hotspot profile (<hotspot-ip>, default route via <hotspot-gw>, internet 36 ms) and returned to bar-nachum in ~20 s total; the hotspot must be broadcasting (Ori opens the Personal Hotspot screen) for the SSID to be visible
 - NetworkManager fails over only on association loss: with bar-nachum up but its uplink dead, the robot stays on home with no internet and the hotspot is never tried (nmcli connectivity check is 'full' but no policy acts on it) — 'never downtime' as specced covers AP loss, not ISP loss
 - the iPhone hotspot SSID is visible to the robot only while Ori has the Hotspot screen open OR a client is already attached; with the screen closed and no client, iOS stops beaconing within ~30 s (forced-failover probe 09:23:33 ssid-not-found) — the away-test's 2 min of visibility (08:57:57–08:59:47) is explained by Ori opening the screen, not by unattended beaconing
 - while the robot is already attached, iOS keeps the Personal Hotspot up with the screen closed — so hotspot-first ordering keeps the robot connected through the day; only a drop-and-rejoin needs the screen opened (untested; test = attach, close screen, wait 10 min, verify still attached)
@@ -83,7 +83,7 @@
   - seeds: `c3`
 - `s3` — `docs/architecture.md §8 + harness units (supervisor, hearing, kiro_session) + journal 2026-08-26 boot`: harness reconnects seams with backoff and Sonic has clock-step/liveness watchdogs, but the kiro session failed at cold boot before Wi-Fi associated (After=network-online.target is satisfied too early) and was never retried until a manual restart — a network switch today = a possible silent loss of the writer
   - seeds: `c4`
-- `s4` — `~/.local/state/reachy/units.json registry, reachy wireless {find,list,pin}, spark nmcli (two iPhone (5) profiles, on bar-nachum at 192.168.1.118)`: the two machines must be on the SAME network to talk (hotspot is 172.20.10.0/28, home is 192.168.1.0/24, no routing between); discovery must re-run after a switch (reachy wireless find) and the pinned /etc/hosts alias goes stale
+- `s4` — `~/.local/state/reachy/units.json registry, reachy wireless {find,list,pin}, spark nmcli (two iPhone (5) profiles, on bar-nachum at <spark-lan-ip>)`: the two machines must be on the SAME network to talk (hotspot is <hotspot-subnet>, home is <home-subnet>, no routing between); discovery must re-run after a switch (reachy wireless find) and the pinned /etc/hosts alias goes stale
   - seeds: `c5`
 - `s5` — `challenge pass / adjacent-systems lens: reachy wireless find --json + overview, ~/.local/state/reachy/units.json`: discovery is an IPv4 HTTP sweep of spark's local /24-or-narrower subnets (268 hosts in 2.2 s), registry keyed by `hardware_id` with `last_ip`; it cannot see across subnets, so on the hotspot spark must be on the hotspot too, and 'wireless pin' aliases go stale on every switch
   - seeds: `c5`

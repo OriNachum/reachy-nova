@@ -29,7 +29,7 @@ def _write_change_file(path: Path, ssid: str, ip: str | None = None) -> None:
 class FakeReaders:
     """Mutable stand-ins for route_reader/addr_reader, driven by the test."""
 
-    def __init__(self, *, route: bool = True, addr: str | None = "192.168.1.162") -> None:
+    def __init__(self, *, route: bool = True, addr: str | None = "192.0.2.62") -> None:
         self.route = route
         self.addr = addr
         self.route_calls = 0
@@ -104,14 +104,14 @@ def test_stop_joins_the_thread_promptly(tmp_path: Path) -> None:
 def test_status_reports_online_ip_ssid(tmp_path: Path) -> None:
     change_file = tmp_path / "network-change"
     _write_change_file(change_file, "bar-nachum")
-    readers = FakeReaders(route=True, addr="192.168.1.162")
+    readers = FakeReaders(route=True, addr="192.0.2.62")
     unit = _make_unit(tmp_path, readers, change_file=change_file)
     unit.start(threading.Event())
     try:
         _wait_until(lambda: unit.status()["online"] is True)
         status = unit.status()
         assert status["online"] is True
-        assert status["ip"] == "192.168.1.162"
+        assert status["ip"] == "192.0.2.62"
         assert status["ssid"] == "bar-nachum"
     finally:
         unit.stop()
@@ -136,7 +136,7 @@ def test_startup_baseline_online_logs_one_joined_line(
 ) -> None:
     change_file = tmp_path / "network-change"
     _write_change_file(change_file, "bar-nachum")
-    readers = FakeReaders(route=True, addr="192.168.1.162")
+    readers = FakeReaders(route=True, addr="192.0.2.62")
     unit = _make_unit(tmp_path, readers, change_file=change_file)
     unit.start(threading.Event())
     try:
@@ -148,7 +148,7 @@ def test_startup_baseline_online_logs_one_joined_line(
     lines = [ln for ln in _sense_lines(caplog) if "event=network" in ln]
     joined = [ln for ln in lines if "joined=" in ln]
     assert len(joined) == 1
-    assert "joined=bar-nachum ip=192.168.1.162" in joined[0]
+    assert "joined=bar-nachum ip=192.0.2.62" in joined[0]
 
 
 def test_startup_baseline_offline_logs_one_dropped_line(
@@ -171,7 +171,7 @@ def test_startup_baseline_offline_logs_one_dropped_line(
 def test_one_joined_and_one_dropped_line_per_transition_no_repeats(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    readers = FakeReaders(route=True, addr="192.168.1.162")
+    readers = FakeReaders(route=True, addr="192.0.2.62")
     unit = _make_unit(tmp_path, readers)
     unit.start(threading.Event())
     try:
@@ -184,7 +184,7 @@ def test_one_joined_and_one_dropped_line_per_transition_no_repeats(
         time.sleep(0.1)  # stable offline for a while — no repeats
 
         readers.route = True
-        readers.addr = "192.168.1.162"
+        readers.addr = "192.0.2.62"
         _wait_until(lambda: unit.status()["online"] is True)
         time.sleep(0.1)
     finally:
@@ -201,15 +201,15 @@ def test_ip_change_while_online_is_a_single_transition_line(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A changed ip/ssid while online is documented+tested as ONE 'moved' line."""
-    readers = FakeReaders(route=True, addr="172.20.10.2")
+    readers = FakeReaders(route=True, addr="198.51.100.2")
     unit = _make_unit(tmp_path, readers)
     unit.start(threading.Event())
     try:
-        _wait_until(lambda: unit.status()["ip"] == "172.20.10.2")
+        _wait_until(lambda: unit.status()["ip"] == "198.51.100.2")
         time.sleep(0.05)
 
-        readers.addr = "192.168.1.162"
-        _wait_until(lambda: unit.status()["ip"] == "192.168.1.162")
+        readers.addr = "192.0.2.62"
+        _wait_until(lambda: unit.status()["ip"] == "192.0.2.62")
         time.sleep(0.1)
     finally:
         unit.stop()
@@ -219,7 +219,7 @@ def test_ip_change_while_online_is_a_single_transition_line(
     dropped = [ln for ln in lines if "dropped" in ln]
     assert len(moved) == 1, lines
     assert not dropped, lines
-    assert "192.168.1.162" in moved[0]
+    assert "192.0.2.62" in moved[0]
 
 
 def test_network_change_file_supplies_ssid(
@@ -227,7 +227,7 @@ def test_network_change_file_supplies_ssid(
 ) -> None:
     change_file = tmp_path / "network-change"
     _write_change_file(change_file, "iPhone (5)")
-    readers = FakeReaders(route=True, addr="172.20.10.2")
+    readers = FakeReaders(route=True, addr="198.51.100.2")
     unit = _make_unit(tmp_path, readers, change_file=change_file)
     unit.start(threading.Event())
     try:
@@ -241,7 +241,7 @@ def test_network_change_file_supplies_ssid(
 
 
 def test_missing_change_file_is_fine_ssid_unknown(tmp_path: Path) -> None:
-    readers = FakeReaders(route=True, addr="192.168.1.162")
+    readers = FakeReaders(route=True, addr="192.0.2.62")
     unit = _make_unit(tmp_path, readers, change_file=tmp_path / "does-not-exist")
     unit.start(threading.Event())
     try:
@@ -259,7 +259,7 @@ def test_missing_change_file_is_fine_ssid_unknown(tmp_path: Path) -> None:
 def test_callback_invoked_once_per_transition_with_payload(tmp_path: Path) -> None:
     change_file = tmp_path / "network-change"
     _write_change_file(change_file, "bar-nachum")
-    readers = FakeReaders(route=True, addr="192.168.1.162")
+    readers = FakeReaders(route=True, addr="192.0.2.62")
     unit = _make_unit(tmp_path, readers, change_file=change_file)
 
     events: list[tuple[str, dict]] = []
@@ -288,13 +288,13 @@ def test_callback_invoked_once_per_transition_with_payload(tmp_path: Path) -> No
     assert seen[0][0] == "joined"
     # The startup observation is the BASELINE state, flagged as such so a
     # consumer can tell it from a change that happened while it was watching.
-    assert seen[0][1] == {"ip": "192.168.1.162", "ssid": "bar-nachum", "initial": True}
+    assert seen[0][1] == {"ip": "192.0.2.62", "ssid": "bar-nachum", "initial": True}
     assert seen[1][0] == "dropped"
     assert seen[1][1] == {"reason": "no-route", "initial": False}
 
 
 def test_callback_fires_on_the_units_own_thread(tmp_path: Path) -> None:
-    readers = FakeReaders(route=True, addr="192.168.1.162")
+    readers = FakeReaders(route=True, addr="192.0.2.62")
     unit = _make_unit(tmp_path, readers)
     seen_threads: list[int] = []
 
@@ -313,7 +313,7 @@ def test_callback_fires_on_the_units_own_thread(tmp_path: Path) -> None:
 
 
 def test_callback_exception_does_not_stop_subsequent_transitions(tmp_path: Path) -> None:
-    readers = FakeReaders(route=True, addr="192.168.1.162")
+    readers = FakeReaders(route=True, addr="192.0.2.62")
     unit = _make_unit(tmp_path, readers)
     calls: list[str] = []
 
@@ -417,7 +417,7 @@ def test_initial_observation_is_flagged_and_still_logged(tmp_path: Path, caplog)
     """h13 wants the initial state in the journal — flagged, never suppressed."""
     change_file = tmp_path / "network-change"
     _write_change_file(change_file, "bar-nachum")
-    readers = FakeReaders(route=True, addr="192.168.1.162")
+    readers = FakeReaders(route=True, addr="192.0.2.62")
     unit = _make_unit(tmp_path, readers, change_file=change_file)
 
     seen: list[tuple[str, dict]] = []
@@ -425,10 +425,10 @@ def test_initial_observation_is_flagged_and_still_logged(tmp_path: Path, caplog)
 
     unit._observe()  # INFO capture comes from the autouse _caplog_at_info fixture
 
-    assert seen == [("joined", {"ip": "192.168.1.162", "ssid": "bar-nachum", "initial": True})]
+    assert seen == [("joined", {"ip": "192.0.2.62", "ssid": "bar-nachum", "initial": True})]
     line = " | ".join(r.getMessage() for r in caplog.records)
     assert "event=network" in line
-    assert "joined=bar-nachum ip=192.168.1.162" in line
+    assert "joined=bar-nachum ip=192.0.2.62" in line
     assert "initial=true" in line
 
 
@@ -445,14 +445,14 @@ def test_initial_dropped_observation_is_flagged_too(tmp_path: Path) -> None:
 
 
 def test_transitions_after_the_baseline_are_not_initial(tmp_path: Path) -> None:
-    readers = FakeReaders(route=True, addr="192.168.1.162")
+    readers = FakeReaders(route=True, addr="192.0.2.62")
     unit = _make_unit(tmp_path, readers)
 
     seen: list[tuple[str, dict]] = []
     unit.on_change(lambda event, info: seen.append((event, dict(info))))
 
     unit._observe()  # baseline
-    readers.addr = "172.20.10.2"
+    readers.addr = "198.51.100.2"
     unit._observe()  # a real roam
     readers.route = False
     readers.addr = None

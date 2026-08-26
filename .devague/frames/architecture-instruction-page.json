@@ -115,7 +115,7 @@
     },
     {
       "id": "s5",
-      "surface": "device 192.168.1.162: nmcli profiles, ~/.kiro/agents, journalctl --user -u reachy-nova-harness",
+      "surface": "device <home-lan-ip>: nmcli profiles, ~/.kiro/agents, journalctl --user -u reachy-nova-harness",
       "finding": "iPhone (5) profile existed with PSK but timestamp 0 (never joined) \u2014 join proven live 07:33 BST; kiro_session failed at boot (kiro-cli exited before network-online) and the pre-review build never retried; main carries the spawn-survival fix",
       "seeds": [
         "c6"

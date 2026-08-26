@@ -106,13 +106,13 @@ def test_joined_or_moved_requests_one_sonic_and_one_kiro_restart(event) -> None:
     reactor.start(threading.Event())
 
     reactor.on_network_change(
-        event, {"ip": "172.20.10.2", "ssid": "iPhone (5)", "initial": False}
+        event, {"ip": "198.51.100.2", "ssid": "iPhone (5)", "initial": False}
     )
 
     assert len(sonic.restart_reasons) == 1
     assert len(kiro.restart_reasons) == 1
     assert "iPhone (5)" in sonic.restart_reasons[0]
-    assert "172.20.10.2" in kiro.restart_reasons[0]
+    assert "198.51.100.2" in kiro.restart_reasons[0]
 
 
 def test_dropped_requests_no_restart_at_all(caplog) -> None:
@@ -202,13 +202,13 @@ def test_initial_observation_restarts_nothing_and_says_so(caplog) -> None:
 
     with caplog.at_level("INFO"):
         reactor.on_network_change(
-            "joined", {"ip": "192.168.1.162", "ssid": "bar-nachum", "initial": True}
+            "joined", {"ip": "192.0.2.62", "ssid": "bar-nachum", "initial": True}
         )
 
     assert sonic.restart_reasons == []
     assert kiro.restart_reasons == []
     text = _messages(caplog)
-    assert "network baseline joined ssid=bar-nachum ip=192.168.1.162" in text
+    assert "network baseline joined ssid=bar-nachum ip=192.0.2.62" in text
     assert "no restart" in text
 
 
@@ -235,7 +235,7 @@ def test_initial_join_then_a_real_transition_restarts_exactly_once_each(tmp_path
     reactor = NetworkReactor(sonic, kiro)
     reactor.start(threading.Event())
 
-    address = {"value": "192.168.1.162"}
+    address = {"value": "192.0.2.62"}
     unit = NetworkUnit(
         route_reader=lambda: address["value"] is not None,
         addr_reader=lambda: address["value"],
@@ -249,11 +249,11 @@ def test_initial_join_then_a_real_transition_restarts_exactly_once_each(tmp_path
     assert sonic.restart_reasons == []
     assert kiro.restart_reasons == []
 
-    address["value"] = "172.20.10.2"
+    address["value"] = "198.51.100.2"
     unit._observe()  # a REAL move
     assert len(sonic.restart_reasons) == 1
     assert len(kiro.restart_reasons) == 1
-    assert "172.20.10.2" in sonic.restart_reasons[0]
+    assert "198.51.100.2" in sonic.restart_reasons[0]
 
     address["value"] = None
     unit._observe()  # dropped: still exactly one restart each

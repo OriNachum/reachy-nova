@@ -53,7 +53,7 @@
     {
       "id": "c3",
       "kind": "assumption",
-      "text": "a live join of iPhone (5) works: 2026-08-26 07:33 the robot activated the hotspot profile (172.20.10.2/28, default route via 172.20.10.1, internet 36 ms) and returned to bar-nachum in ~20 s total; the hotspot must be broadcasting (Ori opens the Personal Hotspot screen) for the SSID to be visible",
+      "text": "a live join of iPhone (5) works: 2026-08-26 07:33 the robot activated the hotspot profile (<hotspot-ip>, default route via <hotspot-gw>, internet 36 ms) and returned to bar-nachum in ~20 s total; the hotspot must be broadcasting (Ori opens the Personal Hotspot screen) for the SSID to be visible",
       "origin": "llm",
       "status": "confirmed",
       "honesty_conditions": [],
@@ -84,13 +84,13 @@
     {
       "id": "c5",
       "kind": "requirement",
-      "text": "operators on spark can find the robot on either network: today the registry pins last_ip 192.168.1.162 and reachy-mini.local mDNS does not resolve; on the hotspot the robot gets a 172.20.10.x address that spark only sees if spark is on the hotspot too",
+      "text": "operators on spark can find the robot on either network: today the registry pins last_ip <home-lan-ip> and reachy-mini.local mDNS does not resolve; on the hotspot the robot gets a <hotspot-ip> address that spark only sees if spark is on the hotspot too",
       "origin": "llm",
       "status": "confirmed",
       "honesty_conditions": [
         {
           "id": "h1",
-          "text": "from spark on the hotspot, 'reachy wireless find' returns the robot's 172.20.10.x address within 30 s of the robot joining, and the registry/pinned alias are refreshed rather than stale",
+          "text": "from spark on the hotspot, 'reachy wireless find' returns the robot's <hotspot-ip> address within 30 s of the robot joining, and the registry/pinned alias are refreshed rather than stale",
           "status": "confirmed",
           "instruction": ""
         },
@@ -166,7 +166,7 @@
     {
       "id": "c9",
       "kind": "success_signal",
-      "text": "live drill, both directions, zero SSH: with the harness running, remove bar-nachum (power the AP off or walk out of range) while the hotspot broadcasts -> robot on 172.20.10.x, answers a spoken question and shows kiro_session started in the journal within 60 s; restore bar-nachum -> robot back on 192.168.1.162 with the same; 'reachy wireless find' from spark on the same network returns it each time",
+      "text": "live drill, both directions, zero SSH: with the harness running, remove bar-nachum (power the AP off or walk out of range) while the hotspot broadcasts -> robot on <hotspot-ip>, answers a spoken question and shows kiro_session started in the journal within 60 s; restore bar-nachum -> robot back on <home-lan-ip> with the same; 'reachy wireless find' from spark on the same network returns it each time",
       "origin": "llm",
       "status": "confirmed",
       "honesty_conditions": [
@@ -462,7 +462,7 @@
       "honesty_conditions": [
         {
           "id": "h18",
-          "text": "robot attached to iPhone (5), Hotspot screen closed, phone in pocket for 10 min: robot still has its 172.20.10.x address and Sonic answers speech",
+          "text": "robot attached to iPhone (5), Hotspot screen closed, phone in pocket for 10 min: robot still has its <hotspot-ip> address and Sonic answers speech",
           "status": "confirmed",
           "instruction": ""
         }
@@ -597,8 +597,8 @@
     },
     {
       "id": "s4",
-      "surface": "~/.local/state/reachy/units.json registry, reachy wireless {find,list,pin}, spark nmcli (two iPhone (5) profiles, on bar-nachum at 192.168.1.118)",
-      "finding": "the two machines must be on the SAME network to talk (hotspot is 172.20.10.0/28, home is 192.168.1.0/24, no routing between); discovery must re-run after a switch (reachy wireless find) and the pinned /etc/hosts alias goes stale",
+      "surface": "~/.local/state/reachy/units.json registry, reachy wireless {find,list,pin}, spark nmcli (two iPhone (5) profiles, on bar-nachum at <spark-lan-ip>)",
+      "finding": "the two machines must be on the SAME network to talk (hotspot is <hotspot-subnet>, home is <home-subnet>, no routing between); discovery must re-run after a switch (reachy wireless find) and the pinned /etc/hosts alias goes stale",
       "seeds": [
         "c5"
       ]

@@ -52,14 +52,14 @@
     {
       "id": "c5",
       "kind": "requirement",
-      "text": "operators on spark can find the robot on either network: today the registry pins last_ip 192.168.1.162 and reachy-mini.local mDNS does not resolve; on the hotspot the robot gets a 172.20.10.x address that spark only sees if spark is on the hotspot too",
+      "text": "operators on spark can find the robot on either network: today the registry pins last_ip <home-lan-ip> and reachy-mini.local mDNS does not resolve; on the hotspot the robot gets a <hotspot-ip> address that spark only sees if spark is on the hotspot too",
       "deferred": false,
       "deferred_reason": ""
     },
     {
       "id": "h1",
       "kind": "honesty",
-      "text": "from spark on the hotspot, 'reachy wireless find' returns the robot's 172.20.10.x address within 30 s of the robot joining, and the registry/pinned alias are refreshed rather than stale",
+      "text": "from spark on the hotspot, 'reachy wireless find' returns the robot's <hotspot-ip> address within 30 s of the robot joining, and the registry/pinned alias are refreshed rather than stale",
       "deferred": false,
       "deferred_reason": ""
     },
@@ -115,7 +115,7 @@
     {
       "id": "c9",
       "kind": "success_signal",
-      "text": "live drill, both directions, zero SSH: with the harness running, remove bar-nachum (power the AP off or walk out of range) while the hotspot broadcasts -> robot on 172.20.10.x, answers a spoken question and shows kiro_session started in the journal within 60 s; restore bar-nachum -> robot back on 192.168.1.162 with the same; 'reachy wireless find' from spark on the same network returns it each time",
+      "text": "live drill, both directions, zero SSH: with the harness running, remove bar-nachum (power the AP off or walk out of range) while the hotspot broadcasts -> robot on <hotspot-ip>, answers a spoken question and shows kiro_session started in the journal within 60 s; restore bar-nachum -> robot back on <home-lan-ip> with the same; 'reachy wireless find' from spark on the same network returns it each time",
       "deferred": false,
       "deferred_reason": ""
     },

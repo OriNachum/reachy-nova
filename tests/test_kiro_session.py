@@ -777,12 +777,12 @@ def test_request_restart_logs_the_reason(caplog) -> None:
     with caplog.at_level("INFO"):
         try:
             unit.start(stop_event)
-            unit.request_restart("moved ip=172.20.10.2")
+            unit.request_restart("moved ip=198.51.100.2")
         finally:
             unit.stop(timeout=2.0)
             stop_event.set()
     messages = " | ".join(r.getMessage() for r in caplog.records)
-    assert "restart requested reason=moved ip=172.20.10.2" in messages
+    assert "restart requested reason=moved ip=198.51.100.2" in messages
 
 
 def test_request_restart_before_start_is_safe() -> None:

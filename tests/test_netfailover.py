@@ -71,7 +71,7 @@ class FakeNmcli:
 SCAN_BOTH = "iPhone (5):72:no\nbar-nachum:58:yes\n"
 ACTIVE_FALLBACK = "bar-nachum:wlan0\nlo:lo\n"
 ACTIVE_PREFERRED = "iPhone (5):wlan0\n"
-IP_OUT = "IP4.ADDRESS[1]:172.20.10.4/28\n"
+IP_OUT = "IP4.ADDRESS[1]:198.51.100.4/28\n"
 
 ROUTE_WITH_DEFAULT = (
     "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n"
@@ -176,7 +176,7 @@ def test_has_route_false_when_file_missing(tmp_path: Path):
 
 def test_current_ip_parses_nmcli_device_show():
     fake = FakeNmcli(ip=IP_OUT)
-    assert netfailover.current_ip(nmcli=fake) == "172.20.10.4"
+    assert netfailover.current_ip(nmcli=fake) == "198.51.100.4"
 
 
 def test_current_ip_none_when_absent():
@@ -281,7 +281,7 @@ def test_run_once_writes_network_change_on_activation(statedir, tmp_path):
 
     payload = json.loads((statedir / netfailover.NETWORK_CHANGE_FILENAME).read_text())
     assert payload["ssid"] == "iPhone (5)"
-    assert payload["ip"] == "172.20.10.4"
+    assert payload["ip"] == "198.51.100.4"
     assert payload["ts"] == 1234.5
     # no leftover temp file from the atomic write
     assert not [p for p in statedir.iterdir() if p.name.startswith(".")]
