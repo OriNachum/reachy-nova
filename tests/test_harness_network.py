@@ -286,9 +286,11 @@ def test_callback_invoked_once_per_transition_with_payload(tmp_path: Path) -> No
         seen = list(events)
     assert len(seen) == 2
     assert seen[0][0] == "joined"
-    assert seen[0][1] == {"ip": "192.168.1.162", "ssid": "bar-nachum"}
+    # The startup observation is the BASELINE state, flagged as such so a
+    # consumer can tell it from a change that happened while it was watching.
+    assert seen[0][1] == {"ip": "192.168.1.162", "ssid": "bar-nachum", "initial": True}
     assert seen[1][0] == "dropped"
-    assert seen[1][1] == {"reason": "no-route"}
+    assert seen[1][1] == {"reason": "no-route", "initial": False}
 
 
 def test_callback_fires_on_the_units_own_thread(tmp_path: Path) -> None:
@@ -404,3 +406,59 @@ def test_boundary_gate_still_passes() -> None:
 
     violations = module.boundary_violations(module._HARNESS_ROOT)
     assert not violations, violations
+
+
+# --------------------------------------------------------------------------- #
+# The initial observation is a baseline, not a change (task t5)               #
+# --------------------------------------------------------------------------- #
+
+
+def test_initial_observation_is_flagged_and_still_logged(tmp_path: Path, caplog) -> None:
+    """h13 wants the initial state in the journal — flagged, never suppressed."""
+    change_file = tmp_path / "network-change"
+    _write_change_file(change_file, "bar-nachum")
+    readers = FakeReaders(route=True, addr="192.168.1.162")
+    unit = _make_unit(tmp_path, readers, change_file=change_file)
+
+    seen: list[tuple[str, dict]] = []
+    unit.on_change(lambda event, info: seen.append((event, dict(info))))
+
+    unit._observe()  # INFO capture comes from the autouse _caplog_at_info fixture
+
+    assert seen == [("joined", {"ip": "192.168.1.162", "ssid": "bar-nachum", "initial": True})]
+    line = " | ".join(r.getMessage() for r in caplog.records)
+    assert "event=network" in line
+    assert "joined=bar-nachum ip=192.168.1.162" in line
+    assert "initial=true" in line
+
+
+def test_initial_dropped_observation_is_flagged_too(tmp_path: Path) -> None:
+    readers = FakeReaders(route=False, addr=None)
+    unit = _make_unit(tmp_path, readers)
+
+    seen: list[tuple[str, dict]] = []
+    unit.on_change(lambda event, info: seen.append((event, dict(info))))
+
+    unit._observe()
+
+    assert seen == [("dropped", {"reason": "no-route", "initial": True})]
+
+
+def test_transitions_after_the_baseline_are_not_initial(tmp_path: Path) -> None:
+    readers = FakeReaders(route=True, addr="192.168.1.162")
+    unit = _make_unit(tmp_path, readers)
+
+    seen: list[tuple[str, dict]] = []
+    unit.on_change(lambda event, info: seen.append((event, dict(info))))
+
+    unit._observe()  # baseline
+    readers.addr = "172.20.10.2"
+    unit._observe()  # a real roam
+    readers.route = False
+    readers.addr = None
+    unit._observe()  # a real drop
+
+    assert [event for event, _ in seen] == ["joined", "moved", "dropped"]
+    assert seen[0][1]["initial"] is True
+    assert seen[1][1]["initial"] is False
+    assert seen[2][1]["initial"] is False

@@ -535,3 +535,47 @@ class TestBackoffIntegration:
         assert faketime.mono - start_mono < 3.0
         messages = [r.getMessage() for r in caplog.records]
         assert any("Immediate restart requested" in m for m in messages)
+
+
+# --------------------------------------------------------------------------- #
+# start() never propagates a failure to the supervisor (task t5)              #
+# --------------------------------------------------------------------------- #
+
+
+class TestStartNeverRaises:
+    """A network-less start must degrade, never fail the component.
+
+    The supervisor treats a raising ``start()`` as ``start failed name=...``
+    and NEVER retries it — the exact shape that left the Kiro writer absent
+    for hours on 2026-08-26. Sonic's Bedrock connection is made inside
+    ``_run_loop`` on its own retrying thread, so the only way ``start()``
+    could raise at all is the thread spawn itself; that is guarded too.
+    """
+
+    def test_start_returns_and_names_the_degradation_when_the_thread_cannot_spawn(
+        self, monkeypatch, caplog
+    ):
+        import reachy_nova.nova_sonic as nova_sonic
+
+        sonic = NovaSonic(system_prompt="hi")
+
+        class _RefusingThread:
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(nova_sonic.threading, "Thread", _RefusingThread)
+
+        with caplog.at_level("INFO"):
+            sonic.start(threading.Event())  # must NOT raise
+
+        text = " | ".join(r.getMessage() for r in caplog.records)
+        assert "component degraded name=sonic" in text
+        assert sonic._thread is None
+
+    def test_start_spawns_the_thread_when_it_can(self):
+        sonic = NovaSonic(system_prompt="hi")
+        stop_event = threading.Event()
+        stop_event.set()  # the loop exits immediately; we only assert the spawn
+        sonic.start(stop_event)
+        assert sonic._thread is not None
+        sonic._thread.join(timeout=5.0)

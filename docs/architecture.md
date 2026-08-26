@@ -275,7 +275,11 @@ without limit. A prompt that overruns its deadline **poisons** the session
 (hard‑terminate, respawn) — a hung writer is never allowed to wedge the mind.
 Because Kiro authenticates and initialises over the network, its first spawn at
 cold boot can fail before Wi‑Fi is up; the supervisor's job is to survive that
-and bring it up later, not to give up.
+and bring it up later, not to give up. So the **initial** spawn is treated like
+every later one: a failure never propagates out of `start()` — the unit comes
+up *degraded* (no session, watchdog armed, `status()["degraded"] == True`) and
+the same capped‑backoff restart path retries until a spawn succeeds. A network
+join short‑circuits the wait entirely via `request_restart(reason)`.
 
 ### 6.2 The forge pipeline — the robot writing itself a skill
 
@@ -369,7 +373,22 @@ lives under `~/.reachy_nova/skills-active/`.
   travelling fallback. mDNS is unreliable on this LAN, so operators reach it by
   the registry address (`reachy wireless list`) or a pinned `/etc/hosts` alias.
   When the network is gone the body is unaffected; the mind loses its cloud
-  tiers, logs named drops, and reconnects with backoff.
+  tiers, logs named drops, and reconnects with backoff. The harness has its own
+  eyes on this (`harness/network.py`): a 2 s poll of the default route, the
+  wlan address and the dispatcher's `network-change` file, latched into one
+  `[SENSE stage=supervise … event=network] joined=… / dropped …` line per
+  transition. The unit's FIRST observation is flagged `initial` — it reaches
+  the journal (the boot state must be visible) but restarts nothing, since both
+  legs were just constructed against that very network. On a **join or move**
+  it restarts both cloud legs at once —
+  `sonic.request_immediate_restart()` and `kiro_unit.request_restart()` — because
+  every open connection is bound to the address that just went away, and Sonic's
+  liveness watchdog alone (180 s) cannot meet the 60 s "the mind is back" bound.
+  On a **drop** it logs only: the legs' own watchdogs own the offline state, and
+  respawning into a dead network only guarantees a failed respawn.
+  `After=network-online.target` on the unit is **ordering only** — it is reached
+  before wlan0 associates on this device, so the harness must never depend on
+  it (no `Wants=`/`Requires=`); the network‑less start is handled in code.
 - **Cold boot** has a known wrinkle: the CM4 has no RTC, so early journal
   lines carry the previous shutdown's timestamp until NTP steps the clock —
   which is also why Sonic carries a clock‑step watchdog.

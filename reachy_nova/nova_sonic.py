@@ -754,7 +754,17 @@ class NovaSonic:
         self._set_state("idle")
 
     def start(self, stop_event: threading.Event) -> None:
-        """Start the Nova Sonic session in a background thread."""
+        """Start the Nova Sonic session in a background thread.
+
+        NEVER raises. The Bedrock connection itself is made inside
+        ``_run_loop`` on the new thread, which already retries with backoff
+        forever, so a network-less start is simply a stream that has not
+        connected YET — not a failed component. Even the thread spawn is
+        guarded: the harness supervisor treats a raising ``start()`` as
+        ``start failed name=...`` and never retries it (the exact shape that
+        left the Kiro writer absent for hours on 2026-08-26), so a failure
+        here degrades to a named line instead.
+        """
         import traceback
 
         def _run():
@@ -769,8 +779,16 @@ class NovaSonic:
             finally:
                 loop.close()
 
-        self._thread = threading.Thread(target=_run, name="nova-sonic", daemon=True)
-        self._thread.start()
+        try:
+            self._thread = threading.Thread(target=_run, name="nova-sonic", daemon=True)
+            self._thread.start()
+        except Exception as e:  # noqa: BLE001 - a degraded voice beats a failed component
+            self._thread = None
+            sensory_stage(
+                "supervise", "nova", "component", f"component degraded name=sonic reason={e}"
+            )
+            logger.error(f"Nova Sonic thread failed to start: {e}")
+            return
         logger.info("Nova Sonic thread started")
 
     def stop(self) -> None:
