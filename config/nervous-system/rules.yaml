@@ -1,11 +1,48 @@
 # Nervous System Rules Configuration
 # Maps (source, type) pairs to baseline priority, urgency, and LLM evaluation settings.
+#
+# Optional per-entry fields (t6):
+#   voice: silent | brief | free | none
+#     A hint to Nova about how much it should say about the event.
+#     silent/brief/free still ALWAYS fire an inject — never about whether the
+#     event happened, only how much to say about it. Defaults to "free" when
+#     absent. reachy_nova/harness/bus.py's route_event appends a marker to
+#     the rendered inject text:
+#       silent -> " (quiet: do not speak about this)"
+#       brief  -> " (react briefly if at all)"
+#       free   -> no marker
+#       none   -> no marker (see below — none never reaches route_event's
+#                 caller as a delivered inject at all)
+#     "none" is the one exception to "the inject still always fires" above:
+#     the cue is recorded in SenseHistory (so `recall_senses` can still
+#     explain "why did you move?") but is NEVER delivered to Nova's voice
+#     model — no on_inject call, no marker. Use it for events that are pure
+#     plumbing/mechanism Nova should never narrate even quietly (t14).
+#   sense: <class>  (e.g. pat, face, sound, vision)
+#     Names the sensory class an entry belongs to — SenseHistory's semantic
+#     classification only (what `recall_senses` reports this event as). It is
+#     NOT consulted for inject dedupe (see `dedupe:` below) — two entries can
+#     share a `sense` (e.g. pat/level1 and pat/level2 are both "pat") without
+#     collapsing into one inject, because escalation from one level to the
+#     next is a distinct event the rules' own definition recognizes.
+#   dedupe: <key>
+#     The bus's dedupe IDENTITY (reachy_nova/harness/bus.py dedupe_key_for):
+#     when set, two entries sharing the same `dedupe` key collapse into one
+#     inject within the window (NOVA_SENSE_DEDUPE_S, default 10s) regardless
+#     of which fires first. Absent, an entry dedupes by its own exact
+#     resolved key ("<source>/<type>:<rule>" or "<source>/<type>") — never
+#     guessed from `sense`. Used on the two pat rule/fire overrides below
+#     (`dedupe: pat-touch`) so the runtime's shipped reflex and the Kiro
+#     overlay's own fire collapse into one inject for the same physical pat,
+#     while the raw pat/level1 -> pat/level2 escalation (a distinct sensory
+#     event) is never suppressed just because both carry `sense: pat`.
 
 # Default rule for unknown (source, type) pairs
 default:
   priority: NORMAL
   urgency: DEFERRABLE
   llm_evaluate: true
+  voice: free
 
 # Rules keyed by source/type
 rules:
@@ -235,11 +272,17 @@ rules:
 
   rule/fire:
     # A deterministic reflex fired on the robot's body — something moved that
-    # Nova did not decide, so it needs to know it happened.
+    # Nova did not decide, so it needs to know it happened. Quiet/situational
+    # on purpose (t6): the robot should not narrate its own reflex mechanism
+    # ("the '{rule}' reflex fired" was the pre-t6 text, observed live
+    # 2026-08-26 — see tests/test_rules_coverage.py for the before-state).
+    # voice: silent means this is context only — never spoken about — but it
+    # still always produces an inject; see bus.py route_event/VOICE_MARKERS.
     priority: NORMAL
     urgency: NOW
     llm_evaluate: false
-    inject_template: "Your body just reacted on its own — the '{rule}' reflex fired."
+    voice: silent
+    inject_template: "(body cue: {rule})"
 
   # Per-rule rule/fire overrides (reachy_nova/harness/bus.py rule_for): a key
   # "rule/fire:<rule-id>" wins over the generic rule/fire entry for that one
@@ -253,7 +296,10 @@ rules:
     priority: NORMAL
     urgency: NOW
     llm_evaluate: false
-    inject_template: "You feel someone petting you — your body is already leaning into it."
+    voice: brief
+    sense: pat
+    dedupe: pat-touch
+    inject_template: "(someone is petting you)"
 
   "rule/fire:nova-face-noticed":
     # The harness's own standing overlay rule (installed at startup by
@@ -264,7 +310,41 @@ rules:
     priority: NORMAL
     urgency: NOW
     llm_evaluate: false
-    inject_template: "You notice a familiar face — someone you recognize just came into view."
+    voice: silent
+    sense: face
+    inject_template: "(a familiar face is in view)"
+
+  "rule/fire:nova-pat-cheer":
+    # A second, Kiro-authored overlay rule that ALSO fires on a pat (live
+    # finding 2026-08-26: one physical pat produced two injects ~8s apart —
+    # the shipped pat-acknowledge fire and this overlay's own fire). Same
+    # `dedupe: pat-touch` key as pat-acknowledge (F3 fix) so NovaBus's
+    # per-key dedupe (t7/F3, bus.py) collapses both into one inject
+    # regardless of which rule name arrives first — narrower than `sense`,
+    # which stays "pat" on both purely for SenseHistory classification.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    voice: brief
+    sense: pat
+    dedupe: pat-touch
+    inject_template: "(someone is petting you)"
+
+  "rule/fire:look-toward-sound":
+    # The runtime's own reflex that turns the head toward a sound source
+    # (LIVE FINDING L3/follow-up above: this is the rule that kept re-firing
+    # every ~10s while a face lock inhibited it). LIVE FOLLOW-UP (2026-08-26
+    # 19:05-19:08): even at `voice: silent` this fire made Sonic call
+    # look_at_sound and narrate "I'm still following that sound" every time —
+    # pure body-reflex mechanism Nova should never act or comment on. t14:
+    # `voice: none` records it (recall_senses can still say "you glanced
+    # toward a sound") without ever handing the model a sentence to react to.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    voice: none
+    sense: sound
+    inject_template: "(you glanced toward a sound)"
 
   rule/suppress:
     # A reflex was considered and held back (cooldown/rearming/inhibited).
@@ -290,18 +370,57 @@ rules:
 
   intent/applied:
     # A standing symbolic goal took effect in the runtime.
+    #
+    # LIVE FINDING L3 (2026-08-26 18:26-18:31): `{name}` is the intent KIND,
+    # not a thing a person said — so every quiet arm (set_inhibition, the
+    # mute/unmute pair behind stay_silent) narrated "Your standing intention
+    # 'set_inhibition' is now in effect." out loud. `voice: silent` (t6) still
+    # let this READ as a quiet marker on the rendered text, but Sonic kept
+    # narrating it anyway — LIVE FOLLOW-UP (2026-08-26 19:05-19:08, same
+    # device): with `silent`, Sonic still said "a standing intention called
+    # 'set_inhibition' is now active" out loud after end_silence. `silent`
+    # only hints; it never stops the model from having something to say. t14
+    # moves this to `voice: none`: still recorded (recall_senses can explain
+    # it), but the model is never given the sentence to begin with.
     priority: NORMAL
     urgency: DEFERRABLE
     llm_evaluate: false
+    voice: none
     inject_template: "Your standing intention '{name}' is now in effect."
 
   intent/blocked:
     # The runtime refused a standing goal — a failure Nova must not miss,
     # otherwise it keeps believing it asked for something that never landed.
+    #
+    # LIVE FINDING L3: while a face lock was held, the RUNTIME's own
+    # `look-toward-sound` rule kept re-admitting `orient-to-sound` and kept
+    # being refused by the standing inhibition, ~once every 10 s. Rendered
+    # with `{name}` (= the intent kind, `set_inhibition`) that read as "The
+    # runtime blocked your intention 'set_inhibition'." — misleading (it is
+    # the BODY's reflex being held back, exactly as Nova asked, not Nova's
+    # own request failing) and relentless.
+    #
+    # The wire payload for an intent event is {t, ts, tick, action, name,
+    # payload} (reachy-mini-cli reachy/export/runtime.py runtime_to_jsonl);
+    # the blocked behaviour's own name is NOT a top-level field — the
+    # IntentDriver emits `behavior=` but `_intent_status_event` keeps only
+    # kind/cmd_id/result/reason/goal, and `payload` is nested. So the text
+    # names no behaviour at all rather than rendering an empty `{behavior}`.
+    # `dedupe: reflex-held` collapses the ~10 s repeat into one record per
+    # dedupe window either way.
+    #
+    # LIVE FOLLOW-UP (2026-08-26 19:05-19:08, same device as L3): with
+    # `voice: silent`, every `(body cue: look-toward-sound)` rule/fire made
+    # Sonic call look_at_sound and say "I'm still following that sound" —
+    # `silent` marks the text as quiet, it doesn't stop the model choosing to
+    # act/speak on it. t14 moves this to `voice: none`: recorded for
+    # `recall_senses`, never handed to the model at all.
     priority: NORMAL
     urgency: NOW
     llm_evaluate: false
-    inject_template: "The runtime blocked your intention '{name}'."
+    voice: none
+    dedupe: reflex-held
+    inject_template: "(a body reflex was held back)"
 
   motion/admit:
     priority: LOW
@@ -333,25 +452,31 @@ rules:
 
   pat/level1:
     # A light touch — the runtime's discrete pat block, one step up from the
-    # antenna-driven reflex Nova already handles in-process.
+    # in-process reflex Nova already handles via rule/fire:pat-acknowledge.
     priority: NORMAL
     urgency: NOW
     llm_evaluate: false
-    inject_template: "You feel someone patting you gently."
+    voice: brief
+    sense: pat
+    inject_template: "(someone is patting you gently)"
 
   pat/level2:
     # A firmer or sustained touch — same discrete block, stronger contact.
     priority: NORMAL
     urgency: NOW
     llm_evaluate: false
-    inject_template: "You feel someone patting you more firmly now."
+    voice: brief
+    sense: pat
+    inject_template: "(someone is patting you more firmly)"
 
   pat/detected:
     # A touch event with no level distinction the runtime bothered to make.
     priority: NORMAL
     urgency: NOW
     llm_evaluate: false
-    inject_template: "You feel someone touching you."
+    voice: brief
+    sense: pat
+    inject_template: "(someone is touching you)"
 
   face/recognized:
     # The runtime's own discrete face block, payload {id, name, score} — the
@@ -377,3 +502,30 @@ rules:
     urgency: NOW
     llm_evaluate: true
     inject_template: "Right now you see: {description}"
+
+  # --- Gaze-lock lifecycle (t13) ---------------------------------------------
+  # Published by the runtime while a lock_face gaze lock (task t9's
+  # LOCK_FACE/RELEASE_FACE intents) is held. The lock itself PERSISTS across a
+  # face-lost — this is a "can't currently see them" notice, not a release.
+
+  motion/face-lost:
+    # Payload {id, absent_s}: the locked face has been out of view for
+    # absent_s seconds, but the lock is still held (the runtime keeps trying).
+    # Worth a quiet situational cue, not a whole reaction.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    voice: brief
+    sense: face
+    inject_template: "(the person you were watching is out of view)"
+
+  motion/lock-released:
+    # Payload {id, reason: requested|mind-offline|max-hold} — the runtime
+    # actually dropped the lock. Silent: this is bookkeeping for the harness's
+    # own local lock belief (reachy_nova/harness/lock_state.py), not something
+    # worth narrating out loud.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    voice: silent
+    inject_template: "(you stopped following the person: {reason})"

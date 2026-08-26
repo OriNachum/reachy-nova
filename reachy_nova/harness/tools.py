@@ -52,7 +52,9 @@ package: file paths are the whole contract.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -60,8 +62,12 @@ from pathlib import Path
 
 from reachy_nova import sensory_log
 from reachy_nova.harness import statedir
+from reachy_nova.harness.lock_state import LockState
+from reachy_nova.harness.quiet import QuietState
 from reachy_nova.harness.rules_overlay import RuleRefused, upsert_rule
 from reachy_nova.nova_browser import act_enabled
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Names + constants                                                           #
@@ -75,9 +81,19 @@ GOTO = "goto"
 CREATE_RULE = "create_rule"
 BROWSE = "browse"
 ENROLL_FACE = "enroll_face"
+LOCK_FACE = "lock_face"
+RELEASE_FACE = "release_face"
+LOOK_AT_FACE = "look_at_face"
+LOOK_AT_SOUND = "look_at_sound"
 FORGE = "forge"
 USE_SKILL = "use_skill"
 AUTHOR_RULE = "author_rule"
+RAISE_VOICE = "raise_voice"
+LOWER_VOICE = "lower_voice"
+SET_VOICE_LEVEL = "set_voice_level"
+RECALL_SENSES = "recall_senses"
+STAY_SILENT = "stay_silent"
+END_SILENCE = "end_silence"
 
 #: The harness's ENTIRE action set, in publication order. Each addition past
 #: the original six is a deliberate widening of the blast radius, never an
@@ -85,7 +101,14 @@ AUTHOR_RULE = "author_rule"
 #: :class:`~reachy_nova.nova_browser.NovaBrowser`, not the intents spool, and
 #: stays refused whenever ``NOVA_ACT_ENABLED`` is off. ``enroll_face`` (task t8)
 #: is the second: it is spool-backed like the original five, but writes a
-#: durable identity rather than a transient pose.
+#: durable identity rather than a transient pose. ``recall_senses`` (task t8)
+#: is the third: like the voice-level tools it is dispatched locally rather
+#: than through the intents spool, reading the in-process
+#: :class:`~reachy_nova.harness.sense_history.SenseHistory` ring buffer
+#: instead of talking to the runtime at all. ``lock_face``/``release_face``
+#: (task t9) are the fourth and fifth: spool-backed no-argument ops, same
+#: shape as the original five, riding the runtime's own gaze-lock intent
+#: kinds.
 ACTION_SET: tuple[str, ...] = (
     RUN_BEHAVIOR,
     DECLARE_GOAL,
@@ -95,9 +118,19 @@ ACTION_SET: tuple[str, ...] = (
     CREATE_RULE,
     BROWSE,
     ENROLL_FACE,
+    LOCK_FACE,
+    RELEASE_FACE,
+    LOOK_AT_FACE,
+    LOOK_AT_SOUND,
     FORGE,
     USE_SKILL,
     AUTHOR_RULE,
+    RAISE_VOICE,
+    LOWER_VOICE,
+    SET_VOICE_LEVEL,
+    RECALL_SENSES,
+    STAY_SILENT,
+    END_SILENCE,
 )
 
 #: Seconds a tool call waits for the engine to confirm before degrading.
@@ -117,6 +150,20 @@ HEAD_AXES: tuple[str, ...] = ("x", "y", "z", "roll", "pitch", "yaw")
 #: published ceiling, re-checked here so a runaway duration is refused where
 #: the model can read the refusal.
 MAX_GOTO_DURATION_S = 10.0
+
+#: The runtime behaviours behind the two gaze alias tools (finding L4). The
+#: TOOL names use underscores because that is what the model reached for live
+#: (2026-08-26: Sonic called ``look_at_face``, got "unknown tool", and gave
+#: up rather than retrying as ``run_behavior(name="look-at-face")``); the WIRE
+#: names keep the engine's own hyphenated library spelling.
+GAZE_ALIAS_BEHAVIORS: dict[str, str] = {
+    LOOK_AT_FACE: "look-at-face",
+    LOOK_AT_SOUND: "look-at-sound",
+}
+
+#: How long a gaze one-shot runs when the model names no duration — the same
+#: "about 2 seconds" the ``run_behavior`` description already advertises.
+DEFAULT_GAZE_DURATION_S = 2.0
 
 #: Top-level fields a goto command may carry.
 _GOTO_FIELDS = frozenset({"label", "head", "antennas", "body_yaw", "duration", "interpolation"})
@@ -175,6 +222,90 @@ ENROLL_NAME_TOO_LONG_REASON = (
 #: locally is that it is text a person could actually be called.
 ENROLL_NAME_UNPRINTABLE_REASON = "'name' must contain only printable characters"
 
+#: Voice-level bounds — clamp, never refuse: a model asking to go louder/
+#: quieter than the daemon supports should still get a usable ``ok: true``
+#: at the nearest edge, with a note explaining why it stopped there.
+MIN_VOICE_LEVEL = 10
+MAX_VOICE_LEVEL = 100
+DEFAULT_VOICE_STEP = 10
+
+#: Refusal when ``raise_voice``/``lower_voice``/``set_voice_level`` are called
+#: without a wired :class:`~reachy_nova.harness.daemon_client.DaemonClient`
+#: (mirrors ``FORGE_NOT_WIRED_REASON``'s component-absent shape).
+VOICE_NOT_WIRED_REASON = "voice level control is not wired up yet"
+
+#: Appended to a voice tool's ``note`` when the daemon applied the new level
+#: but writing :func:`~reachy_nova.harness.statedir.volume_state_path` failed.
+#: The change is real RIGHT NOW, so ``ok`` stays True — but it will not
+#: survive a restart (``daemon_client.restore_volume`` reads only that file),
+#: and a payload that stayed silent about it would be claiming a durability it
+#: does not have. ``persisted: false`` rides along as a machine-readable flag.
+VOLUME_NOT_PERSISTED_NOTE = "not saved for next restart"
+
+#: ``recall_senses`` (task t8) — bounds on how many recent senses a call may
+#: ask for. Out-of-range values are CLAMPED, never refused: a model asking for
+#: too much/too little history should still get a usable answer, same
+#: philosophy as the voice-level tools' clamp-not-refuse.
+MIN_RECALL_SENSES_N = 1
+MAX_RECALL_SENSES_N = 20
+DEFAULT_RECALL_SENSES_N = 5
+
+#: Refusal when ``recall_senses`` is called without a wired
+#: :class:`~reachy_nova.harness.sense_history.SenseHistory` (mirrors
+#: ``VOICE_NOT_WIRED_REASON``'s component-absent shape).
+HISTORY_NOT_WIRED_REASON = "sense history not wired"
+
+#: ``stay_silent`` (task t12) — how long a quiet may be asked for, in minutes.
+#: Unlike the voice level these are REFUSED rather than clamped: "be quiet for
+#: a second" and "be quiet for a week" are both far more likely to be a
+#: mis-heard number than a real request, and silently turning either into
+#: something else produces a robot that is quiet for the wrong length of time
+#: with nobody able to see why.
+MIN_QUIET_MINUTES = 1
+MAX_QUIET_MINUTES = 180
+
+#: Refusal when the requested quiet is outside :data:`MIN_QUIET_MINUTES` ..
+#: :data:`MAX_QUIET_MINUTES`.
+QUIET_MINUTES_REASON = (
+    f"'minutes' must be between {MIN_QUIET_MINUTES} and {MAX_QUIET_MINUTES} "
+    "— ask them how long they want quiet and try again"
+)
+
+#: Refusal when the quiet tools are called without a wired
+#: :class:`~reachy_nova.harness.quiet.QuietState` (same component-absent shape
+#: as ``VOICE_NOT_WIRED_REASON`` / ``HISTORY_NOT_WIRED_REASON``).
+QUIET_NOT_WIRED_REASON = "timed quiet is not wired up yet"
+
+#: The runtime behavior whose admission carries the BODY's own voice.
+#:
+#: PLAN RISK (probed live in agentculture/reachy-mini-cli, read-only): a rule's
+#: ``say`` text does NOT ride the ``speak`` behavior — it is handed to a
+#: separate injected speech seam
+#: (``reachy/behavior/rule_engine.py:493`` -> ``SpeechActuator.say``,
+#: ``reachy/behavior/speech_act.py:468``), and the library's ``speak`` entry is
+#: explicitly "MOTION ONLY ... not a voice" (``reachy/behavior/library.py:139``
+#: and the catalog entry at ``reachy/behavior/library.py:398``). Inhibiting
+#: ``speak`` therefore silences a rule's words only INDIRECTLY: the inhibited
+#: set is checked against ``rule.behavior`` before the rule fires at all
+#: (``reachy/behavior/rule_engine.py:466``), so a rule that pairs
+#: ``run = "speak"`` with ``say = "..."`` — the sanctioned pairing the shipped
+#: rules use (``reachy/behavior/default_rules.toml:164,180-183``) — is
+#: suppressed whole, words included. A rule that says something while running
+#: some OTHER behavior (``run = "nod"`` + ``say = "..."``) would still speak.
+#: That is the honest limit of the c44 decision; nothing else in the runtime's
+#: intent surface can mute the speech actuator directly.
+SPEAK_BEHAVIOR = "speak"
+# Runtime intent kinds (reachy-mini-cli t17) that gate the body's OWN voice —
+# rule `say` bypasses the 'speak' behavior (rule_engine.py -> speech_act.py),
+# so the inhibition above only silences rules that run=speak; `mute` closes
+# the rest at the speech actuator. Both are spooled: belt and braces.
+MUTE_OP = "mute"
+UNMUTE_OP = "unmute"
+
+#: How often the component tick polls the quiet deadline so an EXPIRY (not
+#: just a hand-release) also restores the body's voice.
+QUIET_TICK_S = 1.0
+
 
 class ToolRefused(ValueError):
     """A pre-flight refusal: nothing was written to the spool."""
@@ -208,9 +339,11 @@ _HEAD_SCHEMA = {
 TOOL_SPECS: list[dict] = [
     _spec(
         RUN_BEHAVIOR,
-        "Move the body once: run a named behaviour (nod, shake, antenna-sway, ...) "
-        "for a bounded time. One-shot — the robot does it and stops. Use this for "
-        "a single reaction right now.",
+        "Move the body once: run a named behaviour (nod, shake, antenna-sway, "
+        "'look-at-sound' to turn toward the last sound you heard, 'look-at-face' "
+        "to glance at the person in front of you, ...) for a bounded time — the "
+        "gaze one-shots default to about 2 seconds. One-shot — the robot does it "
+        "and stops. Use this for a single reaction right now.",
         {
             "type": "object",
             "properties": {
@@ -418,6 +551,56 @@ TOOL_SPECS: list[dict] = [
         },
     ),
     _spec(
+        LOCK_FACE,
+        "Keep looking at the person you are facing until told to stop: locks "
+        "your gaze onto their face so you keep tracking them as they move, "
+        "even past a single glance. Call release_face to stop.",
+        {"type": "object", "properties": {}, "required": []},
+    ),
+    _spec(
+        RELEASE_FACE,
+        "Stop following a locked face and look away: releases a gaze lock "
+        "started with lock_face, so you go back to normal look-around "
+        "behavior. Call it whenever someone says 'look away', 'stop "
+        "following', or 'you can stop looking at me'.",
+        {"type": "object", "properties": {}, "required": []},
+    ),
+    _spec(
+        LOOK_AT_FACE,
+        "Glance at the person in front of you: turns your head toward the "
+        "face you can see, once, for a couple of seconds, then back to what "
+        "you were doing. For a lasting gaze that follows them, use lock_face "
+        "instead.",
+        {
+            "type": "object",
+            "properties": {
+                "duration": {
+                    "type": "number",
+                    "description": "Seconds to hold the glance. Omit for the "
+                    f"default ({DEFAULT_GAZE_DURATION_S:g}).",
+                },
+            },
+            "required": [],
+        },
+    ),
+    _spec(
+        LOOK_AT_SOUND,
+        "Turn toward the last sound: swings your head to where you last "
+        "heard something, once, for a couple of seconds. Use it when a noise "
+        "catches your attention.",
+        {
+            "type": "object",
+            "properties": {
+                "duration": {
+                    "type": "number",
+                    "description": "Seconds to hold the turn. Omit for the "
+                    f"default ({DEFAULT_GAZE_DURATION_S:g}).",
+                },
+            },
+            "required": [],
+        },
+    ),
+    _spec(
         FORGE,
         "Teach yourself a new skill: describe what the skill should do and a "
         "coder agent writes it in the background. You will be told when it is "
@@ -475,6 +658,102 @@ TOOL_SPECS: list[dict] = [
             "required": ["goal"],
         },
     ),
+    _spec(
+        RAISE_VOICE,
+        "Speak a bit louder — call it when someone says 'speak up' or "
+        "'louder'. Confirm briefly and naturally afterward — "
+        "do not read out the volume number.",
+        {
+            "type": "object",
+            "properties": {
+                "step": {
+                    "type": "number",
+                    "description": f"How much louder, {MIN_VOICE_LEVEL}-{MAX_VOICE_LEVEL} "
+                    f"scale. Omit for the default step ({DEFAULT_VOICE_STEP}).",
+                },
+            },
+            "required": [],
+        },
+    ),
+    _spec(
+        LOWER_VOICE,
+        "Speak a bit quieter — call it when someone says 'quieter', "
+        "'softer', or 'turn it down'. Confirm briefly and naturally "
+        "afterward — do not read out the volume number.",
+        {
+            "type": "object",
+            "properties": {
+                "step": {
+                    "type": "number",
+                    "description": f"How much quieter, {MIN_VOICE_LEVEL}-{MAX_VOICE_LEVEL} "
+                    f"scale. Omit for the default step ({DEFAULT_VOICE_STEP}).",
+                },
+            },
+            "required": [],
+        },
+    ),
+    _spec(
+        SET_VOICE_LEVEL,
+        "Set your speaking volume to an exact level. Confirm briefly and "
+        "naturally afterward — do not read out the volume number.",
+        {
+            "type": "object",
+            "properties": {
+                "volume": {
+                    "type": "number",
+                    "description": f"Target volume, {MIN_VOICE_LEVEL}-{MAX_VOICE_LEVEL}.",
+                },
+            },
+            "required": ["volume"],
+        },
+    ),
+    _spec(
+        RECALL_SENSES,
+        "Recall what you actually just sensed and did: call it when someone "
+        "says 'why did you do that', 'what did you feel', or 'what just "
+        "happened' — and whenever they ask why you moved — and answer "
+        "from the actual entries in your own words — never describe internal "
+        "mechanisms like tools, injects, or rules.",
+        {
+            "type": "object",
+            "properties": {
+                "n": {
+                    "type": "integer",
+                    "description": f"How many recent senses to recall, "
+                    f"{MIN_RECALL_SENSES_N}-{MAX_RECALL_SENSES_N}. Omit for the "
+                    f"default ({DEFAULT_RECALL_SENSES_N}).",
+                },
+            },
+            "required": [],
+        },
+    ),
+    _spec(
+        STAY_SILENT,
+        "Stay quiet for a while: use it when someone asks you to be quiet, to "
+        "stop talking, or to leave them alone for a bit. Acknowledge it out "
+        "loud ONCE, briefly and warmly, and then say nothing at all until the "
+        "time is up or they tell you that you can talk again. You keep "
+        "listening and reacting with your body the whole time.",
+        {
+            "type": "object",
+            "properties": {
+                "minutes": {
+                    "type": "number",
+                    "description": f"How long to stay quiet, "
+                    f"{MIN_QUIET_MINUTES}-{MAX_QUIET_MINUTES} minutes.",
+                },
+            },
+            "required": ["minutes"],
+        },
+    ),
+    _spec(
+        END_SILENCE,
+        "You can talk again: ends a quiet period early, when someone says you "
+        "may speak. Leaving quiet is silent by default — do not announce it "
+        "and do not apologise, just start speaking normally again when there "
+        "is something worth saying.",
+        {"type": "object", "properties": {}, "required": []},
+    ),
 ]
 
 
@@ -487,6 +766,46 @@ def _number(value: object, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ToolRefused(f"{label} must be a number (got {value!r})")
     return float(value)
+
+
+def _voice_target(tool_name: str, params: Mapping, current: int) -> tuple[int, str | None]:
+    """Pure: the clamped target level for *tool_name* given *current*, plus a
+    "at maximum"/"at minimum" note when the raw (unclamped) target overshot.
+
+    No I/O and no lock — :meth:`IntentTools._voice_apply` holds the lock
+    around the read/compute/set/persist run this feeds into.
+    """
+    if tool_name == SET_VOICE_LEVEL:
+        target = _number(params.get("volume"), "'volume'")
+    else:
+        raw_step = params.get("step")
+        step = DEFAULT_VOICE_STEP if raw_step is None else _number(raw_step, "'step'")
+        target = current + step if tool_name == RAISE_VOICE else current - step
+
+    clamped = int(round(max(MIN_VOICE_LEVEL, min(MAX_VOICE_LEVEL, target))))
+    note = None
+    if target > MAX_VOICE_LEVEL:
+        note = "at maximum"
+    elif target < MIN_VOICE_LEVEL:
+        note = "at minimum"
+    return clamped, note
+
+
+def _persist_or_note(applied: int, note: str | None) -> dict:
+    """Persist *applied*; build the result payload, folding a persistence
+    failure into ``note``/``persisted`` exactly as :meth:`IntentTools._voice_apply`
+    used to inline.
+    """
+    persisted = _persist_volume(applied)
+    payload: dict = {"ok": True, "volume": applied}
+    if not persisted:
+        # ok stays True — the daemon really did apply it — but the payload
+        # must not imply it will still be there after a restart.
+        payload["persisted"] = False
+        note = VOLUME_NOT_PERSISTED_NOTE if not note else f"{note}; {VOLUME_NOT_PERSISTED_NOTE}"
+    if note:
+        payload["note"] = note
+    return payload
 
 
 def _params(raw: object) -> dict[str, float]:
@@ -642,6 +961,44 @@ def _build_enroll_face(args: Mapping) -> dict:
     return {"op": ENROLL_OP, "name": name, "face": ENROLL_FACE_TARGET}
 
 
+def _build_lock_face(args: Mapping) -> dict:  # noqa: ARG001 - no arguments to read
+    """``lock_face`` — keep the gaze on whoever the runtime already knows."""
+    return {"op": LOCK_FACE}
+
+
+def _build_release_face(args: Mapping) -> dict:  # noqa: ARG001 - no arguments to read
+    """``release_face`` — stop a standing gaze lock."""
+    return {"op": RELEASE_FACE}
+
+
+def _build_gaze_alias(tool_name: str, args: Mapping) -> dict:
+    """``look_at_face``/``look_at_sound`` — thin aliases over ``run_behavior``.
+
+    They add no capability: each is exactly the ``run_behavior`` spool op for
+    the matching gaze one-shot, with a default duration filled in. They exist
+    because a name the model already reaches for is worth more than the name
+    we would have preferred — live on 2026-08-26 Sonic called ``look_at_face``,
+    was pre-flight refused ("unknown tool"), and abandoned the gesture
+    entirely rather than reaching for ``run_behavior(name="look-at-face")``
+    (finding L4). Building through :func:`_build_run_behavior` rather than
+    hand-rolling the payload keeps the two paths from ever drifting apart.
+    """
+    duration = args.get("duration")
+    if duration is None:
+        duration = DEFAULT_GAZE_DURATION_S
+    return _build_run_behavior({"name": GAZE_ALIAS_BEHAVIORS[tool_name], "duration": duration})
+
+
+def _build_look_at_face(args: Mapping) -> dict:
+    """``look_at_face`` — the ``look-at-face`` one-shot, under the name the model uses."""
+    return _build_gaze_alias(LOOK_AT_FACE, args)
+
+
+def _build_look_at_sound(args: Mapping) -> dict:
+    """``look_at_sound`` — the ``look-at-sound`` one-shot, under the name the model uses."""
+    return _build_gaze_alias(LOOK_AT_SOUND, args)
+
+
 _BUILDERS = {
     RUN_BEHAVIOR: _build_run_behavior,
     DECLARE_GOAL: _build_declare_goal,
@@ -649,7 +1006,15 @@ _BUILDERS = {
     SET_INHIBITION: _build_set_inhibition,
     GOTO: _build_goto,
     ENROLL_FACE: _build_enroll_face,
+    LOCK_FACE: _build_lock_face,
+    RELEASE_FACE: _build_release_face,
+    LOOK_AT_FACE: _build_look_at_face,
+    LOOK_AT_SOUND: _build_look_at_sound,
 }
+
+#: Dispatched locally against the daemon client, never through the intents
+#: spool — there is no behavior engine on the other end of a volume change.
+VOICE_TOOLS: frozenset[str] = frozenset({RAISE_VOICE, LOWER_VOICE, SET_VOICE_LEVEL})
 
 
 # --------------------------------------------------------------------------- #
@@ -675,11 +1040,51 @@ class IntentTools:
         browser: object | None = None,
         on_browse_progress: Callable[[str], None] | None = None,
         forge_leg: object | None = None,
+        daemon_client: object | None = None,
+        history: object | None = None,
+        quiet: QuietState | None = None,
+        lock_state: LockState | None = None,
     ) -> None:
         # ``forge``/``use_skill`` (deviation d1) drive a ForgeLeg handle the
         # same way ``browse`` drives a NovaBrowser: injected, and refused with
         # a named reason when absent rather than half-working.
         self._forge_leg = forge_leg
+        # ``raise_voice``/``lower_voice``/``set_voice_level`` (task t10) drive
+        # a DaemonClient handle directly — not spool-backed, refused with a
+        # named reason when absent, same shape as the browser/forge legs.
+        self._daemon_client = daemon_client
+        # Tool calls arrive on their own threads (app.py's _on_tool_use), so a
+        # relative change ("a bit louder") is a read-compute-set-persist
+        # transaction two callers can be inside at once. Unlocked, two
+        # concurrent +10s from 50 both read 50 and both write 60: one request
+        # silently vanishes. This lock covers the WHOLE transaction, shared by
+        # raise/lower/set.
+        self._voice_lock = threading.Lock()
+        # ``recall_senses`` (task t8) reads a SenseHistory ring buffer
+        # directly — same absent-component shape again, never half-working.
+        self._history = history
+        # ``stay_silent``/``end_silence`` (task t12) drive the SAME QuietState
+        # the speaker gates on and the bus marks injects with — one object,
+        # three readers, so the mind-side quiet can never disagree with itself.
+        self._quiet = quiet
+        # ``lock_face``/``release_face`` (task t13) also update the harness's
+        # own LockState belief — public attribute, not a private one, so the
+        # supervisor can find it on this component (see build_app/
+        # supervisor._find_lock_state) without a second constructor argument
+        # threaded through every layer between them.
+        self.lock_state = lock_state
+        # Did WE put SPEAK_BEHAVIOR into the runtime's inhibited set? Only then
+        # may we take it back out: somebody else holding 'speak' down (an
+        # operator, a rule) must survive our release untouched.
+        self._quiet_lock = threading.RLock()
+        self._quiet_added_speak = False
+        self._quiet_muted_voice = False
+        # Have we already reconciled with a quiet that outlived our process?
+        # See _reclaim_body_ownership; any mute/unmute we perform ourselves
+        # counts as the reconciliation.
+        self._reclaimed = False
+        self._tick_stop: threading.Event | None = None
+        self._ticker: threading.Thread | None = None
         self._commands_dir = Path(commands_dir) if commands_dir is not None else None
         self._results_dir = Path(results_dir) if results_dir is not None else None
         self.await_timeout = float(await_timeout)
@@ -764,7 +1169,11 @@ class IntentTools:
             payload = {"ok": False, "error": str(err)}
         except Exception as err:  # pragma: no cover - defensive: never crash the voice loop
             payload = {"ok": False, "error": f"{type(err).__name__}: {err}"}
-        _log_outcome(tool_name, payload)
+        # Voice tools log their own single ``event=volume`` senselog line
+        # (old=N new=M) inside ``_voice_tool`` — the generic per-tool-name
+        # line here would be a second line for the same call.
+        if tool_name not in VOICE_TOOLS:
+            _log_outcome(tool_name, payload)
         return json.dumps(payload)
 
     def _dispatch(self, tool_name: str, params: dict) -> dict:
@@ -780,7 +1189,36 @@ class IntentTools:
             return self._browse(params)
         if tool_name in (FORGE, USE_SKILL, AUTHOR_RULE):
             return self._forge_tool(tool_name, params)
+        if tool_name in VOICE_TOOLS:
+            return self._voice_tool(tool_name, params)
+        if tool_name == RECALL_SENSES:
+            return self._recall_senses(params)
+        if tool_name == STAY_SILENT:
+            return self._stay_silent(params)
+        if tool_name == END_SILENCE:
+            return self._end_silence(params)
+        if tool_name in (LOCK_FACE, RELEASE_FACE):
+            return self._lock_face_tool(tool_name, params)
         return self.submit_and_await(_BUILDERS[tool_name](params))
+
+    def _lock_face_tool(self, tool_name: str, params: Mapping) -> dict:
+        """``lock_face``/``release_face`` — spool round-trip, then mirror the
+        engine's CONFIRMED verdict into :attr:`lock_state`.
+
+        Only an ``ok: true`` result updates the belief: a refusal ("no face
+        known") or a degraded ``ok: null`` (unconfirmed) result means the
+        body's actual lock state did not observably change, so the belief must
+        not either. ``release_face``'s own "not locked" no-op still carries
+        ``ok: true`` (see the tool's docstring in this module's test suite),
+        which is exactly the state the belief should end up in either way.
+        """
+        result = self.submit_and_await(_BUILDERS[tool_name](params))
+        if self.lock_state is not None and result.get("ok") is True:
+            if tool_name == LOCK_FACE:
+                self.lock_state.mark_locked()
+            else:
+                self.lock_state.mark_released("requested")
+        return result
 
     def _forge_tool(self, tool_name: str, params: Mapping) -> dict:
         """``forge``/``use_skill``/``author_rule`` — delegate to the injected ForgeLeg."""
@@ -856,16 +1294,345 @@ class IntentTools:
         self._browser.queue_task(instruction, url)
         return {"ok": True, "queued": True, "instruction": instruction, "url": url}
 
+    # -- voice level (task t10) --------------------------------------------
+
+    def _voice_tool(self, tool_name: str, params: Mapping) -> dict:
+        """``raise_voice``/``lower_voice``/``set_voice_level`` — one senselog line.
+
+        Unlike the spool-backed tools, this logs itself (event ``volume``,
+        ``old=N new=M``) rather than going through the generic per-tool-name
+        line in :func:`_log_outcome` — ``execute`` skips that call for
+        members of :data:`VOICE_TOOLS` so exactly one line is ever emitted,
+        success or failure.
+        """
+        old: int | None = None
+        new: int | None = None
+        try:
+            payload, old, new = self._voice_apply(tool_name, params)
+        except ToolRefused as err:
+            payload = {"ok": False, "error": str(err)}
+        if payload.get("ok") is True:
+            detail = f"old={old} new={new}"
+        else:
+            detail = f"refused reason={payload.get('error')}"
+        sensory_log.stage(SENSE_STAGE, SENSE_SOURCE, "volume", detail)
+        return payload
+
+    def _voice_apply(self, tool_name: str, params: Mapping) -> tuple[dict, int, int]:
+        """Compute + apply the new level; raises :class:`ToolRefused` on any failure.
+
+        The whole read -> compute -> set -> persist run is held under
+        :attr:`_voice_lock`; see its comment for why a relative change is not
+        safe to interleave.
+        """
+        if self._daemon_client is None:
+            raise ToolRefused(VOICE_NOT_WIRED_REASON)
+        with self._voice_lock:
+            try:
+                current = int(self._daemon_client.get_volume())
+            except Exception as err:  # noqa: BLE001 - any client failure is a refusal
+                raise ToolRefused(f"could not read current volume: {err}") from err
+
+            clamped, note = _voice_target(tool_name, params, current)
+
+            if clamped == current:
+                applied = current
+            else:
+                try:
+                    applied = int(self._daemon_client.set_volume(clamped))
+                except Exception as err:  # noqa: BLE001 - any client failure is a refusal
+                    raise ToolRefused(f"could not set volume: {err}") from err
+
+            payload = _persist_or_note(applied, note)
+
+        return payload, current, applied
+
+    # -- recall_senses (task t8) -------------------------------------------
+
+    def _recall_senses(self, params: Mapping) -> dict:
+        """``recall_senses`` — read back the actual recent sense history.
+
+        Refused (before ever touching ``self._history``) when no
+        :class:`~reachy_nova.harness.sense_history.SenseHistory` was wired at
+        construction. ``n`` is CLAMPED into ``[MIN_RECALL_SENSES_N,
+        MAX_RECALL_SENSES_N]`` rather than refused — same clamp-not-refuse
+        philosophy as the voice-level tools, since the model asking for too
+        much/too little history should still get a usable answer.
+        """
+        if self._history is None:
+            raise ToolRefused(HISTORY_NOT_WIRED_REASON)
+        raw_n = params.get("n")
+        if raw_n is None:
+            n = DEFAULT_RECALL_SENSES_N
+        else:
+            n = int(_number(raw_n, "'n'"))
+        clamped = max(MIN_RECALL_SENSES_N, min(MAX_RECALL_SENSES_N, n))
+        return {"ok": True, "senses": self._history.recent(clamped)}
+
+
+    # -- timed quiet (task t12) --------------------------------------------
+
+    def _stay_silent(self, params: Mapping) -> dict:
+        """``stay_silent`` — close BOTH mouths, and say so once.
+
+        Two independent silences are armed here, in that order:
+
+        1. the MIND's — :class:`~reachy_nova.harness.quiet.QuietState`, which
+           gates the Sonic speaker in-process and marks every inject;
+        2. the BODY's — a merged ``set_inhibition`` that adds
+           :data:`SPEAK_BEHAVIOR` to whatever the runtime is already holding
+           back (see that constant for exactly how much of the runtime's own
+           voice that reaches, and what it does not).
+
+        The BODY goes first, and that ordering is load-bearing.
+        ``set_inhibition`` REPLACES the whole inhibited set on the engine, so
+        it is a round-trip over the spool and each of the two ops can take up
+        to the await timeout — comfortably longer than the 2 s acknowledgement
+        grace :meth:`QuietState.arm` starts. Arming first therefore let a slow
+        or absent engine eat the entire grace, and "okay, quiet for ten
+        minutes" got swallowed by the quiet it was announcing. Arming after
+        the spools starts that grace when there is actually a mouth free to
+        use it.
+
+        Nothing about the mind-side quiet is made conditional by this: the
+        body mute cannot refuse it and cannot raise past it (a spool fault
+        reads as ``body_muted: False``), so the half the person actually asked
+        for still always happens, and the body's verdict is still reported as
+        ``body_muted`` rather than folded into ``ok``. The result fields are
+        unchanged, in the same order.
+        """
+        if self._quiet is None:
+            raise ToolRefused(QUIET_NOT_WIRED_REASON)
+        minutes = _number(params.get("minutes"), "'minutes'")
+        if not (MIN_QUIET_MINUTES <= minutes <= MAX_QUIET_MINUTES):
+            raise ToolRefused(QUIET_MINUTES_REASON)
+        try:
+            body_muted = self._mute_body()
+        except Exception as err:  # noqa: BLE001 - the mind-side quiet still holds
+            logger.warning("tools: body mute failed: %s", err, exc_info=True)
+            body_muted = False
+        armed = self._quiet.arm(minutes)
+        return {
+            "ok": True,
+            "until": self._quiet.until_iso(),
+            "note": armed["note"],
+            "body_muted": body_muted,
+        }
+
+    def _end_silence(self, _params: Mapping) -> dict:
+        """``end_silence`` — always accepted; a quiet that was not on is not an error."""
+        if self._quiet is None:
+            raise ToolRefused(QUIET_NOT_WIRED_REASON)
+        if not self._quiet.release("tool")["was_armed"]:
+            return {"ok": True, "note": "not silent"}
+        return {"ok": True, "note": "ended", "body_restored": self._unmute_body()}
+
+    def tick(self) -> None:
+        """Restore the body's voice when a quiet EXPIRED rather than was ended.
+
+        :meth:`QuietState.active` releases (and logs) its own expiry, but the
+        runtime-side inhibition is ours and only we can lift it — without this
+        poll a ten-minute quiet would end for the mind and last forever for the
+        body. Cheap and idempotent: it does nothing at all unless we are
+        actually holding an inhibition we put there ourselves.
+        """
+        if self._quiet is None:
+            return
+        self._reclaim_body_ownership()
+        with self._quiet_lock:
+            # EITHER latch is enough. They are set independently — an engine
+            # that refuses the inhibition but accepts the mute leaves only
+            # ``_quiet_muted_voice`` owned — and gating on the inhibition
+            # alone meant that quiet expired for the mind and never for the
+            # runtime's voice: a robot mute until somebody rebooted it.
+            if not (self._quiet_added_speak or self._quiet_muted_voice):
+                return
+            if self._quiet.active():
+                return
+        self._unmute_body()
+
+    def _reclaim_body_ownership(self) -> None:
+        """Once, on the first tick: take back a quiet that outlived our process.
+
+        A restart inside a quiet window restores the DEADLINE from
+        ``nova-quiet.json`` but starts with both ownership latches False, which
+        breaks in both directions: if the runtime kept our mute, nothing here
+        believes it may lift it (the quiet ends and the body stays mute
+        forever); if the runtime restarted too, its mouth is open inside a
+        quiet the person is still in. So we restore the persisted latches and
+        re-issue :meth:`_mute_body`, which is idempotent on the runtime side —
+        ``set_inhibition`` with the already-merged set is a no-op and ``mute``
+        answers "already muted". A pre-ownership file (no latches recorded)
+        still re-mutes: the quiet is on, so the body must be.
+        """
+        with self._quiet_lock:
+            if self._reclaimed:
+                return
+            self._reclaimed = True
+        if self._quiet is None or not self._quiet.active():
+            return
+        added_speak, muted_voice = self._quiet.body_latches()
+        with self._quiet_lock:
+            self._quiet_added_speak = self._quiet_added_speak or added_speak
+            self._quiet_muted_voice = self._quiet_muted_voice or muted_voice
+        self._mute_body()
+
+    # -- the runtime's own mouth -------------------------------------------
+
+    def _mute_body(self) -> bool:
+        """Inhibit :data:`SPEAK_BEHAVIOR` AND spool the runtime's ``mute`` intent.
+
+        Returns True only when both ops were confirmed; an older runtime that
+        does not know ``mute`` (typed unknown-kind refusal) still gets the
+        inhibition, and the result reports ``body_muted: False`` honestly.
+        """
+        current = current_inhibitions()
+        merged = sorted(set(current) | {SPEAK_BEHAVIOR})
+        result = self.submit_and_await({"op": SET_INHIBITION, "behaviors": merged})
+        ok = result.get("ok") is True
+        muted = self.submit_and_await({"op": MUTE_OP}).get("ok") is True
+        with self._quiet_lock:
+            # Latched, never recomputed: a second stay_silent (an "extended")
+            # reads a state.json that already lists 'speak' and would otherwise
+            # forget that WE are the ones holding it.
+            if ok and SPEAK_BEHAVIOR not in current:
+                self._quiet_added_speak = True
+            if muted:
+                self._quiet_muted_voice = True
+            self._reclaimed = True
+        self._sync_quiet_latches()
+        return ok and muted
+
+    def _unmute_body(self) -> bool:
+        """Take back only what we added: the inhibition and/or the voice mute."""
+        with self._quiet_lock:
+            added_speak = self._quiet_added_speak
+            muted_voice = self._quiet_muted_voice
+            self._reclaimed = True
+        if not added_speak and not muted_voice:
+            return False
+        ok = True
+        if added_speak:
+            remaining = sorted(set(current_inhibitions()) - {SPEAK_BEHAVIOR})
+            result = self.submit_and_await({"op": SET_INHIBITION, "behaviors": remaining})
+            if result.get("ok") is True:
+                with self._quiet_lock:
+                    self._quiet_added_speak = False
+            else:
+                ok = False
+        if muted_voice:
+            if self.submit_and_await({"op": UNMUTE_OP}).get("ok") is True:
+                with self._quiet_lock:
+                    self._quiet_muted_voice = False
+            else:
+                ok = False
+        self._sync_quiet_latches()
+        return ok
+
+    def _sync_quiet_latches(self) -> None:
+        """Mirror the ownership latches into the persisted quiet file.
+
+        The latches are only useful across a restart if they are written down
+        next to the deadline they belong to — see
+        :meth:`~reachy_nova.harness.quiet.QuietState.set_body_latches` and
+        :meth:`_reclaim_body_ownership`.
+        """
+        if self._quiet is None:
+            return
+        with self._quiet_lock:
+            added_speak = self._quiet_added_speak
+            muted_voice = self._quiet_muted_voice
+        self._quiet.set_body_latches(added_speak, muted_voice)
+
+    # -- supervisor component ----------------------------------------------
+
+    name = "tools"
+
+    def start(self, stop_event: threading.Event) -> None:
+        """Run the quiet-expiry poll until *stop_event*. Never blocks a caller."""
+        self._tick_stop = stop_event
+        self._ticker = threading.Thread(
+            target=self._tick_loop, name="nova-tools-tick", daemon=True
+        )
+        self._ticker.start()
+
+    def _tick_loop(self) -> None:
+        stop_event = self._tick_stop
+        if stop_event is None:  # pragma: no cover - start() always sets it
+            return
+        while not stop_event.is_set():
+            try:
+                self.tick()
+            except Exception as err:  # noqa: BLE001 - a poll fault never kills the leg
+                logger.warning("tools: quiet tick failed: %s", err, exc_info=True)
+            if stop_event.wait(QUIET_TICK_S):
+                break
+
+    def stop(self, timeout: float = 2.0) -> None:
+        if self._ticker is not None and self._ticker.is_alive():
+            self._ticker.join(timeout=timeout)
+
 
 # --------------------------------------------------------------------------- #
 # Small file + logging helpers                                                #
 # --------------------------------------------------------------------------- #
 
 
+def current_inhibitions() -> list[str]:
+    """The runtime's currently inhibited behaviors, from its published state.
+
+    ``set_inhibition`` REPLACES the whole set, so adding one name means first
+    reading the set that is there — the IntentDriver merges its own view into
+    the engine's ``state.json`` under ``intents.inhibitions``
+    (reachy-mini-cli ``reachy/behavior/intents.py:503-513``). Absent, stale,
+    unreadable or malformed all read as "nothing inhibited": a harness that
+    refused to go quiet because it could not parse a status file would be
+    failing at the one thing the person asked for.
+    """
+    try:
+        payload = json.loads(statedir.state_json_path().read_text(encoding="utf-8"))
+        names = payload["intents"]["inhibitions"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    if not isinstance(names, list):
+        return []
+    return [name for name in names if isinstance(name, str)]
+
+
 def _atomic_write(path: Path, text: str) -> None:
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _persist_volume(volume: int) -> bool:
+    """Make the applied voice level survive a restart. Returns whether it did.
+
+    The daemon forgets its volume when it restarts, so
+    ``daemon_client.restore_volume`` re-applies ``<state>/nova-volume.json``
+    on harness start — a file only worth reading if the tools that CHANGE the
+    level write it. Skipped when the file already holds this level, which is
+    what makes a no-op request (asking for the level you are already at) still
+    create or refresh a missing/stale file without a daemon call.
+
+    Never raises: a state dir we cannot write is worth reporting in the
+    payload (see :data:`VOLUME_NOT_PERSISTED_NOTE`), not worth turning a
+    volume change the person can already hear into a refusal.
+    """
+    path = statedir.volume_state_path()
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        if int(stored["volume"]) == int(volume):
+            return True
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write(path, json.dumps({"volume": int(volume)}))
+    except OSError as err:
+        logger.warning("tools: could not persist voice level %s: %s", volume, err)
+        return False
+    return True
 
 
 def _safe_unlink(path: Path) -> None:

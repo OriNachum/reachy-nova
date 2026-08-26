@@ -42,10 +42,14 @@ from ..sensory_log import stage as _stage
 from ..skill_forge import resolve_writer
 from . import statedir
 from .cognition_feed import CognitionFeed
+from .daemon_client import DaemonClient, restore_volume
 from .gate import EchoGate, resolve_policy
 from .hearing import TeeHearing
+from .lock_state import LockState
 from .network import NetworkUnit
+from .quiet import QuietState
 from .rules_overlay import upsert_rule
+from .sense_history import SenseHistory
 from .speaking import SonicSpeaker
 from .tools import TOOL_SPECS, IntentTools
 
@@ -54,13 +58,24 @@ HARNESS_SYSTEM_PROMPT = (
     "through your microphones and speak aloud through your speaker. Keep your "
     "words short, warm, and natural — you are a curious household companion, "
     "not an assistant reading documentation. "
-    "You act through your body with tools: run_behavior plays a named gesture, "
-    "goto moves your head and antennas, declare_goal and set_mode steer your "
-    "standing behavior, set_inhibition holds behaviors back, and create_rule "
-    "writes a lasting reflex that keeps working even while you sleep. Use them "
-    "when someone asks you to move or react, and mention what you did in a "
-    "few words. If a tool answers that the engine did not confirm, say your "
-    "body did not respond."
+    "You act through your body with tools: run_behavior plays a named gesture "
+    "(including the gaze one-shots look-at-sound and look-at-face), goto "
+    "moves your head and antennas, declare_goal and set_mode steer your "
+    "standing behavior, set_inhibition holds behaviors back, lock_face keeps "
+    "you looking at the person in front of you until release_face lets you "
+    "look away, and create_rule writes a lasting reflex that keeps working "
+    "even while you sleep. Use them when someone asks you to move or react. "
+    "If a tool answers that the engine did not confirm, say your body did "
+    "not respond; if it answers with an unknown-kind error, say your body "
+    "does not know that move yet. "
+    "Body cues arrive in parentheses — react to them naturally, with a word, "
+    "a sound, or nothing at all, and never describe your own mechanism (no "
+    "'reflex', 'rule', 'my body reacted on its own') unless someone asks why. "
+    "When someone asks why you did something, what you felt, or what just "
+    "happened, call recall_senses and answer from what it returns. "
+    "When someone tells you to stop following or look away, call "
+    "release_face; when they ask why you did something, call recall_senses "
+    "before answering."
 )
 
 # --------------------------------------------------------------------------- #
@@ -307,7 +322,16 @@ def build_app() -> list[object]:
     gate = EchoGate()
     feed = CognitionFeed()
 
-    speaker = SonicSpeaker(gate=gate)
+    # timed quiet (t11/t12) — ONE object, three readers: the speaker gates
+    # playback on it, the bus marks every inject with it, and the
+    # stay_silent/end_silence tools arm and release it. Constructed here
+    # rather than inside any of the three so they can never disagree about
+    # whether the robot is currently supposed to be quiet. It reloads a
+    # still-future deadline off disk, so a restart inside a quiet window
+    # comes back quiet instead of loudly reintroducing itself.
+    quiet = QuietState()
+
+    speaker = SonicSpeaker(gate=gate, quiet=quiet)
 
     sonic = NovaSonic(
         system_prompt=HARNESS_SYSTEM_PROMPT,
@@ -325,6 +349,14 @@ def build_app() -> list[object]:
         speaker.on_state_change(state)
 
     sonic.on_state_change = _on_state_change
+
+    # daemon client (t9/t10) — the ONE shared HTTP client, resolved against the
+    # exact same base URL speaking.py's own SonicSpeaker already resolved
+    # (env NOVA_DAEMON_URL, default http://localhost:8000), so the volume
+    # tools and the playback poster/stopper are always talking to the same
+    # daemon. raise_voice/lower_voice/set_voice_level drive it via IntentTools;
+    # restore_volume() below re-applies a persisted level on this same client.
+    daemon_client = DaemonClient(base_url=speaker.base_url)
 
     # act leg (browse) — a real browser exists only when Nova Act is enabled;
     # its progress narration goes through inject_text like every other sense.
@@ -369,11 +401,42 @@ def build_app() -> list[object]:
             "supervise", "nova", "component", "component absent name=kiro-writer reason=writer-http"
         )
 
+    # sense history (t8) — a small, cheap, in-process ring buffer, so it is
+    # ALWAYS constructed (no failure mode worth degrading over, same
+    # reasoning as the network leg) and shared between the bus, which
+    # populates it, and IntentTools, whose recall_senses tool reads it.
+    history = SenseHistory()
+
+    # lock awareness (t13) — the harness's own belief about the runtime's
+    # gaze lock. lock_face/release_face mirror a CONFIRMED verdict into it
+    # below; the bus mirrors the runtime's own motion/lock-released events
+    # into it (wired once bus_component exists, further down); the
+    # supervisor clears it on an engine-heartbeat drop (see
+    # supervisor._find_lock_state / run()'s lock_state kwarg) so a stale
+    # local belief can never outlive the engine process that actually held
+    # the lock.
+    lock_state = LockState()
+
     intents = IntentTools(
         browser=browser,
         on_browse_progress=sonic.inject_text if browser is not None else None,
         forge_leg=forge_leg,
+        daemon_client=daemon_client,
+        history=history,
+        quiet=quiet,
+        lock_state=lock_state,
     )
+
+    # volume restore (t10) — re-apply a persisted level if the daemon disagrees.
+    # Never raises: no persisted file, an unreachable daemon, or a bad payload
+    # all degrade to the standard component-absent line, same as every other
+    # optional leg in this function.
+    try:
+        restore_volume(statedir.volume_state_path(), daemon_client)
+    except Exception as err:  # noqa: BLE001 - a volume hiccup must not stop the voice
+        _stage(
+            "supervise", "nova", "component", f"component absent name=volume reason={err}"
+        )
     if browser is not None:
         # The browse tool's own result is just the "queued" acknowledgment —
         # the ANSWER arrives minutes later on the worker thread, and reaches
@@ -420,7 +483,10 @@ def build_app() -> list[object]:
         feed=sonic.feed_audio, gate=gate, echo_gate_policy=resolve_policy()
     )
 
-    components: list[object] = [sonic, speaker, hearing]
+    # ``intents`` is in the component list for ONE reason: its tick() poll is
+    # what restores the runtime's own voice when a quiet EXPIRES rather than
+    # being ended by hand (see IntentTools.tick).
+    components: list[object] = [sonic, speaker, hearing, intents]
 
     # kiro writer — the standing session restarts under the supervisor like
     # any other component; the forge/use_skill tools above already hold it.
@@ -443,7 +509,12 @@ def build_app() -> list[object]:
     try:
         from .bus import NovaBus
 
-        bus_component = NovaBus(on_inject=sonic.inject_text)
+        bus_component = NovaBus(
+            on_inject=sonic.inject_text,
+            on_event=lock_state.on_bus_event,
+            history=history,
+            quiet=quiet,
+        )
         components.append(bus_component)
     except Exception as err:  # noqa: BLE001
         _stage("supervise", "nova", "component", f"component absent name=bus reason={err}")

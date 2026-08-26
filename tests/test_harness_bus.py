@@ -29,6 +29,8 @@ import pytest
 import yaml
 
 from reachy_nova.harness import bus
+from reachy_nova.harness.quiet import QuietState
+from reachy_nova.harness.sense_history import SenseHistory
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RULES_PATH = REPO_ROOT / "config" / "nervous-system" / "rules.yaml"
@@ -601,11 +603,22 @@ def test_route_event_rule_fire_nova_face_noticed_reads_as_sight(real_rules):
 
 
 def test_route_event_rule_fire_unknown_rule_keeps_the_generic_template(real_rules):
+    """t6: the generic rule/fire template dropped "reflex fired" narration
+    in favor of quiet situational context, but still names the rule that
+    fired and still always injects (voice: silent, not dropped).
+
+    Uses a rule id with no per-rule override — NOT "look-toward-sound",
+    which t14 gave its own `rule/fire:look-toward-sound` override (see
+    test_rules_voice.py) precisely so it stops falling through to this
+    generic template.
+    """
     text, reason = bus.route_event(
-        real_rules, "rule", "fire", {"t": "rule", "rule": "look-toward-sound"}
+        real_rules, "rule", "fire", {"t": "rule", "rule": "some-unmapped-behavior"}
     )
     assert reason == bus.REASON_INJECT
-    assert "look-toward-sound" in text and "reflex" in text
+    assert "some-unmapped-behavior" in text
+    assert "reflex" not in text.lower()
+    assert text.endswith(bus.VOICE_MARKERS["silent"])
 
 
 # --------------------------------------------------------------------------- #
@@ -729,3 +742,344 @@ def test_rules_yaml_still_parses_as_yaml():
     with open(RULES_PATH) as handle:
         raw = yaml.safe_load(handle)
     assert isinstance(raw["rules"], dict)
+
+
+# --------------------------------------------------------------------------- #
+# SenseHistory wiring (t8) — every inject that reaches on_inject is recorded  #
+# --------------------------------------------------------------------------- #
+
+
+def _custom_rules_path(tmp_path):
+    cfg = {
+        "rules": {
+            "pat/level1": {
+                "priority": "HIGH",
+                "urgency": "IMMEDIATE",
+                "inject_template": "someone is petting you",
+                "sense": "touch",
+                "voice": "brief",
+            },
+            "face/recognized": {
+                "priority": "NORMAL",
+                "urgency": "DEFERRABLE",
+                "inject_template": "{name} is looking at you",
+            },
+            "rule/fire": {
+                "priority": "LOW",
+                "urgency": "DEFERRABLE",
+                "inject_template": "a reflex fired: {rule}",
+            },
+        },
+        "default": {"priority": "NORMAL", "urgency": "DEFERRABLE"},
+    }
+    path = tmp_path / "rules.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    return path
+
+
+def test_history_records_a_routed_inject_with_source_type_and_text(tmp_path):
+    rec = Recorder()
+    history = SenseHistory()
+    nb = make_bus(rec, rules_path=_custom_rules_path(tmp_path), history=history)
+    nb.on_message(
+        None, None, fake_msg("reachy/events/pat/level1", {"t": "pat", "ts": 1.0, "level": 1})
+    )
+    (entry,) = history.recent()
+    assert entry["source"] == "pat"
+    assert entry["type"] == "level1"
+    assert entry["text"] == rec.injects[0]
+    assert entry["sense_class"] == "touch"
+    assert entry["voice"] == "brief"
+
+
+def test_history_records_three_routed_senses_in_order():
+    rec = Recorder()
+    history = SenseHistory()
+    nb = make_bus(rec, history=history, sources="pat,face,rule")
+    nb.on_message(
+        None, None, fake_msg("reachy/events/pat/level1", {"t": "pat", "ts": 1.0, "level": 1})
+    )
+    nb.on_message(
+        None,
+        None,
+        fake_msg("reachy/events/face/recognized", {"t": "face", "ts": 2.0, "name": "Ori"}),
+    )
+    nb.on_message(
+        None,
+        None,
+        fake_msg(
+            "reachy/events/rule/fire",
+            {"t": "rule", "ts": 3.0, "rule": "hear-something-different"},
+        ),
+    )
+    entries = history.recent(3)
+    # newest first — the third routed event is entries[0]
+    assert [e["source"] for e in entries] == ["rule", "face", "pat"]
+    assert [e["type"] for e in entries] == ["fire", "recognized", "level1"]
+    # timestamps are strictly increasing in recording order, so newest-first
+    # is descending.
+    ts = [e["t"] for e in entries]
+    assert ts == sorted(ts, reverse=True)
+    assert len(ts) == len(set(ts))
+
+
+def test_history_does_not_record_a_no_template_drop():
+    rec = Recorder()
+    history = SenseHistory()
+    nb = make_bus(rec, history=history, sources="sense")
+    nb.on_message(
+        None,
+        None,
+        fake_msg(
+            "reachy/events/sense/snapshot",
+            {"t": "sense", "ts": 1.0, "tick": 1, "doa": None},
+        ),
+    )
+    assert rec.injects == []
+    assert history.recent() == []
+
+
+def test_history_does_not_record_a_deduped_suppressed_inject(tmp_path):
+    rec = Recorder()
+    history = SenseHistory()
+    clock_state = {"t": 0.0}
+    nb = make_bus(
+        rec,
+        rules_path=_custom_rules_path(tmp_path),
+        history=history,
+        clock=lambda: clock_state["t"],
+    )
+    msg = fake_msg("reachy/events/pat/level1", {"t": "pat", "ts": 1.0, "level": 1})
+    nb.on_message(None, None, msg)
+    clock_state["t"] += 1.0  # well inside the default 10s dedupe window
+    nb.on_message(None, None, msg)
+    assert len(rec.injects) == 1
+    assert len(history.recent(10)) == 1
+
+
+# --------------------------------------------------------------------------- #
+# voice: none (t14) — recorded in SenseHistory, never delivered to Sonic     #
+# --------------------------------------------------------------------------- #
+
+
+def _none_rules_path(tmp_path):
+    cfg = {
+        "rules": {
+            "rule/fire": {
+                "priority": "NORMAL",
+                "urgency": "NOW",
+                "inject_template": "(body cue: {rule})",
+                "sense": "sound",
+                "voice": "none",
+            },
+            "intent/applied": {
+                "priority": "NORMAL",
+                "urgency": "DEFERRABLE",
+                "inject_template": "Your standing intention '{name}' is now in effect.",
+                "voice": "none",
+            },
+        },
+        "default": {"priority": "NORMAL", "urgency": "DEFERRABLE"},
+    }
+    path = tmp_path / "rules.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    return path
+
+
+def test_voice_none_never_reaches_on_inject_but_is_recorded(tmp_path):
+    rec = Recorder()
+    history = SenseHistory()
+    nb = make_bus(rec, rules_path=_none_rules_path(tmp_path), history=history, sources="intent")
+    nb.on_message(
+        None,
+        None,
+        fake_msg(
+            "reachy/events/intent/applied",
+            {"t": "intent", "ts": 1.0, "name": "set_inhibition"},
+        ),
+    )
+    assert rec.injects == []
+    (entry,) = history.recent()
+    assert entry["source"] == "intent"
+    assert entry["type"] == "applied"
+    assert entry["voice"] == "none"
+    assert "set_inhibition" in entry["text"]
+
+
+def test_voice_none_muted_line_logs_once_per_key_across_three_events(caplog, tmp_path):
+    clock_state = {"t": 0.0}
+    rec = Recorder()
+    history = SenseHistory()
+    nb = make_bus(
+        rec,
+        rules_path=_none_rules_path(tmp_path),
+        history=history,
+        sources="rule",
+        clock=lambda: clock_state["t"],
+    )
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        for i in range(3):
+            # Each event clears the dedupe window (10s default) so all three
+            # are genuinely-distinct fires, each recorded in history — the
+            # muted senselog line is latched separately and must still only
+            # appear once.
+            clock_state["t"] += 20.0
+            nb.on_message(
+                None,
+                None,
+                fake_msg(
+                    "reachy/events/rule/fire",
+                    {"t": "rule", "ts": clock_state["t"], "rule": "look-toward-sound"},
+                ),
+            )
+    assert rec.injects == []
+    assert len(history.recent(10)) == 3
+    muted_lines = [r for r in caplog.records if "muted voice=none" in r.getMessage()]
+    assert len(muted_lines) == 1
+
+
+def test_voice_none_respects_the_dedupe_window_for_history_too(tmp_path):
+    """A rapid repeat within the dedupe window is suppressed before it ever
+    reaches history — `none` still shares `_deliver`'s dedupe reservation,
+    just without ever calling on_inject."""
+    clock_state = {"t": 0.0}
+    rec = Recorder()
+    history = SenseHistory()
+    nb = make_bus(
+        rec,
+        rules_path=_none_rules_path(tmp_path),
+        history=history,
+        sources="intent",
+        clock=lambda: clock_state["t"],
+    )
+    msg = fake_msg(
+        "reachy/events/intent/applied", {"t": "intent", "ts": 1.0, "name": "set_inhibition"}
+    )
+    nb.on_message(None, None, msg)
+    clock_state["t"] += 1.0  # well inside the default 10s dedupe window
+    nb.on_message(None, None, msg)
+    assert rec.injects == []
+    assert len(history.recent(10)) == 1
+
+
+def test_voice_silent_regression_still_injects(tmp_path):
+    """Regression guard: `silent` is unaffected by the `none` addition — it
+    still always reaches on_inject, just carrying the quiet marker (unlike
+    `none`, which reaches SenseHistory only)."""
+    cfg = {
+        "rules": {
+            "intent/declare": {
+                "priority": "NORMAL",
+                "urgency": "BACKGROUND",
+                "inject_template": "a standing goal was declared",
+                "voice": "silent",
+            },
+        },
+        "default": {"priority": "NORMAL", "urgency": "DEFERRABLE"},
+    }
+    path = tmp_path / "rules.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    rec = Recorder()
+    history = SenseHistory()
+    nb = make_bus(rec, rules_path=path, history=history, sources="intent")
+    nb.on_message(
+        None, None, fake_msg("reachy/events/intent/declare", {"t": "intent", "ts": 1.0})
+    )
+    assert rec.injects == ["a standing goal was declared" + bus.VOICE_MARKERS["silent"]]
+    assert len(history.recent()) == 1
+
+
+def test_bus_with_no_history_wired_never_raises():
+    rec = Recorder()
+    nb = make_bus(rec, sources="pat")
+    nb.on_message(
+        None, None, fake_msg("reachy/events/pat/level1", {"t": "pat", "ts": 1.0, "level": 1})
+    )
+    assert len(rec.injects) == 1
+    assert nb.history is None
+
+
+# --------------------------------------------------------------------------- #
+# The quiet marker (t12) — every inject carries it while quiet is armed       #
+# --------------------------------------------------------------------------- #
+
+
+class _FakeClock:
+    def __init__(self, now: float = 1_700_000_000.0) -> None:
+        self.now = float(now)
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _armed_quiet(tmp_path, minutes: float = 10.0):
+    q = QuietState(clock=_FakeClock(), path=tmp_path / "nova-quiet.json")
+    q.arm(minutes)
+    return q
+
+
+def _pat(nb):
+    nb.on_message(
+        None, None, fake_msg("reachy/events/pat/level1", {"t": "pat", "ts": 1.0, "level": 1})
+    )
+
+
+def test_quiet_marker_is_appended_to_a_free_rule_inject_while_armed(tmp_path):
+    rec = Recorder()
+    quiet = _armed_quiet(tmp_path)
+    nb = make_bus(rec, rules_path=_custom_rules_path(tmp_path), quiet=quiet, sources="face")
+    nb.on_message(
+        None,
+        None,
+        fake_msg("reachy/events/face/recognized", {"t": "face", "ts": 2.0, "name": "Ori"}),
+    )
+    # face/recognized in the custom rules carries no ``voice`` field at all
+    # (i.e. ``free``) — the quiet marker rides on top regardless.
+    assert rec.injects == ["Ori is looking at you" + bus.QUIET_MARKER]
+
+
+def test_quiet_marker_is_gone_after_release(tmp_path):
+    rec = Recorder()
+    quiet = _armed_quiet(tmp_path)
+    nb = make_bus(rec, rules_path=_custom_rules_path(tmp_path), quiet=quiet, sources="face")
+    quiet.release("test")
+    nb.on_message(
+        None,
+        None,
+        fake_msg("reachy/events/face/recognized", {"t": "face", "ts": 2.0, "name": "Ori"}),
+    )
+    assert rec.injects == ["Ori is looking at you"]
+
+
+def test_quiet_marker_rides_on_top_of_a_voice_marker(tmp_path):
+    rec = Recorder()
+    quiet = _armed_quiet(tmp_path)
+    nb = make_bus(rec, rules_path=_custom_rules_path(tmp_path), quiet=quiet)
+    _pat(nb)
+    (text,) = rec.injects
+    assert text.endswith(bus.QUIET_MARKER)
+    assert bus.VOICE_MARKERS["brief"] in text
+
+
+def test_quiet_marker_reaches_the_sense_history_text_too(tmp_path):
+    rec = Recorder()
+    history = SenseHistory()
+    quiet = _armed_quiet(tmp_path)
+    nb = make_bus(
+        rec, rules_path=_custom_rules_path(tmp_path), quiet=quiet, history=history
+    )
+    _pat(nb)
+    (entry,) = history.recent()
+    assert entry["text"] == rec.injects[0]
+
+
+def test_bus_without_a_quiet_state_never_marks_an_inject(tmp_path):
+    rec = Recorder()
+    nb = make_bus(rec, rules_path=_custom_rules_path(tmp_path))
+    _pat(nb)
+    assert bus.QUIET_MARKER not in rec.injects[0]
+
+
+def test_quiet_marker_text_says_do_not_speak():
+    assert "quiet mode" in bus.QUIET_MARKER
+    assert "do not speak" in bus.QUIET_MARKER

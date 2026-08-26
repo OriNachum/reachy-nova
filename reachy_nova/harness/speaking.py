@@ -32,6 +32,11 @@ integrator wires that to Sonic's interruption handling, so a dead/preempted
 speaker can never leave a stuck speaking state. The worker never retries and
 survives for the next utterance.
 
+Timed quiet (``quiet.QuietState``, optional) gates this leg in ONE place —
+the top of ``_play_one``. A dropped-for-quiet utterance is a no-op everywhere
+else: no post, no gate arm, no queue purge, no ``on_playback_failure``. Quiet
+is not mouth loss, and the ear is untouched by it.
+
 stdlib + numpy only; never imports ``reachy_mini``
 (``tests/test_harness_boundary.py``).
 """
@@ -39,29 +44,27 @@ stdlib + numpy only; never imports ``reachy_mini``
 from __future__ import annotations
 
 import io
-import json
 import os
 import queue
 import threading
-import urllib.request
 import wave
 from collections.abc import Callable
 
 import numpy as np
 
 from reachy_nova import sensory_log
+from reachy_nova.harness.daemon_client import (
+    BASE_URL_ENV,
+    DEFAULT_BASE_URL,
+    DaemonClient,
+)
 from reachy_nova.harness.gate import EchoGate
+from reachy_nova.harness.quiet import QuietState
 
 STAGE_SPEAK = "speak"
 SOURCE = "nova"
 
-DEFAULT_BASE_URL = "http://localhost:8000"
-BASE_URL_ENV = "NOVA_DAEMON_URL"
-_UPLOAD_PATH = "/api/media/sounds/upload"
-_PLAY_PATH = "/api/media/play_sound"
-_STOP_PATH = "/api/media/stop_sound"
 _UPLOAD_FILENAME = "tts_synth.wav"
-_HTTP_TIMEOUT_S = 10.0
 
 #: Poll interval while the worker waits for the gate window / queue items.
 _POLL_S = 0.02
@@ -87,43 +90,17 @@ def _make_wav_bytes(samples: np.ndarray, sample_rate: int) -> bytes:
     return buf.getvalue()
 
 
-def _multipart_encode(filename: str, wav_bytes: bytes) -> tuple[bytes, str]:
-    """Encode a single-file multipart/form-data body; return (body, content-type)."""
-    boundary = "----ReachyNovaSpeakBoundary"
-    ctype = f"multipart/form-data; boundary={boundary}"
-    head = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
-        f"Content-Type: audio/wav\r\n"
-        f"\r\n"
-    ).encode("utf-8")
-    tail = f"\r\n--{boundary}--\r\n".encode("utf-8")
-    return head + wav_bytes + tail, ctype
-
-
-def _post(url: str, data: bytes, content_type: str, timeout: float) -> dict:
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method="POST",
-        headers={"Content-Type": content_type, "Accept": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
-        return json.loads(resp.read())
-
-
 def default_poster(base_url: str, wav_bytes: bytes, filename: str) -> None:
     """Upload *wav_bytes* to the daemon and trigger playback (two POSTs).
 
-    Raises on any HTTP/network failure — the worker's mouth-loss grace path
-    catches everything.
+    Delegates to the shared :class:`~reachy_nova.harness.daemon_client.DaemonClient`
+    (task t10) — same two calls (upload, then play) this module used to make
+    directly. Raises on any HTTP/network failure — the worker's mouth-loss
+    grace path catches everything.
     """
-    base = base_url.rstrip("/")
-    body, ctype = _multipart_encode(filename, wav_bytes)
-    upload_resp = _post(f"{base}{_UPLOAD_PATH}", body, ctype, _HTTP_TIMEOUT_S)
-    saved_path = upload_resp.get("path", filename)
-    play_body = json.dumps({"file": saved_path}).encode("utf-8")
-    _post(f"{base}{_PLAY_PATH}", play_body, "application/json", _HTTP_TIMEOUT_S)
+    client = DaemonClient(base_url=base_url)
+    saved_path = client.upload_sound(wav_bytes, filename)
+    client.play_sound(saved_path)
 
 
 def default_stopper(base_url: str) -> None:
@@ -133,8 +110,7 @@ def default_stopper(base_url: str) -> None:
     its openapi 2026-08-12). Raises on HTTP/network failure — ``preempt()``
     treats a failed stop as best-effort and keeps going.
     """
-    base = base_url.rstrip("/")
-    _post(f"{base}{_STOP_PATH}", b"{}", "application/json", _HTTP_TIMEOUT_S)
+    DaemonClient(base_url=base_url).stop_sound()
 
 
 # --------------------------------------------------------------------------- #
@@ -170,6 +146,11 @@ class SonicSpeaker:
     queue_size:
         Bound of the playback queue; overflow is a named senselog drop
         (``reason=queue-full``), never a block.
+    quiet:
+        Optional :class:`~reachy_nova.harness.quiet.QuietState`. While it is
+        active every utterance is DROPPED before anything else happens — no
+        post, no gate arm, no queue purge, no ``on_playback_failure``: a quiet
+        robot is quiet, not broken (see :meth:`_quiet_blocks`).
     """
 
     def __init__(
@@ -182,8 +163,10 @@ class SonicSpeaker:
         max_buffer_s: float = 15.0,
         queue_size: int = 8,
         stopper: Callable[[str], None] | None = None,
+        quiet: QuietState | None = None,
     ) -> None:
         self.gate = gate
+        self.quiet = quiet
         self.sample_rate = sample_rate
         self.base_url = base_url or os.environ.get(BASE_URL_ENV, DEFAULT_BASE_URL)
         self.poster = poster or default_poster
@@ -194,6 +177,9 @@ class SonicSpeaker:
 
         self.utterances_played = 0
         self.playback_failures = 0
+        #: Utterances dropped by the quiet deadline since it was armed.
+        self.quiet_drops = 0
+        self._quiet_drop_logged = False
 
         #: Bumped by every preempt(). The worker snapshots it when it dequeues
         #: an utterance and re-checks before (and after) posting: an utterance
@@ -329,8 +315,50 @@ class SonicSpeaker:
             finally:
                 self._queue.task_done()
 
+    def _quiet_blocks(self, duration_s: float) -> bool:
+        """Timed quiet: is the mouth closed for this utterance? Latched logging.
+
+        Called FIRST in :meth:`_play_one`, before the gate wait and before any
+        HTTP work, because a quiet drop must leave no trace on the speaker
+        state machine: the poster is never called, the echo gate is never
+        armed (so the ear is untouched), the queue is never purged and
+        ``on_playback_failure`` never fires — quiet is not mouth loss and the
+        mind must not think the mouth is gone.
+
+        Logging is latched the way ``hearing.py`` latches its gate window: ONE
+        line for the first drop, then one summary carrying the count when the
+        first utterance gets through again. A ten-minute quiet during a chatty
+        session must not cost ten minutes of log lines.
+        """
+        if self.quiet is None:
+            return False
+        if not self.quiet.allow_utterance():
+            self.quiet_drops += 1
+            if not self._quiet_drop_logged:
+                self._quiet_drop_logged = True
+                sensory_log.stage(
+                    STAGE_SPEAK,
+                    SOURCE,
+                    "quiet-drop",
+                    f"dropped reason=quiet duration={duration_s:.2f}s "
+                    "(further drops summarised on release)",
+                )
+            return True
+        if self.quiet_drops:
+            sensory_log.stage(
+                STAGE_SPEAK,
+                SOURCE,
+                "quiet-resume",
+                f"speaking again count={self.quiet_drops} (utterances dropped while quiet)",
+            )
+            self.quiet_drops = 0
+            self._quiet_drop_logged = False
+        return False
+
     def _play_one(self, samples: np.ndarray) -> None:
         epoch = self._preempt_epoch
+        if self._quiet_blocks(len(samples) / self.sample_rate):
+            return
         # One-speaker discipline: wait out any previous playback window.
         while not self._stopping():
             remaining = self.gate.remaining()

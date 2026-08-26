@@ -53,6 +53,7 @@ from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
 from .. import sensory_log
+from . import quiet as quiet_mod
 from . import statedir, unit
 
 # Exit codes (operator-facing contract; 1 stays "unexpected error").
@@ -279,12 +280,29 @@ def _stop_components(started: Sequence[object]) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _find_lock_state(components: Sequence[object]) -> object | None:
+    """The first component exposing a non-``None`` ``.lock_state`` attribute.
+
+    ``IntentTools`` (``tools.py``) carries the harness's one
+    :class:`~reachy_nova.harness.lock_state.LockState` belief as a public
+    attribute rather than a second constructor argument threaded through
+    every layer between ``app.build_app`` and this module — this is the seam
+    that finds it again on the component list :func:`run` already receives.
+    """
+    for component in components:
+        candidate = getattr(component, "lock_state", None)
+        if candidate is not None:
+            return candidate
+    return None
+
+
 def run(
     components: Sequence[object],
     stop_event: threading.Event,
     *,
     poll_interval: float = DEFAULT_POLL_INTERVAL,
     tick_hook: Callable[[int], None] | None = None,
+    lock_state: object | None = None,
 ) -> None:
     """Start every component, then watch the engine heartbeat until stopped.
 
@@ -293,6 +311,16 @@ def run(
     turns the engine's heartbeat into named transitions. *tick_hook* is the test
     seam — it is called with the tick count after each observation, which is how
     a heartbeat transition is exercised inside a single :func:`run` call.
+
+    *lock_state* (duck-typed: anything with ``on_engine_dropped()`` /
+    ``on_engine_live()`` / ``settle()``, e.g.
+    :class:`~reachy_nova.harness.lock_state.LockState`) is notified on BOTH
+    heartbeat transitions and given a ``settle()`` on every other tick, so a
+    locally-believed gaze lock neither outlives the engine process that
+    actually held it nor dies to a heartbeat that merely flickered under load
+    (finding L6) — see those methods' docstrings for why this is a supervisor
+    concern rather than a bus one. ``None`` (the default, and every non-t13
+    caller) skips this entirely.
     """
     started = _start_components(components, stop_event)
     _log("start", f"harness up pid={os.getpid()} components={len(started)}")
@@ -302,13 +330,13 @@ def run(
         while not stop_event.is_set():
             live = statedir.engine_is_live()
             if live != previous:
-                if live:
-                    _log("engine", "engine live")
-                elif previous is None:
-                    _log("engine", "engine absent")
-                else:
-                    _log("engine", "dropped reason=engine-heartbeat-lost")
+                _log_engine_transition(live, previous, lock_state)
                 previous = live
+            else:
+                # A pending belief drop expires on TIME, not on an edge — and
+                # a genuinely dead engine produces no further edge at all, so
+                # the poll loop is what has to notice (finding L6).
+                _settle_lock_state(lock_state)
             ticks += 1
             if tick_hook is not None:
                 tick_hook(ticks)
@@ -317,6 +345,51 @@ def run(
     finally:
         _stop_components(started)
         _log("stop", f"harness down pid={os.getpid()} ticks={ticks}")
+
+
+def _settle_lock_state(lock_state: object | None) -> None:
+    """Give *lock_state* a chance to expire a pending engine-drop. Never raises."""
+    if lock_state is None:
+        return
+    settle = getattr(lock_state, "settle", None)
+    if settle is None:
+        return
+    try:
+        settle()
+    except Exception as err:  # noqa: BLE001 - a belief update must not kill the loop
+        _log("engine", f"lock-state settle failed detail={err}")
+
+
+def _notify_lock_state(lock_state: object | None, method: str) -> None:
+    """Call ``lock_state.<method>()`` if it has one. Never raises."""
+    if lock_state is None:
+        return
+    hook = getattr(lock_state, method, None)
+    if hook is None:
+        return
+    try:
+        hook()
+    except Exception as err:  # noqa: BLE001 - a belief update must not kill the loop
+        _log("engine", f"lock-state update failed detail={err}")
+
+
+def _log_engine_transition(live: bool, previous: bool | None, lock_state: object | None) -> None:
+    """Log the engine heartbeat TRANSITION and notify *lock_state* on BOTH
+    edges (see :func:`run`'s docstring for why).
+
+    A dropped edge only ARMS the belief drop; the live edge cancels a pending
+    one. On a CM4 whose heartbeat flaps every ~2 s under load (finding L6),
+    the cancel is what keeps a perfectly good runtime lock believed.
+    """
+    if live:
+        _log("engine", "engine live")
+        _notify_lock_state(lock_state, "on_engine_live")
+        return
+    if previous is None:
+        _log("engine", "engine absent")
+        return
+    _log("engine", "dropped reason=engine-heartbeat-lost")
+    _notify_lock_state(lock_state, "on_engine_dropped")
 
 
 def install_signal_handlers(stop_event: threading.Event) -> Callable[[], None]:
@@ -403,23 +476,45 @@ def cmd_run(env_file: str | None = None) -> int:
     stop_event = threading.Event()
     restore = install_signal_handlers(stop_event)
     try:
-        run(components, stop_event)
+        run(components, stop_event, lock_state=_find_lock_state(components))
     finally:
         restore()
         release_pid_file()
     return EXIT_OK
 
 
-def status() -> dict[str, object]:
-    """Engine / embody / own-PID liveness — the whole attachment picture."""
+def status(
+    quiet: "quiet_mod.QuietState | None" = None,
+    lock_state: object | None = None,
+) -> dict[str, object]:
+    """Engine / embody / own-PID liveness — the whole attachment picture.
+
+    *quiet* is the running harness's own :class:`~reachy_nova.harness.quiet.QuietState`
+    when there is one in this process. The ``status`` CLI runs in a DIFFERENT
+    process from the harness, so with no instance to hand the persisted
+    deadline is read side-effect-free instead — "why is it not talking?" must
+    be answerable from outside the harness, which is where the operator is.
+
+    *lock_state* is the running harness's own (in-process)
+    :class:`~reachy_nova.harness.lock_state.LockState`, same seam as *quiet*
+    (task t11). Unlike the quiet deadline, the lock belief has no on-disk
+    mirror — the runtime does not (yet) publish lock state into state.json —
+    so an out-of-process ``status`` CLI call always reports ``locked: None``
+    (unknown), which is the honest answer for a belief that lives only inside
+    the running harness's own memory.
+    """
     pid = read_pid()
     running = pid is not None and _is_alive(pid) and _is_our_harness(pid)
+    quiet_until = quiet.until_iso() if quiet is not None else quiet_mod.peek_until_iso()
+    locked = lock_state.locked if lock_state is not None else None  # type: ignore[attr-defined]
     return {
         "state_dir": str(statedir.state_dir()),
         "engine_live": statedir.engine_is_live(),
         "embody_live": statedir.embody_is_live(),
         "harness_pid": pid,
         "harness_running": running,
+        "quiet_until": quiet_until,
+        "locked": locked,
         "unit": unit.HARNESS_UNIT,
     }
 

@@ -8,8 +8,10 @@ the ensure step degrades to its named component-absent line; the tests that
 exercise the install path create the behavior dir themselves.
 """
 
+import json
 import queue
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,8 +19,9 @@ from reachy_nova.harness import app, rules_overlay, statedir
 from reachy_nova.harness.bus import NovaBus
 from reachy_nova.harness.gate import EchoGate
 from reachy_nova.harness.hearing import TeeHearing
+from reachy_nova.harness.sense_history import SenseHistory
 from reachy_nova.harness.speaking import SonicSpeaker
-from reachy_nova.harness.tools import TOOL_SPECS
+from reachy_nova.harness.tools import TOOL_SPECS, IntentTools
 from reachy_nova.harness.vision_leg import VisionLeg
 from reachy_nova.nova_browser import NovaBrowser
 from reachy_nova.nova_omni import NovaOmni
@@ -41,6 +44,11 @@ def _build():
 
 def _messages(caplog):
     return [r.getMessage() for r in caplog.records]
+
+
+def _fake_msg(topic: str, payload: dict) -> SimpleNamespace:
+    """A stand-in for paho's MQTTMessage, matching test_harness_bus.py's."""
+    return SimpleNamespace(topic=topic, payload=json.dumps(payload).encode())
 
 
 def test_build_app_returns_sonic_speaker_hearing_in_start_order():
@@ -132,6 +140,10 @@ def test_default_build_is_the_core_components_with_named_absences(caplog):
         "NovaSonic",
         "SonicSpeaker",
         "TeeHearing",
+        # IntentTools rides the component list only for its quiet-expiry tick
+        # (t12) — it restores the runtime's 'speak' inhibition when a timed
+        # quiet runs out rather than being ended by hand.
+        "IntentTools",
         "NetworkReactor",
         "NetworkUnit",
         "NovaBus",
@@ -152,7 +164,7 @@ def test_act_enabled_adds_a_supervised_browser_wired_for_progress(monkeypatch):
     # IntentTools wired the browser handle AND its progress narration.
     assert adapter.browser.on_progress == sonic.inject_text
     assert hasattr(adapter, "start") and hasattr(adapter, "stop")
-    assert len(components) == 7  # core 3 + network leg (2) + bus + browser
+    assert len(components) == 8  # core 3 + tools + network leg (2) + bus + browser
 
 
 def test_browser_component_start_and_stop_never_raise_when_disabled():
@@ -178,7 +190,7 @@ def test_omni_model_set_adds_the_vision_leg_wired_to_bus_and_sonic(monkeypatch):
     assert leg._understand.__self__.omni_model_id == "us.amazon.nova-2-omni-v1:0"
     # …and the one answer goes to Sonic's guarded inject.
     assert leg._on_answer == sonic.inject_text
-    assert len(components) == 7  # core 3 + network leg (2) + bus + vision
+    assert len(components) == 8  # core 3 + tools + network leg (2) + bus + vision
 
 
 def test_vision_leg_degrades_to_absent_when_the_bus_cannot_build(monkeypatch, caplog):
@@ -194,10 +206,163 @@ def test_vision_leg_degrades_to_absent_when_the_bus_cannot_build(monkeypatch, ca
     with caplog.at_level("INFO", logger="nova.sensory"):
         components = _build()
     names = [type(c).__name__ for c in components]
-    assert names == ["NovaSonic", "SonicSpeaker", "TeeHearing", "NetworkReactor", "NetworkUnit"]
+    assert names == [
+        "NovaSonic",
+        "SonicSpeaker",
+        "TeeHearing",
+        "IntentTools",
+        "NetworkReactor",
+        "NetworkUnit",
+    ]
     lines = _messages(caplog)
     assert any("component absent name=bus" in m for m in lines)
     assert any("component absent name=vision reason=no-bus" in m for m in lines)
+
+
+# --------------------------------------------------------------------------- #
+# recall_senses / SenseHistory wiring (t8)                                    #
+# --------------------------------------------------------------------------- #
+
+
+def test_system_prompt_tells_nova_to_recall_senses():
+    assert "recall_senses" in app.HARNESS_SYSTEM_PROMPT
+
+
+# --------------------------------------------------------------------------- #
+# System-prompt rewrite for body cues (t9)                                    #
+# --------------------------------------------------------------------------- #
+
+
+def test_system_prompt_never_narrates_body_mechanics():
+    assert "never describe" in app.HARNESS_SYSTEM_PROMPT
+    assert "mention what you did" not in app.HARNESS_SYSTEM_PROMPT
+
+
+def test_system_prompt_covers_unknown_kind_errors():
+    assert "unknown-kind" in app.HARNESS_SYSTEM_PROMPT
+
+
+def test_system_prompt_names_the_gaze_lock_tools():
+    assert "lock_face" in app.HARNESS_SYSTEM_PROMPT
+    assert "release_face" in app.HARNESS_SYSTEM_PROMPT
+
+
+# --------------------------------------------------------------------------- #
+# Daemon-client wiring (t9) — the shared DaemonClient + restore_volume()      #
+# --------------------------------------------------------------------------- #
+
+
+def test_intent_tools_receive_a_daemon_client_on_the_same_base_url(monkeypatch):
+    from reachy_nova.harness.daemon_client import DaemonClient
+
+    captured: dict = {}
+    real_intent_tools = IntentTools
+
+    def _spy(*args, **kwargs):
+        captured["daemon_client"] = kwargs.get("daemon_client")
+        return real_intent_tools(*args, **kwargs)
+
+    monkeypatch.setattr(app, "IntentTools", _spy)
+
+    components = _build()
+    speaker = components[1]
+
+    assert isinstance(captured["daemon_client"], DaemonClient)
+    assert captured["daemon_client"].base_url == speaker.base_url
+
+
+def test_build_app_calls_restore_volume_on_the_persisted_path_and_client(monkeypatch):
+    from reachy_nova.harness.daemon_client import DaemonClient
+
+    calls = []
+    monkeypatch.setattr(app, "restore_volume", lambda path, client: calls.append((path, client)))
+    _build()
+    assert len(calls) == 1
+    path, client = calls[0]
+    assert path == statedir.volume_state_path()
+    assert isinstance(client, DaemonClient)
+
+
+def test_build_app_never_raises_when_restore_volume_fails(monkeypatch, caplog):
+    def _boom(*_a, **_k):
+        raise RuntimeError("daemon unreachable")
+
+    monkeypatch.setattr(app, "restore_volume", _boom)
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        _build()  # must not raise
+    assert any(
+        "component absent name=volume reason=daemon unreachable" in m
+        for m in _messages(caplog)
+    )
+
+
+def test_bus_and_intents_share_the_same_sense_history(monkeypatch):
+    captured: dict = {}
+    real_intent_tools = IntentTools
+
+    def _spy(*args, **kwargs):
+        captured["history"] = kwargs.get("history")
+        return real_intent_tools(*args, **kwargs)
+
+    monkeypatch.setattr(app, "IntentTools", _spy)
+
+    components = _build()
+    bus_component = next(c for c in components if isinstance(c, NovaBus))
+
+    assert isinstance(captured["history"], SenseHistory)
+    assert bus_component.history is captured["history"]
+
+
+def test_bus_and_intents_share_the_same_lock_state(monkeypatch):
+    """t13: the bus's on_event tap and IntentTools' lock_face/release_face
+    tools update the SAME LockState — otherwise a lock-released event the
+    runtime published would correct a belief nothing else reads."""
+    captured: dict = {}
+    real_intent_tools = IntentTools
+
+    def _spy(*args, **kwargs):
+        captured["lock_state"] = kwargs.get("lock_state")
+        return real_intent_tools(*args, **kwargs)
+
+    monkeypatch.setattr(app, "IntentTools", _spy)
+
+    components = _build()
+    bus_component = next(c for c in components if isinstance(c, NovaBus))
+
+    lock_state = captured["lock_state"]
+    assert lock_state is not None
+
+    bus_component.on_message(
+        None,
+        None,
+        _fake_msg(
+            "reachy/events/motion/lock-released",
+            {"t": "motion", "id": "p1", "reason": "max-hold"},
+        ),
+    )
+    assert lock_state.locked is False
+
+
+def test_bus_history_is_wired_even_when_bus_construction_is_absent(monkeypatch):
+    """The history is cheap/local and always built, regardless of the bus."""
+    import reachy_nova.harness.bus as bus_module
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("no paho on this box")
+
+    monkeypatch.setattr(bus_module, "NovaBus", _boom)
+
+    captured: dict = {}
+    real_intent_tools = IntentTools
+
+    def _spy(*args, **kwargs):
+        captured["history"] = kwargs.get("history")
+        return real_intent_tools(*args, **kwargs)
+
+    monkeypatch.setattr(app, "IntentTools", _spy)
+
+    _build()
+    assert isinstance(captured["history"], SenseHistory)
 
 
 # --------------------------------------------------------------------------- #
@@ -374,3 +539,11 @@ def test_browser_result_callback_reaches_the_conversation(monkeypatch):
     assert inner.on_result is not None
     inner.on_result("The answer is 42.")
     assert len(injected) == 1 and "The answer is 42." in injected[0]
+
+
+def test_l5_the_prompt_tells_nova_when_to_release_face_and_recall_senses():
+    """Live finding L5: on the robot Nova never called release_face on "you
+    can look away" nor recall_senses on "why did you do that?"."""
+    prompt = app.HARNESS_SYSTEM_PROMPT
+    assert "stop following or look away, call release_face" in prompt
+    assert "call recall_senses before answering" in prompt

@@ -28,6 +28,19 @@ import pytest
 from reachy_nova.harness import statedir, supervisor
 
 
+class _FakeClock:
+    """Injectable monotonic clock for the lock-belief grace (finding L6)."""
+
+    def __init__(self, t: float = 1000.0):
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
 @pytest.fixture()
 def state_dir(tmp_path, monkeypatch):
     """A throwaway REACHY_STATE_DIR so no test touches the real one."""
@@ -160,6 +173,145 @@ def test_engine_heartbeat_loss_is_a_named_drop(state_dir, caplog):
         "[SENSE stage=supervise source=nova event=engine] dropped reason=engine-heartbeat-lost"
         in caplog.text
     )
+
+
+def test_engine_heartbeat_loss_clears_the_lock_belief_via_the_lock_state_hook(state_dir, caplog):
+    """t13: run()'s lock_state kwarg is notified on the live -> dropped
+    transition, so a locally-believed lock does not outlive the engine
+    process that actually held it.
+
+    Finding L6 put a grace in front of that clear; ``drop_grace_s=0.0`` keeps
+    this test about the WIRING (does run() reach the belief at all), and the
+    grace itself is covered by the two tests below plus
+    tests/test_harness_lock_state.py."""
+    from reachy_nova.harness.lock_state import LockState
+
+    caplog.set_level(logging.INFO, logger="nova.sensory")
+    _write_heartbeat(state_dir, age_s=0.0)
+    lock_state = LockState(drop_grace_s=0.0)
+    lock_state.mark_locked()
+    stop = threading.Event()
+
+    def tick_hook(count: int) -> None:
+        if count == 1:
+            _write_heartbeat(state_dir, age_s=60.0)
+        if count >= 2:
+            stop.set()
+
+    supervisor.run([], stop, poll_interval=0.0, tick_hook=tick_hook, lock_state=lock_state)
+
+    assert lock_state.locked is None
+    assert (
+        "[SENSE stage=supervise source=nova event=lock] released reason=engine-restart"
+        in caplog.text
+    )
+
+
+def test_l6_a_flapping_heartbeat_does_not_clear_the_lock_belief(state_dir, caplog):
+    """Live finding L6: the CM4's heartbeat flapped live/lost every ~2 s under
+    load while the runtime lock was fine. run() must cancel the pending drop
+    on the live edge rather than believing the flap."""
+    from reachy_nova.harness.lock_state import LockState
+
+    caplog.set_level(logging.INFO, logger="nova.sensory")
+    _write_heartbeat(state_dir, age_s=0.0)
+    clock = _FakeClock()
+    lock_state = LockState(clock=clock, drop_grace_s=5.0)
+    lock_state.mark_locked()
+    stop = threading.Event()
+
+    def tick_hook(count: int) -> None:
+        # lost, back, lost, back, ... two seconds apart, as observed live.
+        clock.advance(2.0)
+        _write_heartbeat(state_dir, age_s=60.0 if count % 2 else 0.0)
+        if count >= 8:
+            stop.set()
+
+    supervisor.run([], stop, poll_interval=0.0, tick_hook=tick_hook, lock_state=lock_state)
+
+    assert lock_state.locked is True
+    assert "event=lock" not in caplog.text
+
+
+def test_l6_an_engine_that_stays_down_still_clears_the_belief(state_dir, caplog):
+    """The other half: no further heartbeat EDGE ever arrives, so the poll
+    loop's settle() is what has to notice the grace lapsing."""
+    from reachy_nova.harness.lock_state import LockState
+
+    caplog.set_level(logging.INFO, logger="nova.sensory")
+    _write_heartbeat(state_dir, age_s=0.0)
+    clock = _FakeClock()
+    lock_state = LockState(clock=clock, drop_grace_s=5.0)
+    lock_state.mark_locked()
+    stop = threading.Event()
+
+    def tick_hook(count: int) -> None:
+        if count == 1:
+            _write_heartbeat(state_dir, age_s=60.0)  # down, and staying down
+        else:
+            clock.advance(2.0)
+        if count >= 6:
+            stop.set()
+
+    supervisor.run([], stop, poll_interval=0.0, tick_hook=tick_hook, lock_state=lock_state)
+
+    assert lock_state.locked is None
+    assert caplog.text.count("event=lock") == 1
+    assert "released reason=engine-restart" in caplog.text
+
+
+def test_l6_a_lock_state_without_the_new_hooks_is_tolerated(state_dir):
+    """Duck-typed, and every hook is optional: an object with only the
+    original on_engine_dropped() must not crash the watch loop."""
+    calls: list[str] = []
+    legacy = types.SimpleNamespace(on_engine_dropped=lambda: calls.append("dropped"))
+    _write_heartbeat(state_dir, age_s=0.0)
+    stop = threading.Event()
+
+    def tick_hook(count: int) -> None:
+        if count == 1:
+            _write_heartbeat(state_dir, age_s=60.0)
+        if count >= 3:
+            stop.set()
+
+    supervisor.run([], stop, poll_interval=0.0, tick_hook=tick_hook, lock_state=legacy)
+
+    assert calls == ["dropped"]
+
+
+def test_l6_a_raising_lock_state_hook_never_kills_the_watch_loop(state_dir, caplog):
+    caplog.set_level(logging.INFO, logger="nova.sensory")
+
+    def boom():
+        raise RuntimeError("belief exploded")
+
+    exploding = types.SimpleNamespace(on_engine_dropped=boom, on_engine_live=boom, settle=boom)
+    _write_heartbeat(state_dir, age_s=0.0)
+    stop = threading.Event()
+
+    def tick_hook(count: int) -> None:
+        if count == 1:
+            _write_heartbeat(state_dir, age_s=60.0)
+        if count >= 4:
+            stop.set()
+
+    supervisor.run([], stop, poll_interval=0.0, tick_hook=tick_hook, lock_state=exploding)
+
+    assert "lock-state" in caplog.text
+    assert "harness down" in caplog.text
+
+
+def test_find_lock_state_discovers_it_on_a_component():
+    from reachy_nova.harness.lock_state import LockState
+
+    lock_state = LockState()
+    component = types.SimpleNamespace(lock_state=lock_state)
+
+    assert supervisor._find_lock_state([types.SimpleNamespace(), component]) is lock_state
+
+
+def test_find_lock_state_returns_none_when_absent():
+    assert supervisor._find_lock_state([types.SimpleNamespace()]) is None
 
 
 def test_engine_recovery_is_named_too(state_dir, caplog):
@@ -323,6 +475,27 @@ def test_run_starts_the_loop_when_nothing_else_is_live(state_dir, monkeypatch):
     assert not statedir.harness_pid_path().exists()
 
 
+def test_cmd_run_passes_the_composed_lock_state_to_run(state_dir, monkeypatch):
+    """t13: cmd_run finds the composed graph's LockState (if any) and hands it
+    to run() so the engine-heartbeat watch can clear a stale belief."""
+    from reachy_nova.harness.lock_state import LockState
+
+    lock_state = LockState()
+    component = types.SimpleNamespace(lock_state=lock_state, name="fake")
+    monkeypatch.setattr(supervisor, "_composed_components", lambda: [component])
+    captured: dict[str, object] = {}
+
+    def fake_run(components, stop_event, **kwargs):
+        captured["lock_state"] = kwargs.get("lock_state")
+
+    monkeypatch.setattr(supervisor, "run", fake_run)
+
+    code = supervisor.main(["run"])
+
+    assert code == 0
+    assert captured["lock_state"] is lock_state
+
+
 # --------------------------------------------------------------------------- #
 # PR #6 review fixes (qodo): atomic pid claim + no-components refusal          #
 # --------------------------------------------------------------------------- #
@@ -365,3 +538,37 @@ def test_cmd_run_refuses_when_no_components_compose(tmp_path, monkeypatch):
     assert rc == supervisor.EXIT_NO_COMPONENTS
     # the pid file is released so the retry can claim it
     assert supervisor.read_pid() is None
+
+
+def test_status_reports_locked_none_when_no_lock_state_is_given(state_dir):
+    assert supervisor.status()["locked"] is None
+
+
+def test_status_reports_the_lock_states_current_belief(state_dir):
+    from reachy_nova.harness.lock_state import LockState
+
+    lock_state = LockState()
+    assert supervisor.status(lock_state=lock_state)["locked"] is None
+
+    lock_state.mark_locked()
+    assert supervisor.status(lock_state=lock_state)["locked"] is True
+
+    lock_state.mark_released()
+    assert supervisor.status(lock_state=lock_state)["locked"] is False
+
+
+def test_status_reports_the_quiet_deadline_when_one_is_armed(state_dir):
+    from reachy_nova.harness.quiet import QuietState
+
+    assert supervisor.status()["quiet_until"] is None
+
+    quiet = QuietState()
+    quiet.arm(10)
+    try:
+        # In-process seam: the harness hands its own instance to status().
+        assert supervisor.status(quiet=quiet)["quiet_until"].startswith("2")
+        # Out-of-process (the `status` CLI): the persisted deadline is read.
+        assert supervisor.status()["quiet_until"] == quiet.until_iso()
+    finally:
+        quiet.release()
+    assert supervisor.status()["quiet_until"] is None
