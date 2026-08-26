@@ -262,7 +262,7 @@ rules:
     urgency: NOW
     llm_evaluate: false
     voice: silent
-    inject_template: "(your body just did something on its own: {rule})"
+    inject_template: "(body cue: {rule})"
 
   # Per-rule rule/fire overrides (reachy_nova/harness/bus.py rule_for): a key
   # "rule/fire:<rule-id>" wins over the generic rule/fire entry for that one
