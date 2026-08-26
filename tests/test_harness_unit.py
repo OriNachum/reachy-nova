@@ -180,3 +180,40 @@ def test_harness_unit_is_unchanged_by_the_new_templates():
     text = unit.harness_unit_text(python="/usr/bin/python3")
 
     assert "Conflicts=" not in text
+
+
+# --------------------------------------------------------------------------- #
+# Network ordering is ordering only — never a dependency (task t5)            #
+# --------------------------------------------------------------------------- #
+
+
+def test_unit_never_depends_on_network_online_target():
+    """The harness must start with Wi-Fi down (spec h14).
+
+    ``After=`` is kept (free ordering), but a ``Wants=``/``Requires=`` on
+    ``network-online.target`` would make systemd hold the harness back — and on
+    this device that target is reached BEFORE wlan0 associates anyway, so it
+    would buy a delay and still not guarantee a route.
+    """
+    text = unit.harness_unit_text(python="/usr/bin/python3")
+
+    assert "After=reachy-runtime.service network-online.target" in text
+    assert "Wants=" not in text
+    assert "Requires=" not in text
+
+
+def test_unit_text_explains_that_the_network_ordering_is_not_a_dependency():
+    text = unit.harness_unit_text(python="/usr/bin/python3")
+
+    assert "# Ordering only" in text
+    assert "does NOT depend on the network" in text
+    assert "Never turn this ordering into a Wants or Requires dependency." in text
+    # The comment sits in [Unit], immediately above the After= line it explains.
+    assert text.index("# Ordering only") > text.index("[Unit]")
+    assert text.index("# Ordering only") < text.index("After=reachy-runtime.service")
+    assert text.index("After=reachy-runtime.service") < text.index("[Service]")
+
+
+def test_network_ordering_comment_lines_are_all_systemd_comments():
+    for line in unit.NETWORK_ORDERING_COMMENT.splitlines():
+        assert line.startswith("#")

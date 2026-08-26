@@ -582,3 +582,224 @@ def test_spawn_session_normalizes_oserror_from_factory_itself() -> None:
 
     assert "process creation failed" in str(exc_info.value)
     assert isinstance(exc_info.value.__cause__, OSError)
+
+
+# --------------------------------------------------------------------------- #
+# 7. Degraded start: an INITIAL spawn failure is retried, never propagated    #
+#    (task t5 — the 2026-08-26 cold-boot bug).                                #
+# --------------------------------------------------------------------------- #
+
+
+class DeferredFactory:
+    """Fails the first ``num_failures`` calls, then builds real fake sessions.
+
+    Unlike :class:`FlakyRestartFactory` the FIRST call fails too — this is the
+    cold-boot shape: the harness starts before Wi-Fi associates, kiro-cli
+    exits immediately, and the initial spawn is the one that fails.
+    """
+
+    def __init__(self, num_failures: int, *, error: Exception | None = None) -> None:
+        self._num_failures = num_failures
+        self._error = error or KiroAcpError("kiro-cli process exited")
+        self.built: list[FakeSession] = []
+        self.call_count = 0
+
+    def __call__(self) -> FakeSession:
+        self.call_count += 1
+        if self.call_count <= self._num_failures:
+            raise self._error
+        session = FakeSession(prompt_prefix=f"reply{len(self.built)}")
+        self.built.append(session)
+        return session
+
+
+def test_initial_spawn_failure_does_not_raise_and_arms_the_watchdog() -> None:
+    """start() returns on a failed first spawn; the unit is up-but-degraded."""
+    factory = DeferredFactory(num_failures=1000)
+    unit = KiroSessionUnit(
+        factory,
+        cwd="/work",
+        monitor_interval=10.0,
+        backoff_initial_s=30.0,  # the retry is armed but will not land during the test
+    )
+    stop_event = threading.Event()
+    try:
+        unit.start(stop_event)  # must NOT raise
+
+        assert unit._thread is not None and unit._thread.is_alive()
+        assert unit.is_alive() is False
+        status = unit.status()
+        assert status["alive"] is False
+        assert status["degraded"] is True
+        assert isinstance(status["restarts"], int)
+    finally:
+        unit.stop(timeout=2.0)
+        stop_event.set()
+
+
+def test_degraded_start_logs_the_named_line(caplog) -> None:
+    factory = DeferredFactory(num_failures=1)
+    unit = KiroSessionUnit(factory, cwd="/work", monitor_interval=10.0)
+    stop_event = threading.Event()
+    with caplog.at_level("INFO"):
+        try:
+            unit.start(stop_event)
+        finally:
+            unit.stop(timeout=2.0)
+            stop_event.set()
+    messages = " | ".join(r.getMessage() for r in caplog.records)
+    assert "started degraded" in messages
+    assert "kiro-cli process exited" in messages
+    assert "retrying under watchdog" in messages
+
+
+def test_watchdog_tick_respawns_when_there_is_no_session() -> None:
+    """A session-less unit is a RESTARTABLE state, not a resting one.
+
+    Driven WITHOUT the monitor thread (no ``start()``) so the restart count is
+    exactly the manual tick's, with no race against the thread's own first tick.
+    """
+    factory = FakeFactory()
+    unit = KiroSessionUnit(factory, cwd="/work", monitor_interval=10.0, backoff_initial_s=0.01)
+    assert unit.is_alive() is False
+
+    unit._watchdog_tick()
+
+    assert unit.is_alive() is True
+    status = unit.status()
+    assert status["alive"] is True
+    assert status["degraded"] is False
+    assert status["restarts"] == 1
+
+
+def test_degraded_unit_recovers_under_its_own_monitor_thread(caplog) -> None:
+    factory = DeferredFactory(num_failures=1)
+    unit = KiroSessionUnit(
+        factory,
+        cwd="/work",
+        monitor_interval=0.01,
+        backoff_initial_s=0.01,
+        backoff_max_s=0.02,
+    )
+    stop_event = threading.Event()
+    with caplog.at_level("INFO"):
+        try:
+            unit.start(stop_event)
+            assert _poll_until(lambda: unit.is_alive(), timeout=5.0)
+            # Exactly one restart: the degraded start's very first watchdog
+            # tick respawned, and the session stayed alive afterwards.
+            assert unit.status()["restarts"] == 1
+        finally:
+            unit.stop(timeout=2.0)
+            stop_event.set()
+    messages = " | ".join(r.getMessage() for r in caplog.records)
+    assert "recovered" in messages
+
+
+def test_repeated_initial_failures_keep_backing_off_without_raising() -> None:
+    """Nothing leaks out, the thread survives, and the backoff grows to its cap."""
+    factory = DeferredFactory(num_failures=1000)
+    unit = KiroSessionUnit(
+        factory,
+        cwd="/work",
+        monitor_interval=0.001,
+        backoff_initial_s=0.001,
+        backoff_max_s=0.004,
+    )
+    stop_event = threading.Event()
+    try:
+        unit.start(stop_event)
+        assert _poll_until(lambda: unit.status()["restarts"] >= 4, timeout=5.0)
+        assert unit._thread is not None and unit._thread.is_alive()
+        assert unit.is_alive() is False
+        assert unit.status()["degraded"] is True
+        assert unit._backoff <= 0.004  # capped, never unbounded
+    finally:
+        unit.stop(timeout=2.0)
+        stop_event.set()
+
+
+def test_supervisor_lists_a_degraded_kiro_unit_as_started(caplog) -> None:
+    """The supervisor must log 'started', never 'start failed' (h12)."""
+    from reachy_nova.harness import supervisor
+
+    factory = DeferredFactory(num_failures=1)
+    unit = KiroSessionUnit(factory, cwd="/work", monitor_interval=10.0)
+    stop_event = threading.Event()
+    with caplog.at_level("INFO"):
+        try:
+            started = supervisor._start_components([unit], stop_event)
+        finally:
+            unit.stop(timeout=2.0)
+            stop_event.set()
+    messages = " | ".join(r.getMessage() for r in caplog.records)
+    assert started == [unit]
+    assert "started name=kiro_session" in messages
+    assert "start failed name=kiro_session" not in messages
+
+
+# --------------------------------------------------------------------------- #
+# 8. request_restart(): the network-change trigger (task t5).                 #
+# --------------------------------------------------------------------------- #
+
+
+def test_request_restart_closes_the_session_and_respawns_immediately() -> None:
+    factory = FakeFactory()
+    unit = KiroSessionUnit(
+        factory,
+        cwd="/work",
+        monitor_interval=0.01,
+        backoff_initial_s=5.0,  # would be a 5s wait if the reset did not happen
+        backoff_max_s=10.0,
+    )
+    stop_event = threading.Event()
+    try:
+        unit.start(stop_event)
+        first = factory.built[0]
+
+        unit.request_restart("joined ssid=iPhone (5)")
+
+        assert _poll_until(lambda: factory.call_count >= 2, timeout=3.0)
+        assert first.closed is True
+        assert unit.is_alive() is True
+        assert unit.status()["restarts"] == 1
+        # Backoff was reset by the request, not doubled from a 5s ladder.
+        assert unit._backoff == 5.0
+    finally:
+        unit.stop(timeout=2.0)
+        stop_event.set()
+
+
+def test_request_restart_logs_the_reason(caplog) -> None:
+    factory = FakeFactory()
+    unit = KiroSessionUnit(factory, cwd="/work", monitor_interval=10.0)
+    stop_event = threading.Event()
+    with caplog.at_level("INFO"):
+        try:
+            unit.start(stop_event)
+            unit.request_restart("moved ip=172.20.10.2")
+        finally:
+            unit.stop(timeout=2.0)
+            stop_event.set()
+    messages = " | ".join(r.getMessage() for r in caplog.records)
+    assert "restart requested reason=moved ip=172.20.10.2" in messages
+
+
+def test_request_restart_before_start_is_safe() -> None:
+    unit = KiroSessionUnit(FakeFactory(), cwd="/work", monitor_interval=10.0)
+    unit.request_restart("joined")  # must not raise
+    assert unit.status()["degraded"] is True
+
+
+def test_request_restart_survives_a_close_that_raises() -> None:
+    session = FailingSession(fail_at="never", error=RuntimeError("unused"))
+    session._close_error = RuntimeError("close is broken")
+    unit = KiroSessionUnit(lambda: session, cwd="/work", monitor_interval=10.0)
+    stop_event = threading.Event()
+    try:
+        unit.start(stop_event)
+        unit.request_restart("joined")  # must not raise
+        assert unit.status()["degraded"] is True
+    finally:
+        unit.stop(timeout=2.0)
+        stop_event.set()

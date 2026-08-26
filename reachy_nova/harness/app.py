@@ -20,6 +20,8 @@ The graph::
     NovaBrowser.on_progress ──► sonic.inject_text        (browse tool, flag-gated)
     memory (qq) ──MemoryLeg──rules.yaml──► sonic.inject_text
     sonic.on_transcript(ASSISTANT) ──► CognitionFeed.message  (NDJSON, stdout)
+    NetworkUnit joined/moved ──NetworkReactor──► sonic.request_immediate_restart
+                                              └► kiro_unit.request_restart
 
 Optional legs degrade, never crash: the browser exists only when
 ``NOVA_ACT_ENABLED`` is on, the vision leg only when ``NOVA_OMNI_MODEL_ID`` is
@@ -42,6 +44,7 @@ from . import statedir
 from .cognition_feed import CognitionFeed
 from .gate import EchoGate, resolve_policy
 from .hearing import TeeHearing
+from .network import NetworkUnit
 from .rules_overlay import upsert_rule
 from .speaking import SonicSpeaker
 from .tools import TOOL_SPECS, IntentTools
@@ -136,6 +139,122 @@ def ensure_face_rule(*, reload_timeout: float | None = None) -> bool:
 # --------------------------------------------------------------------------- #
 # Browser lifecycle adapter                                                    #
 # --------------------------------------------------------------------------- #
+
+
+class NetworkReactor:
+    """Turns a network transition into an immediate restart of the cloud legs.
+
+    The consumer half of :class:`~reachy_nova.harness.network.NetworkUnit`
+    (task t5). Two rules, and the asymmetry between them is the whole design:
+
+    * **joined / moved** — the machine has a NEW address. Every open cloud
+      connection is bound to the OLD one and is now a zombie that no amount of
+      waiting fixes, so both cloud legs are restarted at once: Sonic's stream
+      (its liveness watchdog defaults to 180 s, which alone cannot meet the
+      60 s "the mind is back" bound) and the Kiro session (whose kiro-cli
+      child holds its own auth/HTTP state).
+    * **dropped** — log only. Nothing is torn down on a drop: both legs
+      already have their own watchdogs, and killing a session while offline
+      only guarantees a failed respawn into a dead network. The units come
+      back on the JOIN, which is the transition that carries new information.
+
+    Not a thread of its own: it is a component solely so that ``start()``
+    hands it the supervisor's ``stop_event``, which the Sonic FALLBACK restart
+    path needs. Callbacks run on the NetworkUnit's poll thread and never
+    raise — a failure in one leg must not cost the other one its restart.
+    """
+
+    name = "network_reactor"
+
+    def __init__(self, sonic: object, kiro_unit: object | None = None) -> None:
+        self._sonic = sonic
+        self._kiro_unit = kiro_unit
+        self._stop_event: threading.Event | None = None
+
+    def start(self, stop_event: threading.Event) -> None:
+        self._stop_event = stop_event
+
+    def stop(self, timeout: float = 1.0) -> None:  # noqa: ARG002 - protocol shape
+        return None
+
+    def is_alive(self) -> bool:
+        return True
+
+    # -- the callback NetworkUnit.on_change registers -------------------------
+
+    def on_network_change(self, event: str, info: dict) -> None:
+        """``callback(event, info)`` for :meth:`NetworkUnit.on_change`."""
+        if event == "dropped":
+            _stage(
+                "supervise",
+                "nova",
+                "network",
+                "network dropped — cloud legs left to their own watchdogs "
+                "(nothing torn down; restart happens on the join)",
+            )
+            return
+        where = f"{event} ssid={info.get('ssid') or 'unknown'} ip={info.get('ip')}"
+        self._restart_sonic(where)
+        self._restart_kiro(where)
+
+    # -- the two legs ----------------------------------------------------------
+
+    def _restart_sonic(self, reason: str) -> None:
+        """Restart the Sonic stream now; NEVER raises into the poll loop.
+
+        Prefers the explicit ``request_immediate_restart(reason)`` seam (added
+        by task t7: thread-safe, resets the backoff, restarts even a healthy
+        stream). The ``getattr`` fallback is the stop+restart pair that existed
+        before it, kept so this leg still works against an older/stub Sonic —
+        and the path taken is NAMED in the log, so "which mechanism actually
+        ran" is never a guess.
+        """
+        request = getattr(self._sonic, "request_immediate_restart", None)
+        try:
+            if callable(request):
+                request(reason)
+                _stage(
+                    "supervise",
+                    "nova",
+                    "network",
+                    f"sonic restart requested path=request_immediate_restart reason={reason}",
+                )
+                return
+            stop_event = self._stop_event
+            if stop_event is None:
+                _stage(
+                    "supervise",
+                    "nova",
+                    "network",
+                    f"sonic restart skipped reason=not-started-yet trigger={reason}",
+                )
+                return
+            self._sonic.stop()  # type: ignore[attr-defined]
+            self._sonic.restart(stop_event)  # type: ignore[attr-defined]
+            _stage(
+                "supervise",
+                "nova",
+                "network",
+                f"sonic restart requested path=stop+restart reason={reason}",
+            )
+        except Exception as err:  # noqa: BLE001 - one leg must not cost the other
+            _stage(
+                "supervise", "nova", "network", f"sonic restart failed reason={reason} detail={err}"
+            )
+
+    def _restart_kiro(self, reason: str) -> None:
+        """Ask the Kiro session unit to respawn now; NEVER raises."""
+        if self._kiro_unit is None:
+            return
+        try:
+            self._kiro_unit.request_restart(reason)  # type: ignore[attr-defined]
+            _stage(
+                "supervise", "nova", "network", f"kiro session restart requested reason={reason}"
+            )
+        except Exception as err:  # noqa: BLE001
+            _stage(
+                "supervise", "nova", "network", f"kiro restart failed reason={reason} detail={err}"
+            )
 
 
 class BrowserComponent:
@@ -292,6 +411,17 @@ def build_app() -> list[object]:
     # any other component; the forge/use_skill tools above already hold it.
     if kiro_unit is not None:
         components.append(kiro_unit)
+
+    # network leg — ALWAYS constructed: it is cheap, local, and reads nothing
+    # but /proc, `ip addr` and a state-dir file, so there is no failure mode
+    # worth degrading over. The reactor is appended FIRST so the supervisor
+    # hands it the stop_event before the poll thread can fire a transition at
+    # it (the Sonic fallback restart path needs that event).
+    reactor = NetworkReactor(sonic, kiro_unit)
+    network_unit = NetworkUnit()
+    network_unit.on_change(reactor.on_network_change)
+    components.append(reactor)
+    components.append(network_unit)
 
     # read leg — bus is optional-degraded: no broker means named drops, not death
     bus_component = None
