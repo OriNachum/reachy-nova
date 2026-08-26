@@ -1450,7 +1450,7 @@ def test_end_silence_leaves_an_inhibition_we_did_not_add_alone(quiet_tools):
     # One spool for the (idempotent) arm; NONE for the release — somebody else
     # is holding 'speak' down and un-muting them would be a silent override.
     assert len(_inhibition_payloads(engine)) == 1
-    assert result["body_restored"] is False
+    assert result["body_restored"] is True  # the voice unmute is still ours to send
 
 
 def test_end_silence_without_a_wired_quiet_state_is_refused(tools):
@@ -1527,3 +1527,23 @@ def test_end_silence_description_says_leaving_is_silent():
 def test_quiet_bounds_are_sane():
     assert MIN_QUIET_MINUTES == 1
     assert MAX_QUIET_MINUTES == 180
+
+
+def _ops(engine, op):
+    return [c for c in engine.seen if c.get("op") == op]
+
+
+def test_stay_silent_also_spools_the_runtime_mute_intent(quiet_tools):
+    with intents_engine() as engine:
+        result = json.loads(quiet_tools.execute("stay_silent", {"minutes": 5}))
+    assert result["body_muted"] is True
+    assert len(_ops(engine, "mute")) == 1
+    assert _ops(engine, "unmute") == []
+
+
+def test_end_silence_spools_unmute_after_a_mute(quiet_tools):
+    with intents_engine() as engine:
+        quiet_tools.execute("stay_silent", {"minutes": 5})
+        result = json.loads(quiet_tools.execute("end_silence", {}))
+    assert result["body_restored"] is True
+    assert len(_ops(engine, "unmute")) == 1

@@ -269,6 +269,12 @@ QUIET_NOT_WIRED_REASON = "timed quiet is not wired up yet"
 #: That is the honest limit of the c44 decision; nothing else in the runtime's
 #: intent surface can mute the speech actuator directly.
 SPEAK_BEHAVIOR = "speak"
+# Runtime intent kinds (reachy-mini-cli t17) that gate the body's OWN voice —
+# rule `say` bypasses the 'speak' behavior (rule_engine.py -> speech_act.py),
+# so the inhibition above only silences rules that run=speak; `mute` closes
+# the rest at the speech actuator. Both are spooled: belt and braces.
+MUTE_OP = "mute"
+UNMUTE_OP = "unmute"
 
 #: How often the component tick polls the quiet deadline so an EXPIRY (not
 #: just a hand-release) also restores the body's voice.
@@ -930,6 +936,7 @@ class IntentTools:
         # operator, a rule) must survive our release untouched.
         self._quiet_lock = threading.RLock()
         self._quiet_added_speak = False
+        self._quiet_muted_voice = False
         self._tick_stop: threading.Event | None = None
         self._ticker: threading.Thread | None = None
         self._commands_dir = Path(commands_dir) if commands_dir is not None else None
@@ -1286,30 +1293,49 @@ class IntentTools:
     # -- the runtime's own mouth -------------------------------------------
 
     def _mute_body(self) -> bool:
-        """Merge :data:`SPEAK_BEHAVIOR` into the runtime's inhibited set."""
+        """Inhibit :data:`SPEAK_BEHAVIOR` AND spool the runtime's ``mute`` intent.
+
+        Returns True only when both ops were confirmed; an older runtime that
+        does not know ``mute`` (typed unknown-kind refusal) still gets the
+        inhibition, and the result reports ``body_muted: False`` honestly.
+        """
         current = current_inhibitions()
         merged = sorted(set(current) | {SPEAK_BEHAVIOR})
         result = self.submit_and_await({"op": SET_INHIBITION, "behaviors": merged})
         ok = result.get("ok") is True
+        muted = self.submit_and_await({"op": MUTE_OP}).get("ok") is True
         with self._quiet_lock:
             # Latched, never recomputed: a second stay_silent (an "extended")
             # reads a state.json that already lists 'speak' and would otherwise
             # forget that WE are the ones holding it.
             if ok and SPEAK_BEHAVIOR not in current:
                 self._quiet_added_speak = True
-        return ok
+            if muted:
+                self._quiet_muted_voice = True
+        return ok and muted
 
     def _unmute_body(self) -> bool:
-        """Take back only the inhibition we added; leave everything else alone."""
+        """Take back only what we added: the inhibition and/or the voice mute."""
         with self._quiet_lock:
-            if not self._quiet_added_speak:
-                return False
-        remaining = sorted(set(current_inhibitions()) - {SPEAK_BEHAVIOR})
-        result = self.submit_and_await({"op": SET_INHIBITION, "behaviors": remaining})
-        ok = result.get("ok") is True
-        if ok:
-            with self._quiet_lock:
-                self._quiet_added_speak = False
+            added_speak = self._quiet_added_speak
+            muted_voice = self._quiet_muted_voice
+        if not added_speak and not muted_voice:
+            return False
+        ok = True
+        if added_speak:
+            remaining = sorted(set(current_inhibitions()) - {SPEAK_BEHAVIOR})
+            result = self.submit_and_await({"op": SET_INHIBITION, "behaviors": remaining})
+            if result.get("ok") is True:
+                with self._quiet_lock:
+                    self._quiet_added_speak = False
+            else:
+                ok = False
+        if muted_voice:
+            if self.submit_and_await({"op": UNMUTE_OP}).get("ok") is True:
+                with self._quiet_lock:
+                    self._quiet_muted_voice = False
+            else:
+                ok = False
         return ok
 
     # -- supervisor component ----------------------------------------------

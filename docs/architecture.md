@@ -120,7 +120,7 @@ so it survives either side restarting. Everything file-shaped lives under one
 | **MQTT `reachy/events/<source>/<type>`** | body → mind | compact JSON cues (`rule/*`, `intent/*`, `motion/*`, provisional `pat`/`face`/`vision`). Not retained, QoS 0: a cue is a *moment*. |
 | **MQTT `reachy/state/online`** (retained, last-will) | body → mind | availability only; never treated as a cue |
 | **MQTT `reachy/state/clip`** (retained) | body → mind | `{available, path, ts, duration_s, …}` for the camera clip the rider keeps overwriting in place |
-| **MQTT `reachy/state/nova/*`** (retained) | mind → world | the harness's own availability, in its own namespace |
+| **MQTT `nova/harness/state`** (retained, last-will) | mind → world (and body) | the harness's own availability `{status: online|offline, ts}` — the runtime's `MindPresence` subscribes to it so a face-lock releases when the mind goes away |
 | **Audio tee** (`<state>/audio_tee.sock`, Unix stream) | body → mind | one JSON header line (`format`, `channels`, `samplerate`) then endless float32 mono samples — what the mic hears, post-AEC |
 | **Intents spool** (`<state>/behavior/intents/commands/*.json` → `results/<cmd_id>.json`) | mind → body → mind | atomically written op dicts (`run_behavior`, `declare_goal`, `set_mode`, `set_inhibition`, `goto`, enroll); the engine's verdict comes back under the same id |
 | **Rules overlay** (`<state>/behavior/rules.toml`, nova-managed block) | mind → body | `[[react]]` rules the mind authored, `nova-` prefixed, inside sentinel markers, merged by id; operator rules outside the block are byte-preserved |
