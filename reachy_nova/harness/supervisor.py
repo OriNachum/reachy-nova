@@ -327,17 +327,7 @@ def run(
         while not stop_event.is_set():
             live = statedir.engine_is_live()
             if live != previous:
-                if live:
-                    _log("engine", "engine live")
-                elif previous is None:
-                    _log("engine", "engine absent")
-                else:
-                    _log("engine", "dropped reason=engine-heartbeat-lost")
-                    if lock_state is not None:
-                        try:
-                            lock_state.on_engine_dropped()  # type: ignore[attr-defined]
-                        except Exception as err:  # noqa: BLE001 - a belief update must not kill the loop
-                            _log("engine", f"lock-state update failed detail={err}")
+                _log_engine_transition(live, previous, lock_state)
                 previous = live
             ticks += 1
             if tick_hook is not None:
@@ -347,6 +337,25 @@ def run(
     finally:
         _stop_components(started)
         _log("stop", f"harness down pid={os.getpid()} ticks={ticks}")
+
+
+def _log_engine_transition(live: bool, previous: bool | None, lock_state: object | None) -> None:
+    """Log the engine heartbeat TRANSITION and, on a live -> dropped edge,
+    notify *lock_state* (see :func:`run`'s docstring for why).
+    """
+    if live:
+        _log("engine", "engine live")
+        return
+    if previous is None:
+        _log("engine", "engine absent")
+        return
+    _log("engine", "dropped reason=engine-heartbeat-lost")
+    if lock_state is None:
+        return
+    try:
+        lock_state.on_engine_dropped()  # type: ignore[attr-defined]
+    except Exception as err:  # noqa: BLE001 - a belief update must not kill the loop
+        _log("engine", f"lock-state update failed detail={err}")
 
 
 def install_signal_handlers(stop_event: threading.Event) -> Callable[[], None]:

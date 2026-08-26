@@ -664,43 +664,12 @@ class NovaBus:
             self._handle_clip_state(raw)
             return
 
-        parsed_topic = parse_event_topic(topic)
-        if parsed_topic is None:
-            # Retained state and anything else off the events tree are never cues.
-            sensory_log.stage(
-                STAGE_ROUTE, SOURCE, topic, f"dropped reason={REASON_NOT_AN_EVENT}"
-            )
+        parsed = self._parse_event(topic, raw)
+        if parsed is None:
             return
-        source, event_type = parsed_topic
-        key = f"{source}/{event_type}"
+        source, event_type, key, payload = parsed
 
-        try:
-            payload = json.loads(raw.decode() if isinstance(raw, bytes) else str(raw))
-        except (ValueError, UnicodeDecodeError) as err:
-            sensory_log.stage(
-                STAGE_ROUTE, SOURCE, key, f"dropped reason={REASON_BAD_PAYLOAD}: {err}"
-            )
-            return
-        if not isinstance(payload, dict):
-            sensory_log.stage(STAGE_ROUTE, SOURCE, key, f"dropped reason={REASON_BAD_PAYLOAD}")
-            return
-
-        block_type = payload.get("t", source)
-        if block_type not in KNOWN_BLOCK_TYPES:
-            # Forward-compatible extension: skip it, name it, never guess.
-            sensory_log.stage(
-                STAGE_ROUTE, SOURCE, key, f"dropped reason={REASON_UNKNOWN_BLOCK} t={block_type}"
-            )
-            return
-
-        if self._on_event is not None:
-            observed = dict(payload)
-            observed.setdefault("source", source)
-            observed.setdefault("type", event_type)
-            try:
-                self._on_event(observed)
-            except Exception as err:
-                logger.warning("bus: on_event callback failed: %s", err, exc_info=True)
+        self._notify_on_event(source, event_type, payload)
 
         text, reason = route_event(self.rules, source, event_type, payload)
         if text is None:
@@ -711,7 +680,67 @@ class NovaBus:
         text = self._mark_quiet(text)
 
         rule = rule_for(self.rules, source, event_type, payload)
+        self._deliver(source, event_type, key, payload, text, rule)
 
+    def _parse_event(self, topic: str, raw: bytes | str) -> tuple[str, str, str, dict] | None:
+        """Resolve a raw bus message into ``(source, event_type, key, payload)``.
+
+        Returns ``None`` (after logging the drop reason) for anything that
+        isn't a well-formed, known-block-type event on the events tree.
+        """
+        parsed_topic = parse_event_topic(topic)
+        if parsed_topic is None:
+            # Retained state and anything else off the events tree are never cues.
+            sensory_log.stage(
+                STAGE_ROUTE, SOURCE, topic, f"dropped reason={REASON_NOT_AN_EVENT}"
+            )
+            return None
+        source, event_type = parsed_topic
+        key = f"{source}/{event_type}"
+
+        try:
+            payload = json.loads(raw.decode() if isinstance(raw, bytes) else str(raw))
+        except (ValueError, UnicodeDecodeError) as err:
+            sensory_log.stage(
+                STAGE_ROUTE, SOURCE, key, f"dropped reason={REASON_BAD_PAYLOAD}: {err}"
+            )
+            return None
+        if not isinstance(payload, dict):
+            sensory_log.stage(STAGE_ROUTE, SOURCE, key, f"dropped reason={REASON_BAD_PAYLOAD}")
+            return None
+
+        block_type = payload.get("t", source)
+        if block_type not in KNOWN_BLOCK_TYPES:
+            # Forward-compatible extension: skip it, name it, never guess.
+            sensory_log.stage(
+                STAGE_ROUTE, SOURCE, key, f"dropped reason={REASON_UNKNOWN_BLOCK} t={block_type}"
+            )
+            return None
+
+        return source, event_type, key, payload
+
+    def _notify_on_event(self, source: str, event_type: str, payload: dict) -> None:
+        if self._on_event is None:
+            return
+        observed = dict(payload)
+        observed.setdefault("source", source)
+        observed.setdefault("type", event_type)
+        try:
+            self._on_event(observed)
+        except Exception as err:
+            logger.warning("bus: on_event callback failed: %s", err, exc_info=True)
+
+    def _deliver(
+        self, source: str, event_type: str, key: str, payload: dict, text: str, rule: dict
+    ) -> None:
+        """Reserve the dedupe key, call ``on_inject``, then commit or roll back.
+
+        Concurrent same-key events are delivered exactly once: the dedupe
+        reservation happens under the lock BEFORE ``on_inject`` runs, and is
+        rolled back if it raises so a failed delivery never poisons the
+        window for the retry that follows it. History is recorded only
+        after ``on_inject`` succeeds.
+        """
         dedupe_key = dedupe_key_for(source, event_type, payload, rule)
         now = self._clock()
         with self._dedupe_lock:
