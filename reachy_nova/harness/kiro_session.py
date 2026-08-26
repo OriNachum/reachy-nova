@@ -217,6 +217,9 @@ class KiroSessionUnit:
         #: wait entirely (the caller observed a network change; waiting a
         #: second on a stream bound to a dead address buys nothing).
         self._skip_backoff_once = False
+        #: Why that requested restart was asked for — named in its log line so
+        #: an immediate restart reads as "requested", never as a zero backoff.
+        self._requested_reason: str | None = None
 
         self._backoff = self._backoff_initial
         self._healthy_since: float | None = None
@@ -290,6 +293,7 @@ class KiroSessionUnit:
             self._backoff = self._backoff_initial
             self._healthy_since = None
             self._skip_backoff_once = True
+            self._requested_reason = reason
             self._degraded = True
         _sense("restart", f"restart requested reason={reason}; respawning session now")
         if session is not None:
@@ -537,10 +541,17 @@ class KiroSessionUnit:
                 delay = self._backoff
                 self._backoff = min(self._backoff * 2.0, self._backoff_max)
             was_degraded = self._degraded
+            requested = self._requested_reason
+            self._requested_reason = None
 
-        _sense("restart", f"restart #{self._restarts} in {delay:.2f}s (capped exponential backoff)")
         if delay > 0.0:
+            _sense(
+                "restart",
+                f"restart #{self._restarts} in {delay:.2f}s (capped exponential backoff)",
+            )
             self._wait(delay)
+        else:
+            _sense("restart", f"restart #{self._restarts} now (requested: {requested})")
         if self._should_stop():
             return
 

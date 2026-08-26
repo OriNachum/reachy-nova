@@ -145,7 +145,7 @@ class NetworkReactor:
     """Turns a network transition into an immediate restart of the cloud legs.
 
     The consumer half of :class:`~reachy_nova.harness.network.NetworkUnit`
-    (task t5). Two rules, and the asymmetry between them is the whole design:
+    (task t5). Three rules, and the asymmetry between them is the whole design:
 
     * **joined / moved** — the machine has a NEW address. Every open cloud
       connection is bound to the OLD one and is now a zombie that no amount of
@@ -157,6 +157,12 @@ class NetworkReactor:
       already have their own watchdogs, and killing a session while offline
       only guarantees a failed respawn into a dead network. The units come
       back on the JOIN, which is the transition that carries new information.
+    * **the initial observation** (``info["initial"]``) — log only. The unit's
+      first poll always reports a transition, because "what the network
+      already was" has to reach the journal (spec h13). But it is a BASELINE,
+      not a change: both cloud legs were constructed seconds earlier against
+      exactly this network, so restarting them here would throw away a healthy
+      connecting stream and cost a reconnect cycle at every single boot.
 
     Not a thread of its own: it is a component solely so that ``start()``
     hands it the supervisor's ``stop_event``, which the Sonic FALLBACK restart
@@ -184,6 +190,15 @@ class NetworkReactor:
 
     def on_network_change(self, event: str, info: dict) -> None:
         """``callback(event, info)`` for :meth:`NetworkUnit.on_change`."""
+        if info.get("initial"):
+            _stage(
+                "supervise",
+                "nova",
+                "network",
+                f"network baseline {event} ssid={info.get('ssid') or 'unknown'} "
+                f"ip={info.get('ip')} (no restart — the legs started against this network)",
+            )
+            return
         if event == "dropped":
             _stage(
                 "supervise",

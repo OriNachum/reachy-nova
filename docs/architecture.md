@@ -377,7 +377,10 @@ lives under `~/.reachy_nova/skills-active/`.
   eyes on this (`harness/network.py`): a 2 s poll of the default route, the
   wlan address and the dispatcher's `network-change` file, latched into one
   `[SENSE stage=supervise … event=network] joined=… / dropped …` line per
-  transition. On a **join or move** it restarts both cloud legs at once —
+  transition. The unit's FIRST observation is flagged `initial` — it reaches
+  the journal (the boot state must be visible) but restarts nothing, since both
+  legs were just constructed against that very network. On a **join or move**
+  it restarts both cloud legs at once —
   `sonic.request_immediate_restart()` and `kiro_unit.request_restart()` — because
   every open connection is bound to the address that just went away, and Sonic's
   liveness watchdog alone (180 s) cannot meet the 60 s "the mind is back" bound.

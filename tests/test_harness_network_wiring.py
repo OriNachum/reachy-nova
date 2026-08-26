@@ -105,7 +105,9 @@ def test_joined_or_moved_requests_one_sonic_and_one_kiro_restart(event) -> None:
     reactor = NetworkReactor(sonic, kiro)
     reactor.start(threading.Event())
 
-    reactor.on_network_change(event, {"ip": "172.20.10.2", "ssid": "iPhone (5)"})
+    reactor.on_network_change(
+        event, {"ip": "172.20.10.2", "ssid": "iPhone (5)", "initial": False}
+    )
 
     assert len(sonic.restart_reasons) == 1
     assert len(kiro.restart_reasons) == 1
@@ -119,7 +121,7 @@ def test_dropped_requests_no_restart_at_all(caplog) -> None:
     reactor.start(threading.Event())
 
     with caplog.at_level("INFO"):
-        reactor.on_network_change("dropped", {"reason": "no-route"})
+        reactor.on_network_change("dropped", {"reason": "no-route", "initial": False})
 
     assert sonic.restart_reasons == []
     assert kiro.restart_reasons == []
@@ -132,7 +134,9 @@ def test_a_raising_sonic_does_not_cost_kiro_its_restart(caplog) -> None:
     reactor.start(threading.Event())
 
     with caplog.at_level("INFO"):
-        reactor.on_network_change("joined", {"ip": "1.2.3.4", "ssid": "bar-nachum"})
+        reactor.on_network_change(
+            "joined", {"ip": "1.2.3.4", "ssid": "bar-nachum", "initial": False}
+        )
 
     assert len(sonic.restart_reasons) == 1  # it was asked, it just blew up
     assert len(kiro.restart_reasons) == 1
@@ -147,7 +151,9 @@ def test_reactor_never_raises_into_the_network_unit() -> None:
     reactor = NetworkReactor(sonic, kiro)
     reactor.start(threading.Event())
 
-    reactor.on_network_change("joined", {"ip": "1.2.3.4", "ssid": "x"})  # must not raise
+    reactor.on_network_change(
+        "joined", {"ip": "1.2.3.4", "ssid": "x", "initial": False}
+    )  # must not raise
 
 
 def test_sonic_restart_path_is_named_in_the_log(caplog) -> None:
@@ -155,7 +161,7 @@ def test_sonic_restart_path_is_named_in_the_log(caplog) -> None:
     reactor = NetworkReactor(sonic, kiro)
     reactor.start(threading.Event())
     with caplog.at_level("INFO"):
-        reactor.on_network_change("joined", {"ip": "1.2.3.4", "ssid": "x"})
+        reactor.on_network_change("joined", {"ip": "1.2.3.4", "ssid": "x", "initial": False})
     assert "path=request_immediate_restart" in _messages(caplog)
 
 
@@ -167,7 +173,7 @@ def test_legacy_sonic_falls_back_to_stop_plus_restart(caplog) -> None:
     reactor.start(stop_event)
 
     with caplog.at_level("INFO"):
-        reactor.on_network_change("joined", {"ip": "1.2.3.4", "ssid": "x"})
+        reactor.on_network_change("joined", {"ip": "1.2.3.4", "ssid": "x", "initial": False})
 
     assert sonic.stops == 1
     assert sonic.restarts == [stop_event]
@@ -179,7 +185,7 @@ def test_reactor_without_a_kiro_unit_still_restarts_sonic() -> None:
     sonic = RecordingSonic()
     reactor = NetworkReactor(sonic, None)
     reactor.start(threading.Event())
-    reactor.on_network_change("joined", {"ip": "1.2.3.4", "ssid": "x"})
+    reactor.on_network_change("joined", {"ip": "1.2.3.4", "ssid": "x", "initial": False})
     assert len(sonic.restart_reasons) == 1
 
 
@@ -188,28 +194,69 @@ def test_reactor_without_a_kiro_unit_still_restarts_sonic() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_one_network_unit_transition_fires_exactly_one_restart_each(tmp_path) -> None:
+def test_initial_observation_restarts_nothing_and_says_so(caplog) -> None:
+    """The startup baseline is not a change: no restart, one named line."""
     sonic, kiro = RecordingSonic(), RecordingKiro()
     reactor = NetworkReactor(sonic, kiro)
     reactor.start(threading.Event())
 
-    online = {"value": True}
+    with caplog.at_level("INFO"):
+        reactor.on_network_change(
+            "joined", {"ip": "192.168.1.162", "ssid": "bar-nachum", "initial": True}
+        )
+
+    assert sonic.restart_reasons == []
+    assert kiro.restart_reasons == []
+    text = _messages(caplog)
+    assert "network baseline joined ssid=bar-nachum ip=192.168.1.162" in text
+    assert "no restart" in text
+
+
+def test_initial_dropped_observation_restarts_nothing_either(caplog) -> None:
+    sonic, kiro = RecordingSonic(), RecordingKiro()
+    reactor = NetworkReactor(sonic, kiro)
+    reactor.start(threading.Event())
+
+    with caplog.at_level("INFO"):
+        reactor.on_network_change("dropped", {"reason": "no-route", "initial": True})
+
+    assert sonic.restart_reasons == []
+    assert kiro.restart_reasons == []
+    assert "network baseline dropped" in _messages(caplog)
+
+
+def test_initial_join_then_a_real_transition_restarts_exactly_once_each(tmp_path) -> None:
+    """End-to-end over the REAL NetworkUnit: boot on a network, then roam.
+
+    The boot observation must cost nothing (the legs were just built against
+    that network); the roam that follows must restart both legs once each.
+    """
+    sonic, kiro = RecordingSonic(), RecordingKiro()
+    reactor = NetworkReactor(sonic, kiro)
+    reactor.start(threading.Event())
+
+    address = {"value": "192.168.1.162"}
     unit = NetworkUnit(
-        route_reader=lambda: online["value"],
-        addr_reader=lambda: "172.20.10.2" if online["value"] else None,
+        route_reader=lambda: address["value"] is not None,
+        addr_reader=lambda: address["value"],
         change_file=tmp_path / "network-change",
         poll_interval=10.0,
     )
     unit.on_change(reactor.on_network_change)
 
-    unit._observe()  # startup -> joined
-    unit._observe()  # stable online — latched, no second callback
+    unit._observe()  # startup baseline -> joined(initial=True)
+    unit._observe()  # stable online — latched, no callback at all
+    assert sonic.restart_reasons == []
+    assert kiro.restart_reasons == []
 
+    address["value"] = "172.20.10.2"
+    unit._observe()  # a REAL move
     assert len(sonic.restart_reasons) == 1
     assert len(kiro.restart_reasons) == 1
+    assert "172.20.10.2" in sonic.restart_reasons[0]
 
-    online["value"] = False
-    unit._observe()  # -> dropped: still exactly one restart each
+    address["value"] = None
+    unit._observe()  # dropped: still exactly one restart each
     assert len(sonic.restart_reasons) == 1
     assert len(kiro.restart_reasons) == 1
 

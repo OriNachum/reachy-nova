@@ -803,3 +803,49 @@ def test_request_restart_survives_a_close_that_raises() -> None:
     finally:
         unit.stop(timeout=2.0)
         stop_event.set()
+
+
+def test_requested_restart_line_reads_as_requested_not_as_a_zero_backoff(caplog) -> None:
+    """An immediate restart must not print 'in 0.00s' — it reads as a bug."""
+    factory = FakeFactory()
+    unit = KiroSessionUnit(
+        factory,
+        cwd="/work",
+        monitor_interval=0.01,
+        backoff_initial_s=5.0,
+        backoff_max_s=10.0,
+    )
+    stop_event = threading.Event()
+    with caplog.at_level("INFO"):
+        try:
+            unit.start(stop_event)
+            unit.request_restart("joined ssid=iPhone (5)")
+            assert _poll_until(lambda: factory.call_count >= 2, timeout=3.0)
+        finally:
+            unit.stop(timeout=2.0)
+            stop_event.set()
+    messages = " | ".join(r.getMessage() for r in caplog.records)
+    assert "restart #1 now (requested: joined ssid=iPhone (5))" in messages
+    assert "in 0.00s" not in messages
+
+
+def test_unrequested_restart_still_names_its_backoff(caplog) -> None:
+    factory = FakeFactory()
+    unit = KiroSessionUnit(
+        factory,
+        cwd="/work",
+        monitor_interval=0.01,
+        backoff_initial_s=0.01,
+        backoff_max_s=0.02,
+    )
+    stop_event = threading.Event()
+    with caplog.at_level("INFO"):
+        try:
+            unit.start(stop_event)
+            factory.built[0].kill()
+            assert _poll_until(lambda: factory.call_count >= 2, timeout=5.0)
+        finally:
+            unit.stop(timeout=2.0)
+            stop_event.set()
+    messages = " | ".join(r.getMessage() for r in caplog.records)
+    assert "capped exponential backoff" in messages

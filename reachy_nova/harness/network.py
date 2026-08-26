@@ -43,10 +43,16 @@ thread — latched, so a stable state costs nothing per poll. Three shapes:
 
 Startup always logs one line (joined or dropped) so the journal shows the
 harness's initial network state, never a silent gap before the first
-transition.
+transition. That FIRST observation is a baseline, not a change: it carries
+``info["initial"] = True`` so a consumer can tell "this is what the network
+already was when I started" from "the network just moved under me". Every
+later transition carries ``info["initial"] = False``.
 
-Consumers (wired in t5): restart the Sonic stream and the Kiro session on
-every ``joined``/``moved``/``dropped``.
+Consumers (wired in t5, ``harness/app.py``'s ``NetworkReactor``): a
+``joined``/``moved`` restarts the Sonic stream and the Kiro session; a
+``dropped`` is logged only; and an ``initial`` observation restarts nothing —
+the legs were constructed seconds earlier against exactly that network, so
+restarting them at boot would cost a reconnect cycle and buy nothing.
 """
 
 from __future__ import annotations
@@ -315,9 +321,9 @@ class NetworkUnit:
 
         if online:
             event = EVENT_MOVED if (not first and prev_online) else EVENT_JOINED
-            self._fire(event, ip, ssid)
+            self._fire(event, ip, ssid, initial=first)
         else:
-            self._fire(EVENT_DROPPED, None, None)
+            self._fire(EVENT_DROPPED, None, None, initial=first)
 
     @staticmethod
     def _safe_call(fn: Callable[[], object], default: object) -> object:
@@ -327,7 +333,15 @@ class NetworkUnit:
             logger.warning("network: reader failed: %s", err, exc_info=True)
             return default
 
-    def _fire(self, event: str, ip: str | None, ssid: str | None) -> None:
+    def _fire(self, event: str, ip: str | None, ssid: str | None, *, initial: bool) -> None:
+        """Log the one transition line and hand it to every callback.
+
+        *initial* marks the startup BASELINE observation — the state the
+        network was already in when this unit started, as opposed to a change
+        that happened while it was watching. It reaches consumers as
+        ``info["initial"]``; the log line is emitted either way (the journal
+        must show the initial state, never a silent gap).
+        """
         if event == EVENT_DROPPED:
             detail = f"dropped reason={REASON_NO_ROUTE}"
             info: dict[str, object] = {"reason": REASON_NO_ROUTE}
@@ -338,6 +352,9 @@ class NetworkUnit:
             detail = f"joined={ssid or 'unknown'} ip={ip}"
             info = {"ip": ip, "ssid": ssid}
 
+        info["initial"] = initial
+        if initial:
+            detail = f"{detail} initial=true"
         sensory_log.stage(STAGE, SOURCE, EVENT, detail)
 
         with self._lock:
