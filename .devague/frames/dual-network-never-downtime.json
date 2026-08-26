@@ -1,0 +1,613 @@
+{
+  "slug": "dual-network-never-downtime",
+  "title": "dual-network-never-downtime",
+  "schema_version": 5,
+  "status": "exported",
+  "created": "2026-08-26T06:45:47Z",
+  "updated": "2026-08-26T08:33:57Z",
+  "claims": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "The Reachy Mini Wireless stays reachable and its mind stays online across both of Ori's networks \u2014 home Wi-Fi (bar-nachum) and the iPhone (5) hotspot \u2014 with never any downtime: the robot joins whichever is available, moves between them without a restart, and operators on spark can always find it",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h4",
+          "text": "the drill in c9 passes in both directions on the real robot, with the transitions logged, before the announcement is made",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "run the c9 drill; announcement holds only if both directions pass with zero SSH",
+      "revisions": []
+    },
+    {
+      "id": "c2",
+      "kind": "before_state",
+      "text": "today the robot has one radio (wlan0) with two NetworkManager profiles: bar-nachum (autoconnect prio 10, home) and iPhone (5) (prio 5, PSK stored, timestamp 0 = never joined until 2026-08-26); it only ever holds one at a time and re-associates on loss",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h8",
+          "text": "nmcli on the robot shows exactly two Wi-Fi profiles on wlan0 with autoconnect=yes, bar-nachum at higher priority than iPhone (5), and both with a non-zero timestamp",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c3",
+      "kind": "assumption",
+      "text": "a live join of iPhone (5) works: 2026-08-26 07:33 the robot activated the hotspot profile (172.20.10.2/28, default route via 172.20.10.1, internet 36 ms) and returned to bar-nachum in ~20 s total; the hotspot must be broadcasting (Ori opens the Personal Hotspot screen) for the SSID to be visible",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c4",
+      "kind": "boundary",
+      "text": "the body is unaffected by any network change: the runtime, rules, senses, tee, spool and local MQTT broker are all on-device; 'downtime' can only ever mean the mind's cloud tiers (Sonic/Lite/Act) and the writer's auth",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h9",
+          "text": "during the c9 drill the runtime never restarts, the engine heartbeat never lapses, and pat/face reactions still fire while Wi-Fi is down (journal + state.json)",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c5",
+      "kind": "requirement",
+      "text": "operators on spark can find the robot on either network: today the registry pins last_ip 192.168.1.162 and reachy-mini.local mDNS does not resolve; on the hotspot the robot gets a 172.20.10.x address that spark only sees if spark is on the hotspot too",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h1",
+          "text": "from spark on the hotspot, 'reachy wireless find' returns the robot's 172.20.10.x address within 30 s of the robot joining, and the registry/pinned alias are refreshed rather than stale",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c6",
+      "kind": "audience",
+      "text": "Ori as the operator (on spark, or carrying the robot with only the phone) and the robot's own mind (the harness), which must keep its cloud tiers and writer alive without anyone SSHing in",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h10",
+          "text": "the drill is executed by Ori with the phone only \u2014 no laptop, no SSH \u2014 and the robot answers speech afterwards",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c7",
+      "kind": "after_state",
+      "text": "the robot joins whichever of bar-nachum / iPhone (5) is available and moves between them with no reboot and no SSH; within 60 s of a switch the mind is fully back (Sonic answers speech, kiro_session alive, MQTT/tee untouched because they are local); spark rediscovers it on the shared network with one command",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h11",
+          "text": "each direction of the switch shows Sonic answering speech and kiro_session 'started' within 60 s of the new default route, and 'reachy wireless find' (or the tailnet address) reaches the robot",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c8",
+      "kind": "why_it_matters",
+      "text": "taking the robot out of the house today gives a body that is alive but a mind that may be silently half-dead: the writer failed at cold boot before Wi-Fi came up and was never retried (journal 2026-08-26), and spark cannot find the robot on the hotspot subnet at all",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h12",
+          "text": "the 2026-08-26 boot journal line 'start failed name=kiro_session \u2026 kiro-cli process exited' is reproduced with Wi-Fi down at start, then disappears after the fix",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c9",
+      "kind": "success_signal",
+      "text": "live drill, both directions, zero SSH: with the harness running, remove bar-nachum (power the AP off or walk out of range) while the hotspot broadcasts -> robot on 172.20.10.x, answers a spoken question and shows kiro_session started in the journal within 60 s; restore bar-nachum -> robot back on 192.168.1.162 with the same; 'reachy wireless find' from spark on the same network returns it each time",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h2",
+          "text": "drill: kill bar-nachum with the harness running and the hotspot up; journal shows kiro_session started (not 'start failed') and Sonic answers speech within 60 s, with no restart command issued",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [
+        {
+          "id": "q1",
+          "text": "is the kiro-cli exit at boot really network ordering (auth refresh needs a route) or something else \u2014 confirm by reproducing with Wi-Fi down before changing units",
+          "resolved": false,
+          "blocking": false,
+          "resolution": ""
+        }
+      ],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c10",
+      "kind": "non_goal",
+      "text": "no change to the body: the runtime, rules, senses, tee, spool and local broker are not touched; no new radio or tethering hardware in this round unless q1 decides otherwise",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h3",
+          "text": "a network switch produces exactly one joined line and one dropped line per transition (latched), grep-able with the existing [SENSE stage=...] convention",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c11",
+      "kind": "decision",
+      "text": "decided by Ori 2026-08-26: with the robot on Tailscale, the iPhone (5) hotspot becomes the PREFERRED network (autoconnect-priority above bar-nachum) and bar-nachum the fallback \u2014 the robot rides the phone wherever Ori is, and falls back to home Wi-Fi when the phone leaves; both profiles keep autoconnect=yes",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h17",
+          "text": "with both networks visible the robot sits on iPhone (5); when the phone leaves, it is on bar-nachum within the c22 bound; when the phone returns, it moves back to the hotspot (NM does not roam to a higher-priority network on its own while connected \u2014 needs a periodic re-evaluation or dispatcher logic)",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [
+        {
+          "id": "q2",
+          "text": "cellular data: Nova Sonic streams the mic continuously at 16 kHz/16-bit (~32 kB/s \u2248 115 MB per hour of awake time, plus vision clips to Lite and Sonic's 24 kHz audio back) \u2014 on the hotspot at home this all rides the phone's cellular plan and battery; is that acceptable, or should hotspot-first apply only when bar-nachum is absent (which is what priority ordering cannot express by itself)?",
+          "resolved": false,
+          "blocking": false,
+          "resolution": ""
+        }
+      ],
+      "links": [],
+      "instruction": "",
+      "revisions": [
+        {
+          "text": "home network stays preferred (bar-nachum autoconnect-priority 10 over iPhone (5) at 5): the hotspot is the away fallback, not a peer; both profiles keep autoconnect=yes",
+          "kind": "decision",
+          "reason": ""
+        }
+      ]
+    },
+    {
+      "id": "c12",
+      "kind": "requirement",
+      "text": "the mind survives a network change: the harness (or its unit) retries the kiro writer's initial spawn under the same watchdog/backoff it already uses for later restarts, and Sonic's stream is re-established on address loss instead of waiting for the liveness watchdog; unit ordering no longer relies on network-online.target alone",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h5",
+          "text": "with Wi-Fi deliberately down at harness start, kiro_session is absent at first and then shows 'started' in the journal after Wi-Fi returns, with no manual restart",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c13",
+      "kind": "requirement",
+      "text": "network transitions are visible by name in the journal like every other degradation ([SENSE stage=supervise ... event=network] joined=<ssid> ip=<addr> / dropped reason=no-route) so a silent half-dead mind cannot recur",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h13",
+          "text": "grep '[SENSE stage=supervise' for event=network yields one joined and one dropped line per transition of the drill, no more",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c14",
+      "kind": "decision",
+      "text": "q1 decided by Ori 2026-08-26: 'both networks' = failover on the single wlan0 radio; no second interface is available, so simultaneous membership is out. Order (per c11, revised): hotspot first, bar-nachum second",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": [
+        {
+          "text": "q1 decided by Ori 2026-08-26: 'both networks' = failover on the single wlan0 radio (home bar-nachum preferred, iPhone (5) hotspot when away); no second interface is available, so simultaneous membership is out",
+          "kind": "decision",
+          "reason": ""
+        }
+      ]
+    },
+    {
+      "id": "c15",
+      "kind": "decision",
+      "text": "q2 decided by Ori 2026-08-26: 'never downtime' covers all three \u2014 body (already true, verified), the voice/mind (Sonic and the Kiro writer must self-heal across a network change, c12) and spark reaching the robot (discovery/alias refresh, c5)",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c16",
+      "kind": "assumption",
+      "text": "NetworkManager fails over only on association loss: with bar-nachum up but its uplink dead, the robot stays on home with no internet and the hotspot is never tried (nmcli connectivity check is 'full' but no policy acts on it) \u2014 'never downtime' as specced covers AP loss, not ISP loss",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h6",
+          "text": "with the home AP powered but its WAN unplugged, either the robot switches to the hotspot within 60 s, or the spec explicitly declares uplink loss out of scope",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c17",
+      "kind": "requirement",
+      "text": "an address change is an explicit trigger, not a timeout: the mind reacts to the default route changing (NM dispatcher hook or a harness route poll) by restarting the Sonic stream and the Kiro session immediately \u2014 because Sonic's liveness watchdog defaults to 180 s (NOVA_SONIC_LIVENESS_S, nova_sonic.py DEFAULT_LIVENESS_S), which alone cannot meet the 60 s success signal",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h7",
+          "text": "after a switch, the journal shows the Sonic restart within 10 s of the new default route, not at the liveness deadline",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c18",
+      "kind": "boundary",
+      "text": "the harness must still start and run with NO network (home offline, robot in a bag): any 'wait for a route' logic is bounded and non-fatal \u2014 the body-first rule holds; a network-less start yields named absences (Sonic, Kiro) and later self-heal, never a stuck unit",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h14",
+          "text": "starting the harness with Wi-Fi disabled yields 'component absent' lines for Sonic/Kiro within 30 s and a running harness (pid claimed, engine live), not a hung start",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c19",
+      "kind": "boundary",
+      "text": "every device-side network change (profile edits, priorities, dispatcher hooks, tailscale) is applied with a scheduled automatic revert \u2014 the pattern used for the 2026-08-26 hotspot test \u2014 so a mistake can never cut the operator's only SSH path to a robot with no console",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h15",
+          "text": "every network-changing command in the plan's runbook carries an explicit revert timer, and the drill confirms SSH returns on bar-nachum without intervention",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c20",
+      "kind": "non_goal",
+      "text": "spark's own network switching is manual and out of scope: the spec never automates moving spark between bar-nachum and the hotspot (it is a server with docker bridges and tailscale); spark either joins the hotspot by hand or reaches the robot over the tailnet if q3 says yes",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c21",
+      "kind": "decision",
+      "text": "q3 decided by Ori 2026-08-26: the robot joins the Tailscale tailnet (spark is already on it) \u2014 spark reaches the robot by its tailnet address on either network; subnet discovery ('reachy wireless find') stays as the fallback when the tailnet is down",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c22",
+      "kind": "requirement",
+      "text": "failover must be bounded in time AND keep retrying: on link loss NM re-tries the higher-priority profile with wpa_supplicant temp-disable backoffs (10 s, 20 s, \u2026) and only falls through after autoconnect-retries are exhausted (48 s with no attempt in the 08:58 test); and after ONE failed fallback attempt (ssid-not-found at 09:23:33) NM stopped trying for 3.5 min. The spec sets a hard bound \u2014 the visible fallback is joined within 30 s of losing the current network \u2014 and re-evaluates every \u226430 s while disconnected (dispatcher hook or a harness route poll; autoconnect-retries=1 on the preferred profile is not sufficient alone)",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h16",
+          "text": "walking out of bar-nachum range with the hotspot visible, nmcli on the robot shows iPhone (5) activated within 30 s of the 'link timed out' NetworkManager line",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": [
+        {
+          "text": "failover must be bounded in time, not left to NetworkManager's default retry ladder: on link loss NM re-tries the higher-priority profile (bar-nachum) with wpa_supplicant temp-disable backoffs of 10 s, 20 s, \u2026 and only falls through to iPhone (5) after autoconnect-retries are exhausted \u2014 in the 2026-08-26 08:58 away-test the robot sat 48 s with no IP while the hotspot SSID was visible the whole time and never tried it; the spec sets a hard bound (e.g. autoconnect-retries=1 on bar-nachum or a dispatcher hook that activates the visible fallback on link loss) so the hotspot is joined within 30 s of losing home",
+          "kind": "requirement",
+          "reason": ""
+        }
+      ]
+    },
+    {
+      "id": "c23",
+      "kind": "assumption",
+      "text": "the iPhone hotspot SSID stays visible to the robot unattended: during the away-test the robot saw 'iPhone (5)' continuously for ~2 min while Ori carried the phone \u2014 pending Ori's confirmation that the Hotspot screen was closed at the time",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c24",
+      "kind": "assumption",
+      "text": "while the robot is already attached, iOS keeps the Personal Hotspot up with the screen closed \u2014 so hotspot-first ordering keeps the robot connected through the day; only a drop-and-rejoin needs the screen opened (untested; test = attach, close screen, wait 10 min, verify still attached)",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h18",
+          "text": "robot attached to iPhone (5), Hotspot screen closed, phone in pocket for 10 min: robot still has its 172.20.10.x address and Sonic answers speech",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    }
+  ],
+  "open_vagueness": [
+    {
+      "id": "v1",
+      "text": "whether an in-flight Sonic conversation can be resumed across an IP change, or only restarted with context re-injected \u2014 untested",
+      "kind": "unknown_nonblocking",
+      "claim_id": null,
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v2",
+      "text": "iPhone Personal Hotspot visibility to non-Apple clients: the SSID was visible only while Ori had the hotspot screen open; whether the robot can REJOIN unattended (phone in pocket) is untested \u2014 probe: close the hotspot screen, drop bar-nachum, watch nmcli on the robot; mitigation candidate: 802-11-wireless.hidden=yes so NM probes actively (currently 'no')",
+      "kind": "unknown_blocking",
+      "claim_id": null,
+      "resolved": true,
+      "resolution": "unattended (re)join of the iPhone hotspot does NOT work when the phone's Hotspot screen is closed and no client is attached: iOS stops advertising the SSID (forced-failover probe 09:23:33 ssid-not-found). It is only joinable while Ori has the screen open \u2014 or, presumably, while the robot is already attached (hotspot-first keeps it attached). Consequence: a robot that drops off the hotspot needs Ori to open the screen to get back; there is no unattended path",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v3",
+      "text": "whether mDNS works across the phone hotspot (avahi is active on the robot; reachy-mini.local never resolved on bar-nachum) \u2014 would give spark a stable name on the hotspot; nonblocking, discovery sweep works regardless",
+      "kind": "unknown_nonblocking",
+      "claim_id": null,
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v4",
+      "text": "Sonic's stream-death restart uses a fixed 3 s delay with no backoff: offline it re-opened a Bedrock stream every ~6 s for minutes (DNS failures) \u2014 harmless today but noisy and battery/CPU-costly on the hotspot; belongs plan-side as a risk/task once the plan exists",
+      "kind": "follow_up",
+      "claim_id": null,
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    }
+  ],
+  "scope_entries": [
+    {
+      "id": "s1",
+      "surface": "device nmcli: connection profiles + device wifi list (2026-08-26 07:30)",
+      "finding": "single wlan0 interface; profiles bar-nachum prio 10 and iPhone (5) prio 5 both autoconnect; no second radio, no ethernet in use \u2014 'both networks' can only mean failover/roaming on one radio unless hardware is added",
+      "seeds": [
+        "c2"
+      ]
+    },
+    {
+      "id": "s2",
+      "surface": "/tmp/hotspot-test.log on device (nmcli connection up round-trip)",
+      "finding": "join + DHCP + route \u2248 6 s each way; ~10-20 s of no-network per switch \u2014 'never downtime' has to be measured against the body (unaffected) vs the mind (Sonic stream, MQTT local, Kiro) separately",
+      "seeds": [
+        "c3"
+      ]
+    },
+    {
+      "id": "s3",
+      "surface": "docs/architecture.md \u00a78 + harness units (supervisor, hearing, kiro_session) + journal 2026-08-26 boot",
+      "finding": "harness reconnects seams with backoff and Sonic has clock-step/liveness watchdogs, but the kiro session failed at cold boot before Wi-Fi associated (After=network-online.target is satisfied too early) and was never retried until a manual restart \u2014 a network switch today = a possible silent loss of the writer",
+      "seeds": [
+        "c4"
+      ]
+    },
+    {
+      "id": "s4",
+      "surface": "~/.local/state/reachy/units.json registry, reachy wireless {find,list,pin}, spark nmcli (two iPhone (5) profiles, on bar-nachum at 192.168.1.118)",
+      "finding": "the two machines must be on the SAME network to talk (hotspot is 172.20.10.0/28, home is 192.168.1.0/24, no routing between); discovery must re-run after a switch (reachy wireless find) and the pinned /etc/hosts alias goes stale",
+      "seeds": [
+        "c5"
+      ]
+    },
+    {
+      "id": "s5",
+      "surface": "challenge pass / adjacent-systems lens: reachy wireless find --json + overview, ~/.local/state/reachy/units.json",
+      "finding": "discovery is an IPv4 HTTP sweep of spark's local /24-or-narrower subnets (268 hosts in 2.2 s), registry keyed by hardware_id with last_ip; it cannot see across subnets, so on the hotspot spark must be on the hotspot too, and 'wireless pin' aliases go stale on every switch",
+      "seeds": [
+        "c5"
+      ]
+    },
+    {
+      "id": "s6",
+      "surface": "challenge pass / adjacent-systems lens: device 'which tailscale', systemctl tailscaled",
+      "finding": "no tailscale on the robot (spark has 100.127.105.72); overlay networking is an unexamined alternative to subnet-bound discovery \u2014 raised as a user decision, not assumed",
+      "seeds": []
+    },
+    {
+      "id": "s7",
+      "surface": "challenge pass / assumptions lens: nmcli general status (CONNECTIVITY full), connection profiles hidden=no, autoconnect-retries default",
+      "finding": "NM has connectivity checking but no failover-on-uplink-loss policy; hidden=no means NM waits for a beacon rather than probing the hotspot SSID",
+      "seeds": [
+        "c16"
+      ]
+    },
+    {
+      "id": "s8",
+      "surface": "challenge pass / failure-mode lens: reachy_nova/nova_sonic.py (_liveness_window, clock-step), harness/unit.py, grep for route/network in harness",
+      "finding": "the harness has zero network awareness today \u2014 only unit ordering (After=network-online.target) and Sonic's 180 s liveness + clock-step watchdogs; nothing reacts to an IP change",
+      "seeds": [
+        "c17"
+      ]
+    },
+    {
+      "id": "s9",
+      "surface": "challenge pass / lifecycle lens: /etc/NetworkManager/dispatcher.d ({no-wait,pre-up,pre-down}.d present), systemd --user units",
+      "finding": "a dispatcher hook is available as the route-change trigger mechanism on ReachyMiniOS; the harness unit runs as pollen so the hook must signal it, not restart it as root",
+      "seeds": [
+        "c18"
+      ]
+    },
+    {
+      "id": "s10",
+      "surface": "challenge pass / security lens: iPhone (5) profile psk-flags 0 (system-stored, root-only), SSH as pollen, docs/security.md Kiro trust",
+      "finding": "clean pass: no new secret surfaces; on the hotspot the robot's SSH is reachable by hotspot peers exactly as on the home LAN; the Kiro full-shell boundary is unchanged by networking",
+      "seeds": []
+    },
+    {
+      "id": "s11",
+      "surface": "challenge pass / reversibility lens: /tmp/hotspot-test.sh pattern (nmcli up, verify, nmcli up bar-nachum)",
+      "finding": "the robot has no console; the revert-timer pattern is the containment for all network edits",
+      "seeds": [
+        "c19"
+      ]
+    },
+    {
+      "id": "s12",
+      "surface": "challenge probe / failure-mode lens: /tmp/netwatch.log + journalctl NetworkManager,wpa_supplicant 08:56\u201309:00 on the robot",
+      "finding": "08:58:12 link timed out (supplicant-timeout) \u2192 NM auto-activated bar-nachum again, ASSOC-REJECT status 16 twice, SSID temp-disabled 10 s then 20 s, reconnected 08:59:01 when back in range; iphone_visible=1 from 08:57:57 throughout; iPhone (5) never attempted. Sonic: stream died 08:57:02 (link degrading) and self-restarted in 3 s \u2014 stream-death recovery already exists, the gap is the dead-link window",
+      "seeds": [
+        "c22"
+      ]
+    },
+    {
+      "id": "s13",
+      "surface": "challenge probe / assumptions lens: netwatch iphone_visible column 08:57:57\u201308:59:47",
+      "finding": "SSID beaconed continuously while the phone was carried; resolves park v2 if the Hotspot screen was closed",
+      "seeds": [
+        "c23"
+      ]
+    },
+    {
+      "id": "s14",
+      "surface": "challenge pass / assumptions lens: NetworkManager autoconnect semantics (priority applies at activation time only; no roaming to a better profile while connected)",
+      "finding": "hotspot-first ordering alone gives 'prefer at (re)connect time', not 'always on the hotspot when present' \u2014 the return-to-hotspot leg needs explicit logic, and the data-cost question is open",
+      "seeds": [
+        "c11"
+      ]
+    },
+    {
+      "id": "s15",
+      "surface": "challenge probe / lifecycle lens: forced failover 09:23\u201309:27 on the robot (/tmp/force-failover.log, journalctl NetworkManager + wpa_supplicant)",
+      "finding": "with bar-nachum made unavailable, NM auto-activated iPhone (5) after 2 s \u2014 fallback SELECTION works \u2014 but the join failed 25 s later with reason ssid-not-found: with the Hotspot screen closed and no client attached, the iPhone stopped beaconing (it had been visible in the scan cache until then). NM made no further attempt for the remaining 3.5 min. Sonic hammered Bedrock every ~6 s with a fixed 3 s restart delay (AWS_IO_DNS_QUERY_FAILED) while offline; recovered on its own 7 s after bar-nachum returned",
+      "seeds": []
+    }
+  ],
+  "lapses": []
+}
