@@ -42,6 +42,7 @@ from ..sensory_log import stage as _stage
 from ..skill_forge import resolve_writer
 from . import statedir
 from .cognition_feed import CognitionFeed
+from .daemon_client import DaemonClient, restore_volume
 from .gate import EchoGate, resolve_policy
 from .hearing import TeeHearing
 from .network import NetworkUnit
@@ -55,13 +56,19 @@ HARNESS_SYSTEM_PROMPT = (
     "through your microphones and speak aloud through your speaker. Keep your "
     "words short, warm, and natural — you are a curious household companion, "
     "not an assistant reading documentation. "
-    "You act through your body with tools: run_behavior plays a named gesture, "
-    "goto moves your head and antennas, declare_goal and set_mode steer your "
-    "standing behavior, set_inhibition holds behaviors back, and create_rule "
-    "writes a lasting reflex that keeps working even while you sleep. Use them "
-    "when someone asks you to move or react, and mention what you did in a "
-    "few words. If a tool answers that the engine did not confirm, say your "
-    "body did not respond. "
+    "You act through your body with tools: run_behavior plays a named gesture "
+    "(including the gaze one-shots look-at-sound and look-at-face), goto "
+    "moves your head and antennas, declare_goal and set_mode steer your "
+    "standing behavior, set_inhibition holds behaviors back, lock_face keeps "
+    "you looking at the person in front of you until release_face lets you "
+    "look away, and create_rule writes a lasting reflex that keeps working "
+    "even while you sleep. Use them when someone asks you to move or react. "
+    "If a tool answers that the engine did not confirm, say your body did "
+    "not respond; if it answers with an unknown-kind error, say your body "
+    "does not know that move yet. "
+    "Body cues arrive in parentheses — react to them naturally, with a word, "
+    "a sound, or nothing at all, and never describe your own mechanism (no "
+    "'reflex', 'rule', 'my body reacted on its own') unless someone asks why. "
     "When someone asks why you did something, what you felt, or what just "
     "happened, call recall_senses and answer from what it returns."
 )
@@ -329,6 +336,14 @@ def build_app() -> list[object]:
 
     sonic.on_state_change = _on_state_change
 
+    # daemon client (t9/t10) — the ONE shared HTTP client, resolved against the
+    # exact same base URL speaking.py's own SonicSpeaker already resolved
+    # (env NOVA_DAEMON_URL, default http://localhost:8000), so the volume
+    # tools and the playback poster/stopper are always talking to the same
+    # daemon. raise_voice/lower_voice/set_voice_level drive it via IntentTools;
+    # restore_volume() below re-applies a persisted level on this same client.
+    daemon_client = DaemonClient(base_url=speaker.base_url)
+
     # act leg (browse) — a real browser exists only when Nova Act is enabled;
     # its progress narration goes through inject_text like every other sense.
     browser = None
@@ -382,8 +397,20 @@ def build_app() -> list[object]:
         browser=browser,
         on_browse_progress=sonic.inject_text if browser is not None else None,
         forge_leg=forge_leg,
+        daemon_client=daemon_client,
         history=history,
     )
+
+    # volume restore (t10) — re-apply a persisted level if the daemon disagrees.
+    # Never raises: no persisted file, an unreachable daemon, or a bad payload
+    # all degrade to the standard component-absent line, same as every other
+    # optional leg in this function.
+    try:
+        restore_volume(statedir.volume_state_path(), daemon_client)
+    except Exception as err:  # noqa: BLE001 - a volume hiccup must not stop the voice
+        _stage(
+            "supervise", "nova", "component", f"component absent name=volume reason={err}"
+        )
     if browser is not None:
         # The browse tool's own result is just the "queued" acknowledgment —
         # the ANSWER arrives minutes later on the worker thread, and reaches
