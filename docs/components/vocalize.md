@@ -56,6 +56,16 @@ dependency-light leaf that doesn't pull in the AWS SDK just to synthesize a
 waveform — but it deliberately matches `NovaSonic.OUTPUT_SAMPLE_RATE` because
 synthesized audio rides the same buffer/resample path as Sonic's own output.
 
+A master gain is applied at the very end of synthesis, after the per-kind
+envelope and intensity-driven loudness but before the final `[-1, 1]` clip,
+because on the robot a full-scale vocalize chirp/trill/purr was noticeably
+louder than Nova Sonic's own speech through the same speaker path. It
+defaults to `DEFAULT_MASTER_GAIN = 0.35` and is read at call time from
+`NOVA_VOCALIZE_GAIN`, parsed defensively like `NovaSonic`'s env knobs — a
+missing, non-numeric, or non-positive value falls back to the default, and
+any value is capped at 1.0, so this knob can only make vocalize quieter
+than raw synthesis, never louder.
+
 ## Executor Path: The Same Speaker Buffer As Sonic
 
 `_vocalize_executor` (`reachy_nova/skill_executors.py`) synthesizes the
