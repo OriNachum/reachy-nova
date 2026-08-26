@@ -19,23 +19,78 @@ worktrees and a TDD gate on every merge, then accepted live on the robot.
 
 Quoted verbatim from the `devague summary` skeleton:
 
-- `t1` — runtime: DoaPoller exposes last-good age; new one-shot 'look-at-sound' LibraryEntry (reachy/behavior/gaze.py + library.py + sense.py)
-- `t2` — runtime: face position + selection reach Sense — capture `bbox_norm` before the store match, keep last-seen age, choose biggest face with near-tie preference for a recognised one (reachy/behavior/face_sense.py + reachy/vision/face.py + sense.py)
-- `t3` — runtime: one-shot 'look-at-face' LibraryEntry aiming at Sense.`face_bbox` (reachy/behavior/gaze.py)
-- `t4` — runtime: `lock_face` / `release_face` intent kinds + looping 'face-lock' behavior with its own yaw/pitch clamp (reachy/behavior/`face_lock.py`, registered at composition like goto in cli/_commands/behavior.py)
-- `t5` — runtime: lock lifecycle events + lock cannot outlive the mind — 'face-lost' (after N s, lock persists), 'lock-released' registered in reachy/export/runtime.py raw-action tables; release on mind-offline (reachy/state/nova retained offline for a grace period) or max hold
-- `t6` — harness: rules.yaml gains voice (silent|brief|free, default free) and sense fields; quiet templates for rule/fire, rule/fire:pat-acknowledge, rule/fire:nova-face-noticed, pat/*; bus renders the voice marker (config/nervous-system/rules.yaml + reachy_nova/harness/bus.py route_event + tests/test_rules_coverage.py + tests/test_harness_bus.py)
-- `t7` — harness: sense-class dedupe in NovaBus between `route_event` and `_on_inject` (`reachy_nova`/harness/bus.py + tests/`test_harness_bus.py`)
-- `t8` — harness: recent-sense ring buffer + `recall_senses` tool (`reachy_nova`/harness/`sense_history.py`, wired at NovaBus.`_on_inject`; tool builder in tools.py; EXPECTED_TOOLS)
-- `t9` — harness: system-prompt line (react naturally to body cues, never describe your own mechanism unless asked) + `lock_face`/`release_face` tools + gaze tool descriptions for look-at-sound/look-at-face (reachy_nova/harness/app.py HARNESS_SYSTEM_PROMPT + tools.py builders/_BUILDERS/TOOL_SPECS + tests/test_harness_tools.py)
-- `t10` — harness: shared daemon HTTP client + `raise_voice`/`lower_voice`/`set_voice_level` tools + persisted volume (`reachy_nova`/harness/`daemon_client.py` new; speaking.py uses it; tools.py builders; statedir.py nova-volume.json; tests/test_harness_daemon_client.py + test_harness_tools.py)
-- `t11` — harness: timed quiet — QuietState (deadline, later-wins extension, persistence to <state>/nova-quiet.json) + SonicSpeaker gate at `_play_one` with drop-not-failure semantics and post-acknowledgement arming + supervisor.status() quiet_until (reachy_nova/harness/quiet.py new; speaking.py; supervisor.py; tests/test_harness_quiet.py + test_harness_speaking.py)
-- `t12` — harness: `stay_silent` / `end_silence` tools (bounded 1-180 min) that also inhibit the runtime 'speak' behavior for the window and mark injects with the quiet marker (tools.py builders + bus.py marker + tests/test_harness_tools.py)
-- `t13` — harness: lock awareness + new-event rules — heartbeat loss while locked logs 'lock released reason=engine-restart'; status() shows lock state read from state.json intents view; rules.yaml entries for intent/face-lost and intent/lock-released rendered as quiet context (reachy_nova/harness/app.py or supervisor.py; config/nervous-system/rules.yaml; tests)
-- `t14` — cold-boot h12: chaos case 5 in tests/chaos/`ON_ROBOT.md` — `KIRO_CLI_BIN`=/nonexistent, restart reachy-nova-harness with `FORGE_WRITER`=kiro, assert 'started degraded (initial spawn failed' + 'started name=kiro_session' and no 'start failed'; restore and assert 'recovered' with NRestarts unchanged; run it on the robot and paste the journal evidence
-- `t15` — docs + version: docs/architecture.md §5.5 tool list and §4 seams (lock intents, quiet, volume), new docs/components/gaze.md and quiet-mode.md, rules.yaml header for voice/sense, deploy order (runtime first) noted; bump pyproject version (PyPI publish on main requires it)
-- `t16` — live acceptance on the robot + delivery record: deploy runtime then harness; run every success-signal line (pat -> one reaction, no mechanism words; speak up/quieter; stay silent 2 min zero playbacks incl. engine say; look at me / look at the sound / keep looking at me / you can look away; recall 'why did you move?'); write docs/deliveries/2026-08-26-gaze-voice-quiet.md linking each 2026-08-26 pain point to its fix, with unit-only claims labelled
-- `t17` — runtime: mute/unmute intent kinds gating SpeechActuator.say + retained reachy/state/nova/online subscriber wired into FaceLockDriver.`mind_online` (reachy/behavior/speech_act.py, intents or a new mute driver, export/mqtt.py subscriber, cli/_commands/behavior.py wiring)
+- `t1` — runtime: DoaPoller exposes last-good age; new one-shot 'look-at-sound'
+  LibraryEntry (reachy/behavior/gaze.py + library.py + sense.py)
+- `t2` — runtime: face position + selection reach Sense — capture `bbox_norm`
+  before the store match, keep last-seen age, choose biggest face with near-tie
+  preference for a recognised one (reachy/behavior/face_sense.py +
+  reachy/vision/face.py + sense.py)
+- `t3` — runtime: one-shot 'look-at-face' LibraryEntry aiming at
+  Sense.`face_bbox` (reachy/behavior/gaze.py)
+- `t4` — runtime: `lock_face` / `release_face` intent kinds + looping
+  'face-lock' behavior with its own yaw/pitch clamp
+  (reachy/behavior/`face_lock.py`, registered at composition like goto in
+  cli/_commands/behavior.py)
+- `t5` — runtime: lock lifecycle events + lock cannot outlive the mind —
+  'face-lost' (after N s, lock persists), 'lock-released' registered in
+  reachy/export/runtime.py raw-action tables; release on mind-offline
+  (reachy/state/nova retained offline for a grace period) or max hold
+- `t6` — harness: rules.yaml gains voice (silent|brief|free, default free) and
+  sense fields; quiet templates for rule/fire, rule/fire:pat-acknowledge,
+  rule/fire:nova-face-noticed, pat/*; bus renders the voice marker
+  (config/nervous-system/rules.yaml + reachy_nova/harness/bus.py route_event +
+  tests/test_rules_coverage.py + tests/test_harness_bus.py)
+- `t7` — harness: sense-class dedupe in NovaBus between `route_event` and
+  `_on_inject` (`reachy_nova`/harness/bus.py + tests/`test_harness_bus.py`)
+- `t8` — harness: recent-sense ring buffer + `recall_senses` tool
+  (`reachy_nova`/harness/`sense_history.py`, wired at NovaBus.`_on_inject`; tool
+  builder in tools.py; EXPECTED_TOOLS)
+- `t9` — harness: system-prompt line (react naturally to body cues, never
+  describe your own mechanism unless asked) + `lock_face`/`release_face` tools +
+  gaze tool descriptions for look-at-sound/look-at-face
+  (reachy_nova/harness/app.py HARNESS_SYSTEM_PROMPT + tools.py
+  builders/_BUILDERS/TOOL_SPECS + tests/test_harness_tools.py)
+- `t10` — harness: shared daemon HTTP client +
+  `raise_voice`/`lower_voice`/`set_voice_level` tools + persisted volume
+  (`reachy_nova`/harness/`daemon_client.py` new; speaking.py uses it; tools.py
+  builders; statedir.py nova-volume.json; tests/test_harness_daemon_client.py +
+  test_harness_tools.py)
+- `t11` — harness: timed quiet — QuietState (deadline, later-wins extension,
+  persistence to <state>/nova-quiet.json) + SonicSpeaker gate at `_play_one`
+  with drop-not-failure semantics and post-acknowledgement arming +
+  supervisor.status() quiet_until (reachy_nova/harness/quiet.py new;
+  speaking.py; supervisor.py; tests/test_harness_quiet.py +
+  test_harness_speaking.py)
+- `t12` — harness: `stay_silent` / `end_silence` tools (bounded 1-180 min) that
+  also inhibit the runtime 'speak' behavior for the window and mark injects with
+  the quiet marker (tools.py builders + bus.py marker +
+  tests/test_harness_tools.py)
+- `t13` — harness: lock awareness + new-event rules — heartbeat loss while
+  locked logs 'lock released reason=engine-restart'; status() shows lock state
+  read from state.json intents view; rules.yaml entries for intent/face-lost and
+  intent/lock-released rendered as quiet context (reachy_nova/harness/app.py or
+  supervisor.py; config/nervous-system/rules.yaml; tests)
+- `t14` — cold-boot h12: chaos case 5 in tests/chaos/`ON_ROBOT.md` —
+  `KIRO_CLI_BIN`=/nonexistent, restart reachy-nova-harness with
+  `FORGE_WRITER`=kiro, assert 'started degraded (initial spawn failed' +
+  'started name=kiro_session' and no 'start failed'; restore and assert
+  'recovered' with NRestarts unchanged; run it on the robot and paste the
+  journal evidence
+- `t15` — docs + version: docs/architecture.md §5.5 tool list and §4 seams (lock
+  intents, quiet, volume), new docs/components/gaze.md and quiet-mode.md,
+  rules.yaml header for voice/sense, deploy order (runtime first) noted; bump
+  pyproject version (PyPI publish on main requires it)
+- `t16` — live acceptance on the robot + delivery record: deploy runtime then
+  harness; run every success-signal line (pat -> one reaction, no mechanism
+  words; speak up/quieter; stay silent 2 min zero playbacks incl. engine say;
+  look at me / look at the sound / keep looking at me / you can look away;
+  recall 'why did you move?'); write
+  docs/deliveries/2026-08-26-gaze-voice-quiet.md linking each 2026-08-26 pain
+  point to its fix, with unit-only claims labelled
+- `t17` — runtime: mute/unmute intent kinds gating SpeechActuator.say + retained
+  reachy/state/nova/online subscriber wired into FaceLockDriver.`mind_online`
+  (reachy/behavior/speech_act.py, intents or a new mute driver, export/mqtt.py
+  subscriber, cli/_commands/behavior.py wiring)
 
 ## Actual Delivery
 
