@@ -151,12 +151,17 @@ def test_two_unclassed_rule_fire_events_with_different_names_both_inject():
     """Neither rule name has a per-rule override or a `sense` field, so each
     resolves to the generic rule/fire entry — but the dedupe key still
     includes the literal rule name, so two DIFFERENT rule names never
-    collapse just because both are unclassed."""
+    collapse just because both are unclassed.
+
+    Uses "nod-yes"/"wave-hello", NOT "look-toward-sound" — t14 gave that one
+    its own `rule/fire:look-toward-sound` override with `voice: none`, so it
+    no longer falls through to the generic (inject-producing) entry here.
+    """
     rec = Recorder()
     clock = make_clock([0.0, 1.0])
     nb = make_bus(rec, sources="rule", rules_path=RULES_PATH, clock=clock)
 
-    nb.on_message(None, None, pat_msg("look-toward-sound"))
+    nb.on_message(None, None, pat_msg("nod-yes"))
     nb.on_message(None, None, pat_msg("wave-hello"))
 
     assert len(rec.injects) == 2
@@ -167,8 +172,8 @@ def test_same_unclassed_rule_name_twice_within_window_still_dedupes():
     clock = make_clock([0.0, 1.0])
     nb = make_bus(rec, sources="rule", rules_path=RULES_PATH, clock=clock)
 
-    nb.on_message(None, None, pat_msg("look-toward-sound"))
-    nb.on_message(None, None, pat_msg("look-toward-sound"))
+    nb.on_message(None, None, pat_msg("nod-yes"))
+    nb.on_message(None, None, pat_msg("nod-yes"))
 
     assert len(rec.injects) == 1
 

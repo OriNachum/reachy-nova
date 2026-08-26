@@ -2,14 +2,22 @@
 # Maps (source, type) pairs to baseline priority, urgency, and LLM evaluation settings.
 #
 # Optional per-entry fields (t6):
-#   voice: silent | brief | free
-#     A hint to Nova about how much it should say about the event — never
-#     about whether the event happened; the inject still always fires.
-#     Defaults to "free" when absent. reachy_nova/harness/bus.py's
-#     route_event appends a marker to the rendered inject text:
+#   voice: silent | brief | free | none
+#     A hint to Nova about how much it should say about the event.
+#     silent/brief/free still ALWAYS fire an inject — never about whether the
+#     event happened, only how much to say about it. Defaults to "free" when
+#     absent. reachy_nova/harness/bus.py's route_event appends a marker to
+#     the rendered inject text:
 #       silent -> " (quiet: do not speak about this)"
 #       brief  -> " (react briefly if at all)"
 #       free   -> no marker
+#       none   -> no marker (see below — none never reaches route_event's
+#                 caller as a delivered inject at all)
+#     "none" is the one exception to "the inject still always fires" above:
+#     the cue is recorded in SenseHistory (so `recall_senses` can still
+#     explain "why did you move?") but is NEVER delivered to Nova's voice
+#     model — no on_inject call, no marker. Use it for events that are pure
+#     plumbing/mechanism Nova should never narrate even quietly (t14).
 #   sense: <class>  (e.g. pat, face, sound, vision)
 #     Names the sensory class an entry belongs to — SenseHistory's semantic
 #     classification only (what `recall_senses` reports this event as). It is
@@ -322,6 +330,22 @@ rules:
     dedupe: pat-touch
     inject_template: "(someone is petting you)"
 
+  "rule/fire:look-toward-sound":
+    # The runtime's own reflex that turns the head toward a sound source
+    # (LIVE FINDING L3/follow-up above: this is the rule that kept re-firing
+    # every ~10s while a face lock inhibited it). LIVE FOLLOW-UP (2026-08-26
+    # 19:05-19:08): even at `voice: silent` this fire made Sonic call
+    # look_at_sound and narrate "I'm still following that sound" every time —
+    # pure body-reflex mechanism Nova should never act or comment on. t14:
+    # `voice: none` records it (recall_senses can still say "you glanced
+    # toward a sound") without ever handing the model a sentence to react to.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    voice: none
+    sense: sound
+    inject_template: "(you glanced toward a sound)"
+
   rule/suppress:
     # A reflex was considered and held back (cooldown/rearming/inhibited).
     # Bookkeeping, not news.
@@ -350,13 +374,18 @@ rules:
     # LIVE FINDING L3 (2026-08-26 18:26-18:31): `{name}` is the intent KIND,
     # not a thing a person said — so every quiet arm (set_inhibition, the
     # mute/unmute pair behind stay_silent) narrated "Your standing intention
-    # 'set_inhibition' is now in effect." out loud. That is Nova reading its
-    # own plumbing aloud. It stays an inject (Nova should know its request
-    # landed) but is `voice: silent`: context only, never spoken about.
+    # 'set_inhibition' is now in effect." out loud. `voice: silent` (t6) still
+    # let this READ as a quiet marker on the rendered text, but Sonic kept
+    # narrating it anyway — LIVE FOLLOW-UP (2026-08-26 19:05-19:08, same
+    # device): with `silent`, Sonic still said "a standing intention called
+    # 'set_inhibition' is now active" out loud after end_silence. `silent`
+    # only hints; it never stops the model from having something to say. t14
+    # moves this to `voice: none`: still recorded (recall_senses can explain
+    # it), but the model is never given the sentence to begin with.
     priority: NORMAL
     urgency: DEFERRABLE
     llm_evaluate: false
-    voice: silent
+    voice: none
     inject_template: "Your standing intention '{name}' is now in effect."
 
   intent/blocked:
@@ -377,12 +406,19 @@ rules:
     # IntentDriver emits `behavior=` but `_intent_status_event` keeps only
     # kind/cmd_id/result/reason/goal, and `payload` is nested. So the text
     # names no behaviour at all rather than rendering an empty `{behavior}`.
-    # `voice: silent` keeps it as context; `dedupe: reflex-held` collapses
-    # the ~10 s repeat into one inject per dedupe window.
+    # `dedupe: reflex-held` collapses the ~10 s repeat into one record per
+    # dedupe window either way.
+    #
+    # LIVE FOLLOW-UP (2026-08-26 19:05-19:08, same device as L3): with
+    # `voice: silent`, every `(body cue: look-toward-sound)` rule/fire made
+    # Sonic call look_at_sound and say "I'm still following that sound" —
+    # `silent` marks the text as quiet, it doesn't stop the model choosing to
+    # act/speak on it. t14 moves this to `voice: none`: recorded for
+    # `recall_senses`, never handed to the model at all.
     priority: NORMAL
     urgency: NOW
     llm_evaluate: false
-    voice: silent
+    voice: none
     dedupe: reflex-held
     inject_template: "(a body reflex was held back)"
 

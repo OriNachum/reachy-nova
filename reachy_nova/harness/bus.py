@@ -303,6 +303,12 @@ def rule_for(
 #: Marker text ``route_event`` appends to a rendered inject, keyed by the
 #: rule entry's optional ``voice`` field. ``free`` (and any absent/unknown
 #: value) appends nothing. See rules.yaml's header comment for the field.
+#:
+#: ``none`` is deliberately absent from this dict (falls through to the
+#: ``free``-shaped ""): a ``voice: none`` cue never reaches ``route_event``'s
+#: caller as a delivered inject at all (:meth:`NovaBus._handle_message`
+#: intercepts it before ``_deliver`` and routes it to SenseHistory only), so
+#: it needs no marker of its own.
 VOICE_MARKERS: dict[str, str] = {
     "silent": " (quiet: do not speak about this)",
     "brief": " (react briefly if at all)",
@@ -474,7 +480,9 @@ class NovaBus:
             (t8). When wired, every inject that actually reaches *on_inject*
             (post-dedupe — a suppressed duplicate is never recorded) is also
             appended here, so the ``recall_senses`` tool can answer "why did
-            you move?" from what really happened.
+            you move?" from what really happened. A ``voice: none`` cue (t14)
+            is the one exception that still reaches history WITHOUT ever
+            calling *on_inject* — see :meth:`_deliver_muted`.
     """
 
     def __init__(
@@ -512,6 +520,12 @@ class NovaBus:
         self._dedupe_window_s = dedupe_window_s()
         self._dedupe_lock = threading.Lock()
         self._last_inject_at: dict[str, float] = {}
+        # ``voice: none`` cues (t14) latch their muted senselog line once per
+        # key for the life of the process — independent of the dedupe window
+        # above, which only guards SenseHistory from being spammed by rapid
+        # repeats. Guarded by ``_dedupe_lock`` too; a second lock buys nothing
+        # here and only risks a lock-order bug.
+        self._muted_logged: set[str] = set()
         # Retained reachy/state/clip cache — the vision leg's read seam.
         self._clip_lock = threading.Lock()
         self._clip_state: dict[str, Any] | None = None
@@ -675,11 +689,20 @@ class NovaBus:
         if text is None:
             sensory_log.stage(STAGE_ROUTE, SOURCE, key, f"dropped reason={reason}")
             return
+
+        rule = rule_for(self.rules, source, event_type, payload)
+
+        # ``voice: none`` (t14): recorded for ``recall_senses`` but NEVER
+        # spoken — no ``on_inject`` call, no quiet marker, and it never
+        # touches ``_deliver``'s on-inject-failure rollback machinery, since
+        # there is no callback here that can fail.
+        if rule.get("voice") == "none":
+            self._deliver_muted(source, event_type, key, payload, text, rule)
+            return
+
         # Marked BEFORE the history record so "what Nova was told" and "what
         # Nova remembers being told" can never drift apart.
         text = self._mark_quiet(text)
-
-        rule = rule_for(self.rules, source, event_type, payload)
         self._deliver(source, event_type, key, payload, text, rule)
 
     def _parse_event(self, topic: str, raw: bytes | str) -> tuple[str, str, str, dict] | None:
@@ -798,6 +821,53 @@ class NovaBus:
                 rule.get("sense"),
                 rule.get("voice"),
             )
+
+    def _deliver_muted(
+        self, source: str, event_type: str, key: str, payload: dict, text: str, rule: dict
+    ) -> None:
+        """Handle a ``voice: none`` cue: SenseHistory only, never spoken (t14).
+
+        Shares the same dedupe reservation ``_deliver`` uses — so a burst of
+        the runtime's own repeat-fires for one physical event doesn't spam
+        SenseHistory either — but ``on_inject`` is never called, so there is
+        no delivery that can fail and nothing to roll back. The
+        ``[SENSE ... ] muted`` senselog line is latched separately, once per
+        key for the life of the process (not once per dedupe window), so a
+        legitimately-repeated sense recorded many times over doesn't itself
+        become log noise.
+        """
+        dedupe_key = dedupe_key_for(source, event_type, payload, rule)
+        now = self._clock()
+        with self._dedupe_lock:
+            last_at = self._last_inject_at.get(dedupe_key)
+            if last_at is not None and (now - last_at) < self._dedupe_window_s:
+                age = now - last_at
+                sensory_log.stage(
+                    STAGE_INJECT,
+                    SOURCE,
+                    "dedupe",
+                    f"suppressed key={dedupe_key} age={age:.2f}s "
+                    f"window={self._dedupe_window_s:.1f}s",
+                )
+                return
+            self._last_inject_at[dedupe_key] = now
+            already_logged = key in self._muted_logged
+            if not already_logged:
+                self._muted_logged.add(key)
+
+        if self.history is not None:
+            rule_name = payload.get("rule") if isinstance(payload, dict) else None
+            self.history.record(
+                source,
+                event_type,
+                rule_name,
+                text,
+                rule.get("sense"),
+                rule.get("voice"),
+            )
+
+        if not already_logged:
+            sensory_log.stage(STAGE_INJECT, SOURCE, key, "muted voice=none")
 
     def _mark_quiet(self, text: str) -> str:
         """Append :data:`QUIET_MARKER` while a timed quiet is armed."""

@@ -186,11 +186,16 @@ template costs exactly one log line. The raw `sense` stream is off by default
 — unfiltered it once produced 187 cues in 40 s.
 
 Two more per-entry fields shape *how* a rendered inject reaches the model:
-`voice: silent|brief|free` (default `free`) hints how much Nova should say
-about the event — never whether it happened — and the bus appends a short
-marker to the rendered text for `silent`/`brief`; `sense: <class>` (e.g.
-`pat`, `face`, `sound`, `vision`) names the sensory class an entry belongs
-to. The bus keys a per-class **dedupe window** (`NOVA_SENSE_DEDUPE_S`,
+`voice: silent|brief|free|none` (default `free`) hints how much Nova should
+say about the event — `silent`/`brief`/`free` still always reach the model
+(the bus appends a short marker for `silent`/`brief`), but `voice: none` is
+history-only: the event is recorded into sense history for `recall_senses`
+and *never* handed to Sonic at all, for cues that are pure body-reflex
+mechanism a marker alone didn't stop the model from narrating (live finding,
+2026-08-26: `voice: silent` on `intent/applied`/`intent/blocked` and the
+runtime's `look-toward-sound` reflex still got spoken about out loud);
+`sense: <class>` (e.g. `pat`, `face`, `sound`, `vision`) names the sensory
+class an entry belongs to. The bus keys a per-class **dedupe window** (`NOVA_SENSE_DEDUPE_S`,
 default 10 s) off that `sense` class when present — so two differently
 named rules that fire off the same physical touch or glance collapse into
 one inject — and every inject that clears dedupe is also recorded into a
