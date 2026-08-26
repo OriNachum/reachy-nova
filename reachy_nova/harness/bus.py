@@ -91,6 +91,7 @@ from typing import Any
 import yaml
 
 from reachy_nova import sensory_log
+from reachy_nova.harness.quiet import QuietState
 from reachy_nova.harness.sense_history import SenseHistory
 
 logger = logging.getLogger(__name__)
@@ -308,6 +309,20 @@ VOICE_MARKERS: dict[str, str] = {
     "free": "",
 }
 
+#: Appended to EVERY rendered inject while a timed quiet is armed (task t12),
+#: on top of whatever ``VOICE_MARKERS`` entry the rule's own ``voice`` field
+#: already added. Deliberately unconditional: a quiet is a promise made to a
+#: person out loud, so it has to outrank a rule's own opinion about how
+#: chatty its event is — a ``voice: free`` pat is exactly the event most
+#: likely to talk through a quiet otherwise.
+#:
+#: It is a marker, not a gate. The event still reaches Nova, still lands in
+#: the sense history, and the speaker's own quiet gate
+#: (:mod:`reachy_nova.harness.speaking`) is what actually keeps the mouth
+#: shut — this only stops the model from composing a reply it will never be
+#: allowed to say.
+QUIET_MARKER = " (quiet mode: do not speak)"
+
 
 def route_event(
     rules_cfg: dict[str, Any],
@@ -444,6 +459,9 @@ class NovaBus:
         client_factory: zero-arg paho-client builder, injectable for tests.
         clock: zero-arg monotonic-seconds source for the dedupe window;
             ``None`` uses :func:`time.monotonic`. Injectable for tests.
+        quiet: optional :class:`~reachy_nova.harness.quiet.QuietState` (t12).
+            While it is armed, every rendered inject carries
+            :data:`QUIET_MARKER`. ``None`` (the default) never marks anything.
         history: optional :class:`~reachy_nova.harness.sense_history.SenseHistory`
             (t8). When wired, every inject that actually reaches *on_inject*
             (post-dedupe — a suppressed duplicate is never recorded) is also
@@ -461,10 +479,12 @@ class NovaBus:
         client_factory: Callable[[], Any] | None = None,
         clock: Callable[[], float] | None = None,
         history: SenseHistory | None = None,
+        quiet: QuietState | None = None,
     ) -> None:
         self._on_inject = on_inject
         self._on_event = on_event
         self.history = history
+        self.quiet = quiet
         self.sources = resolve_sources(sources)
         self.broker = broker if broker is not None else broker_url()
         self.host, self.port = parse_broker_url(self.broker)
@@ -678,6 +698,9 @@ class NovaBus:
         if text is None:
             sensory_log.stage(STAGE_ROUTE, SOURCE, key, f"dropped reason={reason}")
             return
+        # Marked BEFORE the history record so "what Nova was told" and "what
+        # Nova remembers being told" can never drift apart.
+        text = self._mark_quiet(text)
 
         rule = rule_for(self.rules, source, event_type, payload)
 
@@ -720,6 +743,12 @@ class NovaBus:
         except Exception as err:
             logger.warning("bus: inject callback failed: %s", err, exc_info=True)
             sensory_log.stage(STAGE_INJECT, SOURCE, key, f"dropped reason=inject-failed: {err}")
+
+    def _mark_quiet(self, text: str) -> str:
+        """Append :data:`QUIET_MARKER` while a timed quiet is armed."""
+        if self.quiet is None or not self.quiet.active():
+            return text
+        return text + QUIET_MARKER
 
     def _handle_clip_state(self, raw: bytes | str) -> None:
         """Cache the retained clip payload for :meth:`clip_state`. Never a cue.

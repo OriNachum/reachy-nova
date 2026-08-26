@@ -52,7 +52,9 @@ package: file paths are the whole contract.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -60,8 +62,11 @@ from pathlib import Path
 
 from reachy_nova import sensory_log
 from reachy_nova.harness import statedir
+from reachy_nova.harness.quiet import QuietState
 from reachy_nova.harness.rules_overlay import RuleRefused, upsert_rule
 from reachy_nova.nova_browser import act_enabled
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Names + constants                                                           #
@@ -84,6 +89,8 @@ RAISE_VOICE = "raise_voice"
 LOWER_VOICE = "lower_voice"
 SET_VOICE_LEVEL = "set_voice_level"
 RECALL_SENSES = "recall_senses"
+STAY_SILENT = "stay_silent"
+END_SILENCE = "end_silence"
 
 #: The harness's ENTIRE action set, in publication order. Each addition past
 #: the original six is a deliberate widening of the blast radius, never an
@@ -117,6 +124,8 @@ ACTION_SET: tuple[str, ...] = (
     LOWER_VOICE,
     SET_VOICE_LEVEL,
     RECALL_SENSES,
+    STAY_SILENT,
+    END_SILENCE,
 )
 
 #: Seconds a tool call waits for the engine to confirm before degrading.
@@ -218,6 +227,51 @@ DEFAULT_RECALL_SENSES_N = 5
 #: :class:`~reachy_nova.harness.sense_history.SenseHistory` (mirrors
 #: ``VOICE_NOT_WIRED_REASON``'s component-absent shape).
 HISTORY_NOT_WIRED_REASON = "sense history not wired"
+
+#: ``stay_silent`` (task t12) — how long a quiet may be asked for, in minutes.
+#: Unlike the voice level these are REFUSED rather than clamped: "be quiet for
+#: a second" and "be quiet for a week" are both far more likely to be a
+#: mis-heard number than a real request, and silently turning either into
+#: something else produces a robot that is quiet for the wrong length of time
+#: with nobody able to see why.
+MIN_QUIET_MINUTES = 1
+MAX_QUIET_MINUTES = 180
+
+#: Refusal when the requested quiet is outside :data:`MIN_QUIET_MINUTES` ..
+#: :data:`MAX_QUIET_MINUTES`.
+QUIET_MINUTES_REASON = (
+    f"'minutes' must be between {MIN_QUIET_MINUTES} and {MAX_QUIET_MINUTES} "
+    "— ask them how long they want quiet and try again"
+)
+
+#: Refusal when the quiet tools are called without a wired
+#: :class:`~reachy_nova.harness.quiet.QuietState` (same component-absent shape
+#: as ``VOICE_NOT_WIRED_REASON`` / ``HISTORY_NOT_WIRED_REASON``).
+QUIET_NOT_WIRED_REASON = "timed quiet is not wired up yet"
+
+#: The runtime behavior whose admission carries the BODY's own voice.
+#:
+#: PLAN RISK (probed live in agentculture/reachy-mini-cli, read-only): a rule's
+#: ``say`` text does NOT ride the ``speak`` behavior — it is handed to a
+#: separate injected speech seam
+#: (``reachy/behavior/rule_engine.py:493`` -> ``SpeechActuator.say``,
+#: ``reachy/behavior/speech_act.py:468``), and the library's ``speak`` entry is
+#: explicitly "MOTION ONLY ... not a voice" (``reachy/behavior/library.py:139``
+#: and the catalog entry at ``reachy/behavior/library.py:398``). Inhibiting
+#: ``speak`` therefore silences a rule's words only INDIRECTLY: the inhibited
+#: set is checked against ``rule.behavior`` before the rule fires at all
+#: (``reachy/behavior/rule_engine.py:466``), so a rule that pairs
+#: ``run = "speak"`` with ``say = "..."`` — the sanctioned pairing the shipped
+#: rules use (``reachy/behavior/default_rules.toml:164,180-183``) — is
+#: suppressed whole, words included. A rule that says something while running
+#: some OTHER behavior (``run = "nod"`` + ``say = "..."``) would still speak.
+#: That is the honest limit of the c44 decision; nothing else in the runtime's
+#: intent surface can mute the speech actuator directly.
+SPEAK_BEHAVIOR = "speak"
+
+#: How often the component tick polls the quiet deadline so an EXPIRY (not
+#: just a hand-release) also restores the body's voice.
+QUIET_TICK_S = 1.0
 
 
 class ToolRefused(ValueError):
@@ -601,6 +655,33 @@ TOOL_SPECS: list[dict] = [
             "required": [],
         },
     ),
+    _spec(
+        STAY_SILENT,
+        "Stay quiet for a while: use it when someone asks you to be quiet, to "
+        "stop talking, or to leave them alone for a bit. Acknowledge it out "
+        "loud ONCE, briefly and warmly, and then say nothing at all until the "
+        "time is up or they tell you that you can talk again. You keep "
+        "listening and reacting with your body the whole time.",
+        {
+            "type": "object",
+            "properties": {
+                "minutes": {
+                    "type": "number",
+                    "description": f"How long to stay quiet, "
+                    f"{MIN_QUIET_MINUTES}-{MAX_QUIET_MINUTES} minutes.",
+                },
+            },
+            "required": ["minutes"],
+        },
+    ),
+    _spec(
+        END_SILENCE,
+        "You can talk again: ends a quiet period early, when someone says you "
+        "may speak. Leaving quiet is silent by default — do not announce it "
+        "and do not apologise, just start speaking normally again when there "
+        "is something worth saying.",
+        {"type": "object", "properties": {}, "required": []},
+    ),
 ]
 
 
@@ -819,6 +900,7 @@ class IntentTools:
         forge_leg: object | None = None,
         daemon_client: object | None = None,
         history: object | None = None,
+        quiet: QuietState | None = None,
     ) -> None:
         # ``forge``/``use_skill`` (deviation d1) drive a ForgeLeg handle the
         # same way ``browse`` drives a NovaBrowser: injected, and refused with
@@ -831,6 +913,17 @@ class IntentTools:
         # ``recall_senses`` (task t8) reads a SenseHistory ring buffer
         # directly — same absent-component shape again, never half-working.
         self._history = history
+        # ``stay_silent``/``end_silence`` (task t12) drive the SAME QuietState
+        # the speaker gates on and the bus marks injects with — one object,
+        # three readers, so the mind-side quiet can never disagree with itself.
+        self._quiet = quiet
+        # Did WE put SPEAK_BEHAVIOR into the runtime's inhibited set? Only then
+        # may we take it back out: somebody else holding 'speak' down (an
+        # operator, a rule) must survive our release untouched.
+        self._quiet_lock = threading.RLock()
+        self._quiet_added_speak = False
+        self._tick_stop: threading.Event | None = None
+        self._ticker: threading.Thread | None = None
         self._commands_dir = Path(commands_dir) if commands_dir is not None else None
         self._results_dir = Path(results_dir) if results_dir is not None else None
         self.await_timeout = float(await_timeout)
@@ -939,6 +1032,10 @@ class IntentTools:
             return self._voice_tool(tool_name, params)
         if tool_name == RECALL_SENSES:
             return self._recall_senses(params)
+        if tool_name == STAY_SILENT:
+            return self._stay_silent(params)
+        if tool_name == END_SILENCE:
+            return self._end_silence(params)
         return self.submit_and_await(_BUILDERS[tool_name](params))
 
     def _forge_tool(self, tool_name: str, params: Mapping) -> dict:
@@ -1098,9 +1195,147 @@ class IntentTools:
         return {"ok": True, "senses": self._history.recent(clamped)}
 
 
+    # -- timed quiet (task t12) --------------------------------------------
+
+    def _stay_silent(self, params: Mapping) -> dict:
+        """``stay_silent`` — close BOTH mouths, and say so once.
+
+        Two independent silences are armed here, in that order:
+
+        1. the MIND's — :class:`~reachy_nova.harness.quiet.QuietState`, which
+           gates the Sonic speaker in-process and marks every inject;
+        2. the BODY's — a merged ``set_inhibition`` that adds
+           :data:`SPEAK_BEHAVIOR` to whatever the runtime is already holding
+           back (see that constant for exactly how much of the runtime's own
+           voice that reaches, and what it does not).
+
+        The order is the contract. ``set_inhibition`` REPLACES the whole
+        inhibited set on the engine, so it is a round-trip over the spool and
+        can degrade (no engine, slow engine) — and a degraded body mute must
+        never undo the mind-side quiet, which is the half the person actually
+        asked for and the half that always works. So the quiet is armed first,
+        unconditionally, and the body's verdict is reported as ``body_muted``
+        rather than folded into ``ok``.
+        """
+        if self._quiet is None:
+            raise ToolRefused(QUIET_NOT_WIRED_REASON)
+        minutes = _number(params.get("minutes"), "'minutes'")
+        if not (MIN_QUIET_MINUTES <= minutes <= MAX_QUIET_MINUTES):
+            raise ToolRefused(QUIET_MINUTES_REASON)
+        armed = self._quiet.arm(minutes)
+        return {
+            "ok": True,
+            "until": self._quiet.until_iso(),
+            "note": armed["note"],
+            "body_muted": self._mute_body(),
+        }
+
+    def _end_silence(self, params: Mapping) -> dict:  # noqa: ARG002 - no arguments
+        """``end_silence`` — always accepted; a quiet that was not on is not an error."""
+        if self._quiet is None:
+            raise ToolRefused(QUIET_NOT_WIRED_REASON)
+        if not self._quiet.release("tool")["was_armed"]:
+            return {"ok": True, "note": "not silent"}
+        return {"ok": True, "note": "ended", "body_restored": self._unmute_body()}
+
+    def tick(self) -> None:
+        """Restore the body's voice when a quiet EXPIRED rather than was ended.
+
+        :meth:`QuietState.active` releases (and logs) its own expiry, but the
+        runtime-side inhibition is ours and only we can lift it — without this
+        poll a ten-minute quiet would end for the mind and last forever for the
+        body. Cheap and idempotent: it does nothing at all unless we are
+        actually holding an inhibition we put there ourselves.
+        """
+        if self._quiet is None:
+            return
+        with self._quiet_lock:
+            if not self._quiet_added_speak or self._quiet.active():
+                return
+        self._unmute_body()
+
+    # -- the runtime's own mouth -------------------------------------------
+
+    def _mute_body(self) -> bool:
+        """Merge :data:`SPEAK_BEHAVIOR` into the runtime's inhibited set."""
+        current = current_inhibitions()
+        merged = sorted(set(current) | {SPEAK_BEHAVIOR})
+        result = self.submit_and_await({"op": SET_INHIBITION, "behaviors": merged})
+        ok = result.get("ok") is True
+        with self._quiet_lock:
+            # Latched, never recomputed: a second stay_silent (an "extended")
+            # reads a state.json that already lists 'speak' and would otherwise
+            # forget that WE are the ones holding it.
+            if ok and SPEAK_BEHAVIOR not in current:
+                self._quiet_added_speak = True
+        return ok
+
+    def _unmute_body(self) -> bool:
+        """Take back only the inhibition we added; leave everything else alone."""
+        with self._quiet_lock:
+            if not self._quiet_added_speak:
+                return False
+        remaining = sorted(set(current_inhibitions()) - {SPEAK_BEHAVIOR})
+        result = self.submit_and_await({"op": SET_INHIBITION, "behaviors": remaining})
+        ok = result.get("ok") is True
+        if ok:
+            with self._quiet_lock:
+                self._quiet_added_speak = False
+        return ok
+
+    # -- supervisor component ----------------------------------------------
+
+    name = "tools"
+
+    def start(self, stop_event: threading.Event) -> None:
+        """Run the quiet-expiry poll until *stop_event*. Never blocks a caller."""
+        self._tick_stop = stop_event
+        self._ticker = threading.Thread(
+            target=self._tick_loop, name="nova-tools-tick", daemon=True
+        )
+        self._ticker.start()
+
+    def _tick_loop(self) -> None:
+        stop_event = self._tick_stop
+        if stop_event is None:  # pragma: no cover - start() always sets it
+            return
+        while not stop_event.is_set():
+            try:
+                self.tick()
+            except Exception as err:  # noqa: BLE001 - a poll fault never kills the leg
+                logger.warning("tools: quiet tick failed: %s", err, exc_info=True)
+            if stop_event.wait(QUIET_TICK_S):
+                break
+
+    def stop(self, timeout: float = 2.0) -> None:
+        if self._ticker is not None and self._ticker.is_alive():
+            self._ticker.join(timeout=timeout)
+
+
 # --------------------------------------------------------------------------- #
 # Small file + logging helpers                                                #
 # --------------------------------------------------------------------------- #
+
+
+def current_inhibitions() -> list[str]:
+    """The runtime's currently inhibited behaviors, from its published state.
+
+    ``set_inhibition`` REPLACES the whole set, so adding one name means first
+    reading the set that is there — the IntentDriver merges its own view into
+    the engine's ``state.json`` under ``intents.inhibitions``
+    (reachy-mini-cli ``reachy/behavior/intents.py:503-513``). Absent, stale,
+    unreadable or malformed all read as "nothing inhibited": a harness that
+    refused to go quiet because it could not parse a status file would be
+    failing at the one thing the person asked for.
+    """
+    try:
+        payload = json.loads(statedir.state_json_path().read_text(encoding="utf-8"))
+        names = payload["intents"]["inhibitions"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    if not isinstance(names, list):
+        return []
+    return [name for name in names if isinstance(name, str)]
 
 
 def _atomic_write(path: Path, text: str) -> None:

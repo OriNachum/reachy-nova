@@ -29,6 +29,7 @@ import pytest
 import yaml
 
 from reachy_nova.harness import bus
+from reachy_nova.harness.quiet import QuietState
 from reachy_nova.harness.sense_history import SenseHistory
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -858,3 +859,89 @@ def test_bus_with_no_history_wired_never_raises():
     )
     assert len(rec.injects) == 1
     assert nb.history is None
+
+
+# --------------------------------------------------------------------------- #
+# The quiet marker (t12) — every inject carries it while quiet is armed       #
+# --------------------------------------------------------------------------- #
+
+
+class _FakeClock:
+    def __init__(self, now: float = 1_700_000_000.0) -> None:
+        self.now = float(now)
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _armed_quiet(tmp_path, minutes: float = 10.0):
+    q = QuietState(clock=_FakeClock(), path=tmp_path / "nova-quiet.json")
+    q.arm(minutes)
+    return q
+
+
+def _pat(nb):
+    nb.on_message(
+        None, None, fake_msg("reachy/events/pat/level1", {"t": "pat", "ts": 1.0, "level": 1})
+    )
+
+
+def test_quiet_marker_is_appended_to_a_free_rule_inject_while_armed(tmp_path):
+    rec = Recorder()
+    quiet = _armed_quiet(tmp_path)
+    nb = make_bus(rec, rules_path=_custom_rules_path(tmp_path), quiet=quiet, sources="face")
+    nb.on_message(
+        None,
+        None,
+        fake_msg("reachy/events/face/recognized", {"t": "face", "ts": 2.0, "name": "Ori"}),
+    )
+    # face/recognized in the custom rules carries no ``voice`` field at all
+    # (i.e. ``free``) — the quiet marker rides on top regardless.
+    assert rec.injects == ["Ori is looking at you" + bus.QUIET_MARKER]
+
+
+def test_quiet_marker_is_gone_after_release(tmp_path):
+    rec = Recorder()
+    quiet = _armed_quiet(tmp_path)
+    nb = make_bus(rec, rules_path=_custom_rules_path(tmp_path), quiet=quiet, sources="face")
+    quiet.release("test")
+    nb.on_message(
+        None,
+        None,
+        fake_msg("reachy/events/face/recognized", {"t": "face", "ts": 2.0, "name": "Ori"}),
+    )
+    assert rec.injects == ["Ori is looking at you"]
+
+
+def test_quiet_marker_rides_on_top_of_a_voice_marker(tmp_path):
+    rec = Recorder()
+    quiet = _armed_quiet(tmp_path)
+    nb = make_bus(rec, rules_path=_custom_rules_path(tmp_path), quiet=quiet)
+    _pat(nb)
+    (text,) = rec.injects
+    assert text.endswith(bus.QUIET_MARKER)
+    assert bus.VOICE_MARKERS["brief"] in text
+
+
+def test_quiet_marker_reaches_the_sense_history_text_too(tmp_path):
+    rec = Recorder()
+    history = SenseHistory()
+    quiet = _armed_quiet(tmp_path)
+    nb = make_bus(
+        rec, rules_path=_custom_rules_path(tmp_path), quiet=quiet, history=history
+    )
+    _pat(nb)
+    (entry,) = history.recent()
+    assert entry["text"] == rec.injects[0]
+
+
+def test_bus_without_a_quiet_state_never_marks_an_inject(tmp_path):
+    rec = Recorder()
+    nb = make_bus(rec, rules_path=_custom_rules_path(tmp_path))
+    _pat(nb)
+    assert bus.QUIET_MARKER not in rec.injects[0]
+
+
+def test_quiet_marker_text_says_do_not_speak():
+    assert "quiet mode" in bus.QUIET_MARKER
+    assert "do not speak" in bus.QUIET_MARKER
