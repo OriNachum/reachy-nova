@@ -56,7 +56,23 @@ ACTION="${2:-}"
 TAG="reachy-failover"
 say() { logger -t "$TAG" -- "$*" 2>/dev/null || true; }
 
-# --- configuration (kept in sync with install-device-units.sh) -------------
+# --- configuration ---------------------------------------------------------
+# The values below are the REFERENCE DEVICE's defaults (the Reachy Mini
+# Wireless: user pollen, the repo venv under /home/pollen). Any other install
+# — a different user, a different checkout, a different venv — gets its real
+# values from /etc/default/reachy-failover, which scripts/install-device-units.sh
+# renders at install time from the interpreter, state dir and user it actually
+# resolved (and self-tests through that same interpreter). Sourcing it FIRST is
+# load-bearing: it seeds REACHY_NOVA_PYTHON / REACHY_STATE_DIR /
+# REACHY_NOVA_USER, which the `${VAR:-default}` fallbacks below then defer to.
+# Without it a custom install passes the installer's self-test and then
+# silently skips every single event on the `[ ! -x "$NOVA_PYTHON" ]` guard.
+DEFAULTS_FILE="${REACHY_FAILOVER_DEFAULTS:-/etc/default/reachy-failover}"
+if [ -r "$DEFAULTS_FILE" ]; then
+    # shellcheck source=/dev/null
+    . "$DEFAULTS_FILE"
+fi
+
 NOVA_USER="${REACHY_NOVA_USER:-pollen}"
 NOVA_PYTHON="${REACHY_NOVA_PYTHON:-/home/pollen/git/reachy-nova/.venv/bin/python}"
 STATE_DIR="${REACHY_STATE_DIR:-/home/pollen/.local/state/reachy}"

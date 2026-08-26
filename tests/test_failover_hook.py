@@ -33,6 +33,16 @@ def _installer() -> str:
     return INSTALLER_PATH.read_text()
 
 
+def _failover_step() -> str:
+    """The body of install_failover_hook(), from its definition line.
+
+    Split on the definition (``install_failover_hook() {``), never on the bare
+    name: the usage header mentions the function too, and everything the
+    installer grew above it would otherwise be read as part of the step.
+    """
+    return _installer().split("install_failover_hook() {", 1)[1]
+
+
 # --------------------------------------------------------------------------
 # the dispatcher hook
 # --------------------------------------------------------------------------
@@ -127,6 +137,28 @@ def test_hook_guards_on_the_interpreter_existing():
     assert '[ ! -x "$NOVA_PYTHON" ]' in text
 
 
+def test_hook_sources_the_installer_rendered_defaults_file():
+    """The hook's compiled-in defaults are for the reference device only. A
+    custom install renders /etc/default/reachy-failover with the interpreter,
+    state dir and user it actually resolved, and the hook must source it
+    BEFORE its own `${VAR:-default}` fallbacks — otherwise a custom install
+    passes the installer's self-test and then silently skips every event on
+    the `[ ! -x "$NOVA_PYTHON" ]` guard.
+    """
+    text = _hook()
+    assert 'DEFAULTS_FILE="${REACHY_FAILOVER_DEFAULTS:-/etc/default/reachy-failover}"' in text
+    assert '[ -r "$DEFAULTS_FILE" ]' in text
+    assert '. "$DEFAULTS_FILE"' in text
+    # ordering: sourcing must precede the defaults it is meant to override
+    assert text.index('. "$DEFAULTS_FILE"') < text.index('NOVA_PYTHON="${REACHY_NOVA_PYTHON:-')
+
+
+def test_hook_still_reads_all_three_values_from_the_environment():
+    text = _hook()
+    for name in ("REACHY_NOVA_PYTHON", "REACHY_STATE_DIR", "REACHY_NOVA_USER"):
+        assert name in text
+
+
 def test_hook_never_blocks_networkmanager_for_the_activation():
     """The activation can take 45 s; the dispatcher queue must not wait for it."""
     text = _hook()
@@ -165,8 +197,7 @@ def test_installer_runs_the_self_test():
 
 def test_installer_reverts_the_hook_when_the_self_test_fails():
     """The whole point of the self-test: a hook that cannot run is removed."""
-    text = _installer()
-    step = text.split("install_failover_hook()", 1)[1]
+    step = _failover_step()
     assert "self-test FAILED" in step
     assert "sudo -n rm -f" in step
 
@@ -174,8 +205,7 @@ def test_installer_reverts_the_hook_when_the_self_test_fails():
 def test_installer_failover_step_is_never_fatal():
     """Every guard in the step returns 0 — a missing dispatcher dir, no sudo,
     or a failed self-test must not fail the whole install."""
-    text = _installer()
-    step = text.split("install_failover_hook()", 1)[1].split("\n}", 1)[0]
+    step = _failover_step().split("\n}", 1)[0]
     # no `exit` at all inside the function; only `return 0`
     assert not re.search(r"^\s*exit\s", step, re.M)
     assert re.search(r"^\s*return 0", step, re.M)
@@ -196,3 +226,93 @@ def test_installer_still_accepts_the_two_positional_pythons():
     text = _installer()
     assert 'CLI_PYTHON="${POSITIONAL[0]:-' in text
     assert 'NOVA_PYTHON="${POSITIONAL[1]:-' in text
+
+
+# --------------------------------------------------------------------------
+# the installer renders the hook's config instead of relying on its defaults
+# --------------------------------------------------------------------------
+
+
+def _dry_run(tmp_path, nova_python: str, env_extra=None):
+    """Run the installer in its INSTALL_DRY_RUN=1 seam — prints what the
+    failover step would render, touches nothing, needs no sudo."""
+    import os
+
+    env = dict(os.environ)
+    env.update(
+        {
+            "INSTALL_DRY_RUN": "1",
+            "HOME": str(tmp_path),
+            "PATH": env.get("PATH", "/usr/bin:/bin"),
+        }
+    )
+    env.pop("REACHY_STATE_DIR", None)
+    env.pop("XDG_STATE_HOME", None)
+    env.pop("REACHY_NOVA_USER", None)
+    env.update(env_extra or {})
+    proc = subprocess.run(
+        ["bash", str(INSTALLER_PATH), str(tmp_path / "cli-python"), nova_python],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout + proc.stderr
+
+
+def _fake_python(tmp_path) -> str:
+    path = tmp_path / "custom-venv" / "bin" / "python"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nexit 0\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_installer_has_a_dry_run_seam():
+    text = _installer()
+    assert "INSTALL_DRY_RUN" in text
+
+
+def test_installer_renders_the_defaults_file_with_the_resolved_interpreter(tmp_path):
+    """Finding 6: a custom NOVA_PYTHON must reach the installed hook."""
+    nova_python = _fake_python(tmp_path)
+    out = _dry_run(tmp_path, nova_python)
+    assert "/etc/default/reachy-failover" in out
+    assert f"REACHY_NOVA_PYTHON={nova_python}" in out
+    assert "/home/pollen/git/reachy-nova/.venv/bin/python" not in out
+
+
+def test_installer_renders_the_resolved_state_dir_and_user(tmp_path):
+    nova_python = _fake_python(tmp_path)
+    out = _dry_run(
+        tmp_path,
+        nova_python,
+        env_extra={"REACHY_STATE_DIR": str(tmp_path / "st"), "REACHY_NOVA_USER": "someone"},
+    )
+    assert f"REACHY_STATE_DIR={tmp_path / 'st'}" in out
+    assert "REACHY_NOVA_USER=someone" in out
+
+
+def test_installer_state_dir_defaults_like_the_python_resolver(tmp_path):
+    """No REACHY_STATE_DIR / XDG_STATE_HOME -> $HOME/.local/state/reachy, the
+    same cascade as reachy_nova.netfailover.default_statedir()."""
+    out = _dry_run(tmp_path, _fake_python(tmp_path))
+    assert f"REACHY_STATE_DIR={tmp_path}/.local/state/reachy" in out
+
+
+def test_installer_resolves_a_bare_interpreter_name_to_an_absolute_path(tmp_path):
+    """The hook guards on `[ -x "$NOVA_PYTHON" ]`, which a bare `python3`
+    never satisfies."""
+    out = _dry_run(tmp_path, "python3")
+    match = re.search(r"^REACHY_NOVA_PYTHON=(.+)$", out, re.M)
+    assert match, out
+    assert match.group(1).startswith("/")
+
+
+def test_installer_self_tests_through_the_same_interpreter_the_hook_will_use():
+    step = _failover_step()
+    assert '"$NOVA_PYTHON_RESOLVED" -m reachy_nova.netfailover --self-test' in step
+    # ...and the defaults file is written before the hook is trusted
+    assert "FAILOVER_DEFAULTS_FILE" in step
