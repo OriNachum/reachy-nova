@@ -146,6 +146,35 @@ def test_route_event_free_voice_appends_nothing():
     assert text == "context"
 
 
+def test_face_lost_is_a_quiet_brief_face_sense(rules_cfg, raw_rules):
+    """t13: face-lost is worth a quiet cue (the lock persists), not narration."""
+    assert raw_rules["rules"]["motion/face-lost"].get("voice") == "brief"
+    assert raw_rules["rules"]["motion/face-lost"].get("sense") == "face"
+
+    text, reason = bus.route_event(rules_cfg, "motion", "face-lost", {"id": "p1", "absent_s": 4})
+    assert reason == bus.REASON_INJECT
+    assert text.endswith(bus.VOICE_MARKERS["brief"])
+    lowered = text.lower()
+    for forbidden in FORBIDDEN_SUBSTRINGS:
+        assert forbidden not in lowered
+
+
+def test_lock_released_is_silent_and_names_the_reason_in_plain_words(rules_cfg, raw_rules):
+    """t13: lock-released is bookkeeping (voice: silent) but still says WHY,
+    in words a person understands — never the raw reason token alone."""
+    assert raw_rules["rules"]["motion/lock-released"].get("voice") == "silent"
+
+    text, reason = bus.route_event(
+        rules_cfg, "motion", "lock-released", {"id": "p1", "reason": "max-hold"}
+    )
+    assert reason == bus.REASON_INJECT
+    assert "max-hold" in text
+    assert text.endswith(bus.VOICE_MARKERS["silent"])
+    lowered = text.lower()
+    for forbidden in FORBIDDEN_SUBSTRINGS:
+        assert forbidden not in lowered
+
+
 def test_route_event_absent_voice_defaults_to_free():
     cfg = {
         "rules": {"src/type": {"inject_template": "context"}},

@@ -424,3 +424,30 @@ rules:
     urgency: NOW
     llm_evaluate: true
     inject_template: "Right now you see: {description}"
+
+  # --- Gaze-lock lifecycle (t13) ---------------------------------------------
+  # Published by the runtime while a lock_face gaze lock (task t9's
+  # LOCK_FACE/RELEASE_FACE intents) is held. The lock itself PERSISTS across a
+  # face-lost — this is a "can't currently see them" notice, not a release.
+
+  motion/face-lost:
+    # Payload {id, absent_s}: the locked face has been out of view for
+    # absent_s seconds, but the lock is still held (the runtime keeps trying).
+    # Worth a quiet situational cue, not a whole reaction.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    voice: brief
+    sense: face
+    inject_template: "(the person you were watching is out of view)"
+
+  motion/lock-released:
+    # Payload {id, reason: requested|mind-offline|max-hold} — the runtime
+    # actually dropped the lock. Silent: this is bookkeeping for the harness's
+    # own local lock belief (reachy_nova/harness/lock_state.py), not something
+    # worth narrating out loud.
+    priority: NORMAL
+    urgency: NOW
+    llm_evaluate: false
+    voice: silent
+    inject_template: "(you stopped following the person: {reason})"

@@ -280,12 +280,29 @@ def _stop_components(started: Sequence[object]) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _find_lock_state(components: Sequence[object]) -> object | None:
+    """The first component exposing a non-``None`` ``.lock_state`` attribute.
+
+    ``IntentTools`` (``tools.py``) carries the harness's one
+    :class:`~reachy_nova.harness.lock_state.LockState` belief as a public
+    attribute rather than a second constructor argument threaded through
+    every layer between ``app.build_app`` and this module — this is the seam
+    that finds it again on the component list :func:`run` already receives.
+    """
+    for component in components:
+        candidate = getattr(component, "lock_state", None)
+        if candidate is not None:
+            return candidate
+    return None
+
+
 def run(
     components: Sequence[object],
     stop_event: threading.Event,
     *,
     poll_interval: float = DEFAULT_POLL_INTERVAL,
     tick_hook: Callable[[int], None] | None = None,
+    lock_state: object | None = None,
 ) -> None:
     """Start every component, then watch the engine heartbeat until stopped.
 
@@ -294,6 +311,13 @@ def run(
     turns the engine's heartbeat into named transitions. *tick_hook* is the test
     seam — it is called with the tick count after each observation, which is how
     a heartbeat transition is exercised inside a single :func:`run` call.
+
+    *lock_state* (duck-typed: anything with an ``on_engine_dropped()`` method,
+    e.g. :class:`~reachy_nova.harness.lock_state.LockState`) is notified on
+    the live -> dropped transition, so a locally-believed gaze lock does not
+    outlive the engine process that actually held it — see that method's
+    docstring for why this is a supervisor concern rather than a bus one.
+    ``None`` (the default, and every non-t13 caller) skips this entirely.
     """
     started = _start_components(components, stop_event)
     _log("start", f"harness up pid={os.getpid()} components={len(started)}")
@@ -309,6 +333,11 @@ def run(
                     _log("engine", "engine absent")
                 else:
                     _log("engine", "dropped reason=engine-heartbeat-lost")
+                    if lock_state is not None:
+                        try:
+                            lock_state.on_engine_dropped()  # type: ignore[attr-defined]
+                        except Exception as err:  # noqa: BLE001 - a belief update must not kill the loop
+                            _log("engine", f"lock-state update failed detail={err}")
                 previous = live
             ticks += 1
             if tick_hook is not None:
@@ -404,14 +433,17 @@ def cmd_run(env_file: str | None = None) -> int:
     stop_event = threading.Event()
     restore = install_signal_handlers(stop_event)
     try:
-        run(components, stop_event)
+        run(components, stop_event, lock_state=_find_lock_state(components))
     finally:
         restore()
         release_pid_file()
     return EXIT_OK
 
 
-def status(quiet: "quiet_mod.QuietState | None" = None) -> dict[str, object]:
+def status(
+    quiet: "quiet_mod.QuietState | None" = None,
+    lock_state: object | None = None,
+) -> dict[str, object]:
     """Engine / embody / own-PID liveness — the whole attachment picture.
 
     *quiet* is the running harness's own :class:`~reachy_nova.harness.quiet.QuietState`
@@ -419,10 +451,19 @@ def status(quiet: "quiet_mod.QuietState | None" = None) -> dict[str, object]:
     process from the harness, so with no instance to hand the persisted
     deadline is read side-effect-free instead — "why is it not talking?" must
     be answerable from outside the harness, which is where the operator is.
+
+    *lock_state* is the running harness's own (in-process)
+    :class:`~reachy_nova.harness.lock_state.LockState`, same seam as *quiet*
+    (task t11). Unlike the quiet deadline, the lock belief has no on-disk
+    mirror — the runtime does not (yet) publish lock state into state.json —
+    so an out-of-process ``status`` CLI call always reports ``locked: None``
+    (unknown), which is the honest answer for a belief that lives only inside
+    the running harness's own memory.
     """
     pid = read_pid()
     running = pid is not None and _is_alive(pid) and _is_our_harness(pid)
     quiet_until = quiet.until_iso() if quiet is not None else quiet_mod.peek_until_iso()
+    locked = lock_state.locked if lock_state is not None else None  # type: ignore[attr-defined]
     return {
         "state_dir": str(statedir.state_dir()),
         "engine_live": statedir.engine_is_live(),
@@ -430,6 +471,7 @@ def status(quiet: "quiet_mod.QuietState | None" = None) -> dict[str, object]:
         "harness_pid": pid,
         "harness_running": running,
         "quiet_until": quiet_until,
+        "locked": locked,
         "unit": unit.HARNESS_UNIT,
     }
 

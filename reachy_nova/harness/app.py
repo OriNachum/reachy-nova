@@ -45,6 +45,7 @@ from .cognition_feed import CognitionFeed
 from .daemon_client import DaemonClient, restore_volume
 from .gate import EchoGate, resolve_policy
 from .hearing import TeeHearing
+from .lock_state import LockState
 from .network import NetworkUnit
 from .quiet import QuietState
 from .rules_overlay import upsert_rule
@@ -403,6 +404,16 @@ def build_app() -> list[object]:
     # populates it, and IntentTools, whose recall_senses tool reads it.
     history = SenseHistory()
 
+    # lock awareness (t13) — the harness's own belief about the runtime's
+    # gaze lock. lock_face/release_face mirror a CONFIRMED verdict into it
+    # below; the bus mirrors the runtime's own motion/lock-released events
+    # into it (wired once bus_component exists, further down); the
+    # supervisor clears it on an engine-heartbeat drop (see
+    # supervisor._find_lock_state / run()'s lock_state kwarg) so a stale
+    # local belief can never outlive the engine process that actually held
+    # the lock.
+    lock_state = LockState()
+
     intents = IntentTools(
         browser=browser,
         on_browse_progress=sonic.inject_text if browser is not None else None,
@@ -410,6 +421,7 @@ def build_app() -> list[object]:
         daemon_client=daemon_client,
         history=history,
         quiet=quiet,
+        lock_state=lock_state,
     )
 
     # volume restore (t10) — re-apply a persisted level if the daemon disagrees.
@@ -494,7 +506,12 @@ def build_app() -> list[object]:
     try:
         from .bus import NovaBus
 
-        bus_component = NovaBus(on_inject=sonic.inject_text, history=history, quiet=quiet)
+        bus_component = NovaBus(
+            on_inject=sonic.inject_text,
+            on_event=lock_state.on_bus_event,
+            history=history,
+            quiet=quiet,
+        )
         components.append(bus_component)
     except Exception as err:  # noqa: BLE001
         _stage("supervise", "nova", "component", f"component absent name=bus reason={err}")

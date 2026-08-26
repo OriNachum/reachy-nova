@@ -8,8 +8,10 @@ the ensure step degrades to its named component-absent line; the tests that
 exercise the install path create the behavior dir themselves.
 """
 
+import json
 import queue
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -42,6 +44,11 @@ def _build():
 
 def _messages(caplog):
     return [r.getMessage() for r in caplog.records]
+
+
+def _fake_msg(topic: str, payload: dict) -> SimpleNamespace:
+    """A stand-in for paho's MQTTMessage, matching test_harness_bus.py's."""
+    return SimpleNamespace(topic=topic, payload=json.dumps(payload).encode())
 
 
 def test_build_app_returns_sonic_speaker_hearing_in_start_order():
@@ -304,6 +311,36 @@ def test_bus_and_intents_share_the_same_sense_history(monkeypatch):
 
     assert isinstance(captured["history"], SenseHistory)
     assert bus_component.history is captured["history"]
+
+
+def test_bus_and_intents_share_the_same_lock_state(monkeypatch):
+    """t13: the bus's on_event tap and IntentTools' lock_face/release_face
+    tools update the SAME LockState — otherwise a lock-released event the
+    runtime published would correct a belief nothing else reads."""
+    captured: dict = {}
+    real_intent_tools = IntentTools
+
+    def _spy(*args, **kwargs):
+        captured["lock_state"] = kwargs.get("lock_state")
+        return real_intent_tools(*args, **kwargs)
+
+    monkeypatch.setattr(app, "IntentTools", _spy)
+
+    components = _build()
+    bus_component = next(c for c in components if isinstance(c, NovaBus))
+
+    lock_state = captured["lock_state"]
+    assert lock_state is not None
+
+    bus_component.on_message(
+        None,
+        None,
+        _fake_msg(
+            "reachy/events/motion/lock-released",
+            {"t": "motion", "id": "p1", "reason": "max-hold"},
+        ),
+    )
+    assert lock_state.locked is False
 
 
 def test_bus_history_is_wired_even_when_bus_construction_is_absent(monkeypatch):
