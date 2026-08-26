@@ -27,6 +27,7 @@ the spool write and the engine's own answer are the only truth that matters.
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
@@ -68,7 +69,7 @@ def default_drop_grace_s() -> float:
         value = float(raw)
     except (TypeError, ValueError):
         return DEFAULT_DROP_GRACE_S
-    if not value >= 0.0:  # negative, or NaN
+    if value < 0.0 or math.isnan(value):  # negative, or NaN
         return DEFAULT_DROP_GRACE_S
     return value
 

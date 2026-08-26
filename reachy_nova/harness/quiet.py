@@ -56,6 +56,7 @@ stdlib only; never imports ``reachy_mini``
 
 from __future__ import annotations
 
+import math
 import json
 import os
 import threading
@@ -99,7 +100,7 @@ def default_grace_s() -> float:
         value = float(raw)
     except (TypeError, ValueError):
         return DEFAULT_GRACE_S
-    if not value > 0.0:  # non-positive, or NaN
+    if value <= 0.0 or math.isnan(value):  # non-positive, or NaN
         return DEFAULT_GRACE_S
     return value
 

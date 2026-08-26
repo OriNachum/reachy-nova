@@ -268,7 +268,8 @@ def test_l3_intent_blocked_renders_no_empty_placeholder(rules_cfg):
     template must not leave a dangling empty field behind."""
     text, _ = bus.route_event(rules_cfg, "intent", "blocked", {"name": "set_inhibition"})
     assert "{" not in text
-    assert ": )" not in text and "()" not in text
+    assert ": )" not in text
+    assert "()" not in text
     assert text.strip() == text
 
 
