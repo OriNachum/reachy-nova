@@ -1,0 +1,845 @@
+{
+  "slug": "gaze-voice-level-timed-quiet-no-reflex-narration",
+  "title": "gaze, voice-level, timed quiet, no reflex narration",
+  "frame_slug": "gaze-voice-level-timed-quiet-no-reflex-narration",
+  "schema_version": 4,
+  "status": "exported",
+  "created": "2026-08-26T13:08:01Z",
+  "updated": "2026-08-26T13:32:31Z",
+  "targets": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "Nova now performs asked-for gaze actions (look toward sound, look toward face, lock on a face until released, release), raises or lowers its voice on request, can stay quiet for a set number of minutes and resume on its own, and no longer narrates its own reflexes unless asked \u2014 and the cold-boot Kiro degraded-start path has been exercised live",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h1",
+      "kind": "honesty",
+      "text": "Every item in the announcement is demonstrable on the robot (not only in unit tests) and each maps to at least one confirmed requirement on this frame",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c2",
+      "kind": "before_state",
+      "text": "Today every body reflex reaching the mind is voiced back: config/nervous-system/rules.yaml:236-242 renders the generic rule/fire template \"Your body just reacted on its own \u2014 the '{rule}' reflex fired.\" and the harness system prompt (reachy_nova/harness/app.py:52-64) tells Sonic to 'mention what you did in a few words' with no instruction against describing mechanism",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h15",
+      "kind": "honesty",
+      "text": "The pre-change journal from 2026-08-26 (or a fresh pat on the unpatched build) shows the 'reflex fired' inject text \u2014 the before-state is evidenced, not remembered",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c3",
+      "kind": "requirement",
+      "text": "Reflex injects become quiet context, not prompts: rewrite rules.yaml inject templates for rule/fire, rule/fire:pat-acknowledge, rule/fire:nova-face-noticed and pat/* as parenthetical situational awareness with no 'reflex'/'rule'/'reacted on its own' wording, and add a system-prompt line in HARNESS_SYSTEM_PROMPT that Nova reacts naturally to body cues and never describes its own mechanism unless asked",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h2",
+      "kind": "honesty",
+      "text": "After the change, grep of every rendered inject for the pat, face-noticed and generic rule/fire entries contains none of: 'reflex', 'rule', 'reacted on its own', 'leaning', 'antenna' \u2014 pinned by a test over rules.yaml rendering",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c4",
+      "kind": "requirement",
+      "text": "Per-rule voice policy in rules.yaml (a 'voice: silent|brief|free' field, or reuse of urgency) with body reflexes defaulting to silent/brief; rendered into the inject text as an explicit marker Sonic can obey; pinned by tests on rules.yaml rendering",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h3",
+      "kind": "honesty",
+      "text": "load_rules/rule_for accept a 'voice' field with default 'free'; a test asserts generic rule/fire is 'silent' and that a silent rule still produces an inject (never dropped) carrying the marker",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c6",
+      "kind": "requirement",
+      "text": "One inject per sense class per cooldown: a sense-class dedupe in NovaBus between route_event and _on_inject (bus.py:574-593) so pat-acknowledge, nova-pat-cheer and any future pat/* topic collapse into one inject within the window",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h4",
+      "kind": "honesty",
+      "text": "A test feeds two rule/fire events (pat-acknowledge then nova-pat-cheer) within the cooldown window and asserts exactly one inject reaches Sonic; a pat after the window produces a fresh inject",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c7",
+      "kind": "requirement",
+      "text": "'Why did you do that?' is answerable: keep a small recent-sense ring buffer (last N routed injects with timestamps) next to NovaBus._on_inject or CognitionFeed and expose it to Sonic on request (an inject or a tool), so the answer references the actual last sense event",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h5",
+      "kind": "honesty",
+      "text": "A test injects three routed senses then asks for recent history and gets them in order with timestamps; the live answer to 'why did you move?' names the actual last sense",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c8",
+      "kind": "boundary",
+      "text": "The harness gains no motion code for any gaze action: look-toward-sound, look-toward-face and face-lock/release are runtime-side (reachy-mini-cli) behaviors/intents, requested from the harness through the intents spool; the AST boundary test (no reachy_mini import, no set_target) stays green",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h16",
+      "kind": "honesty",
+      "text": "tests/test_harness_boundary.py stays green after all gaze work: no reachy_mini import and no set_target reference anywhere under reachy_nova/harness/",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c10",
+      "kind": "requirement",
+      "text": "Refuse look-toward-sound with a named reason when no recent DoA exists: DoaPoller must expose the age of its last good reading (Sense carries no timestamp by design), and the behavior refuses above a staleness threshold (candidate: orient.py's latch_after_s=8 s)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h6",
+      "kind": "honesty",
+      "text": "With no DoA reading (or one older than the staleness threshold) run_behavior look-toward-sound returns {ok:false, error:<named reason>} and no head motion; with a fresh reading the head turns within the behavior's yaw clamp",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c11",
+      "kind": "requirement",
+      "text": "Face position reaches the behavior layer: plumb FaceDetection.bbox_norm (and a last-seen time) from vision/face.py through FaceSenseDriver._detect_once into Sense, since Sense.face is a name string only \u2014 look-toward-face and face-lock cannot aim without it",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h7",
+      "kind": "honesty",
+      "text": "Sense (or a face provider) exposes bbox_norm and last-seen age for the most recent detection, pinned by a test in reachy-mini-cli; look-toward-face refuses with a named reason when no face is known",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c12",
+      "kind": "boundary",
+      "text": "The face store (embeddings, TTL/enroll tiers) is unchanged: gaze actions read position from the live detection path, not from FaceStore",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h17",
+      "kind": "honesty",
+      "text": "git diff of the gaze PRs touches nothing under reachy/vision/face_store.py and no FaceStore test changes",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c14",
+      "kind": "requirement",
+      "text": "Face-lost-while-locked and lock-released are emitted as runtime events and must be registered in reachy/export/runtime.py's raw-action tables (an unknown action is dropped from both stdout and MQTT feeds with REASON_UNKNOWN_EVENT); the harness rules.yaml gains matching entries so they render as quiet context",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h8",
+      "kind": "honesty",
+      "text": "The new intent actions appear in reachy/export/runtime.py's tables, a test asserts they reach both stdout and MQTT feeds, and rules.yaml has an entry for each so test_rules_coverage stays green",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c15",
+      "kind": "boundary",
+      "text": "Face-lock is safe to hold indefinitely: it clamps head yaw/pitch like orient-to-sound's max_yaw and never drives the raw compose path unbounded; the goto envelope (goto_intent.py limits) is the reference but is not re-implemented in the harness",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h18",
+      "kind": "honesty",
+      "text": "A test drives the lock behavior with a face bbox at the frame edge for many ticks and asserts commanded yaw/pitch never exceed the behavior's clamp; a 30-minute live hold shows no motor-temperature or jitter warning in the runtime journal",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c16",
+      "kind": "requirement",
+      "text": "raise_voice/lower_voice (or set_voice_level) are harness tools over the daemon's GET /api/volume/current and POST /api/volume/set, clamped to [10,100], reusing speaking.py's _post + NOVA_DAEMON_URL lifted into a shared daemon-client helper; results follow the {ok:true,volume} / {ok:false,error} contract; EXPECTED_TOOLS in tests/test_harness_tools.py updated",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h9",
+      "kind": "honesty",
+      "text": "With a stubbed daemon client: raise from 95 clamps to 100 with a named result, lower from 15 clamps to 10, each call returns {ok:true, volume:N}; a daemon HTTP failure returns {ok:false, error}; EXPECTED_TOOLS updated",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c17",
+      "kind": "boundary",
+      "text": "No runtime-side (reachy-mini-cli) change for volume: the runtime has zero volume surface and the harness already speaks to the daemon over HTTP",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h19",
+      "kind": "honesty",
+      "text": "git diff of the volume PR touches only reachy_nova/ (no reachy-mini-cli change); the runtime's tests are untouched",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c19",
+      "kind": "requirement",
+      "text": "The quiet gate lives in one place \u2014 SonicSpeaker (speaking.py _enqueue/_play_one) \u2014 as a monotonic deadline behind the existing lock/epoch pattern; while armed, utterances are dropped at the playback boundary and hearing/transcription continue untouched",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h10",
+      "kind": "honesty",
+      "text": "With the deadline armed, a test enqueues an utterance and asserts poster is never called while hearing.feed keeps being invoked; after the deadline passes the next utterance plays",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c21",
+      "kind": "requirement",
+      "text": "Quiet deadline (and last volume level) persist across harness restarts as small JSON files under the state dir written with the atomic tmp+os.replace pattern (precedent: network_change_path); the deadline is shown in supervisor.status() and logged as one latched [SENSE stage=supervise ... event=quiet] until=<ts> line",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h11",
+      "kind": "honesty",
+      "text": "A restart of the harness with a future quiet deadline on disk comes up still silent and status() shows quiet_until; a persisted volume level is re-applied on start only if the daemon reports a different value",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c22",
+      "kind": "boundary",
+      "text": "The harness has no HTTP /api of its own \u2014 reachy_nova/api_routes.py belongs to the legacy main.py dashboard \u2014 so 'visible in /api status' (#19) means supervisor.status() JSON, not a new HTTP server",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h20",
+      "kind": "honesty",
+      "text": "No new HTTP server or FastAPI route is added under reachy_nova/harness/; quiet_until and volume appear in supervisor.status() JSON and in the journal",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c24",
+      "kind": "requirement",
+      "text": "The degraded-start path is exercised on the robot without a reboot: a chaos case 5 in tests/chaos/ON_ROBOT.md sets KIRO_CLI_BIN to a non-existent path, restarts reachy-nova-harness with FORGE_WRITER=kiro, asserts 'started degraded (initial spawn failed' and 'started name=kiro_session' with no 'start failed', then restores the binary and asserts 'recovered' with no manual restart",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h12",
+      "kind": "honesty",
+      "text": "tests/chaos/ON_ROBOT.md gains case 5 and its journal evidence (started degraded \u2192 recovered, no 'start failed', NRestarts unchanged) is recorded in the delivery record, upgrading h12 from low",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c25",
+      "kind": "boundary",
+      "text": "Radio-off + harness restart is NOT a reproduction (Kiro spawned offline in 14 s on 2026-08-26); the boot-ordering race itself (network-online.target reached before wlan0 associates) is only provable by a deliberate power-cycle with the AP unavailable",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h21",
+      "kind": "honesty",
+      "text": "The delivery record states the radio-off attempt as non-reproducing and cites the KIRO_CLI_BIN drill as the evidence for the degraded-start path, without claiming the boot-ordering race was reproduced",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c30",
+      "kind": "audience",
+      "text": "Ori as the person in the room with the robot (petting it, asking it to look, to speak up, to be quiet), the reachy_nova harness maintainers, and the reachy-mini-cli runtime that gains the gaze behaviors",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h22",
+      "kind": "honesty",
+      "text": "The exported spec names these three audiences and every requirement is traceable to at least one of them",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c31",
+      "kind": "after_state",
+      "text": "The robot can be asked to look at a sound or a face, to hold a face until told to let go, to speak louder or softer, and to keep quiet for a set time \u2014 and a pat gets one natural reaction, never a description of its own reflex arc; the cold-boot Kiro degraded start has been exercised on the robot by a repeatable drill",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h23",
+      "kind": "honesty",
+      "text": "Each clause of the after-state maps to a line in the success signal (c33) that was checked live and recorded in the delivery record",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c32",
+      "kind": "why_it_matters",
+      "text": "Live on 2026-08-26 the robot narrated its own reflexes twice per pat, volume was changed over SSH by hand, and there was no way to ask it to look somewhere or to be quiet \u2014 the companion feel breaks when the body's plumbing shows and the only controls are an operator's shell",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h24",
+      "kind": "honesty",
+      "text": "The delivery record links each of the three 2026-08-26 pain points (narrated reflexes, SSH volume, no gaze/quiet control) to the change that removed it",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c33",
+      "kind": "success_signal",
+      "text": "On the robot: a pat yields at most one short reaction with no sentence containing 'reflex', 'rule' or 'reacted on its own'; 'speak up'/'quieter' move the daemon volume one step with a brief acknowledgement; 'stay silent for 2 minutes' produces zero playbacks for 2 minutes despite pats and questions and resumes without announcement; 'look at me' / 'look at the sound' / 'keep looking at me' / 'you can look away' each produce the motion or a named refusal; chaos case 5 shows 'started degraded' then 'recovered' with no manual restart; uv run pytest green in both repos",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h25",
+      "kind": "honesty",
+      "text": "Every line of the success signal is executed on the robot and its journal evidence pasted into the delivery record; unit-only claims are labelled as such",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c34",
+      "kind": "requirement",
+      "text": "lock_face and release_face are exposed as harness tools (tools.py builders + EXPECTED_TOOLS + Sonic tool descriptions) returning the engine's typed result verbatim under the existing {ok:true}/{ok:false,error}/{ok:null,submitted} contract; look-toward-sound and look-toward-face ride the existing run_behavior tool",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h13",
+      "kind": "honesty",
+      "text": "test_harness_tools.py EXPECTED_TOOLS includes lock_face and release_face; a fake-engine test round-trips each with the typed result; release of an inactive lock returns ok:true with a named no-op reason",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c35",
+      "kind": "requirement",
+      "text": "stay_silent(minutes, bounded 1-180) and end_silence() are harness tools; entering acknowledges once briefly, asking again while silent extends the deadline (later wins) with a named result, ending early or on expiry is silent by default; nervous-system rules that would speak are rendered with the quiet marker while the deadline is armed",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h14",
+      "kind": "honesty",
+      "text": "A test asserts: first call acknowledges and arms; second call with a longer duration extends (later wins) and returns a named 'extended' result; end_silence clears; minutes outside 1-180 refuse without arming",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c36",
+      "kind": "requirement",
+      "text": "A face-lock cannot outlive its mind or its body: the runtime releases the lock (named event) when the harness's retained reachy/state/nova availability goes offline or after a configurable max hold; and because intents are in-memory (a runtime restart drops them), the harness treats an engine-heartbeat loss as 'lock released' with one named line rather than believing it is still locked",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h26",
+      "kind": "honesty",
+      "text": "Test: engine heartbeat lost while locked -> harness logs lock released reason=engine-restart and the next lock_face succeeds; runtime test: mind offline for the grace period -> lock released event emitted, inhibitions restored",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c37",
+      "kind": "requirement",
+      "text": "lock_face's inhibition snapshot is not stale-restored: a set_inhibition arriving while locked replaces the snapshot (later wins) and the lock re-adds its own inhibitions on top; release restores the latest snapshot, never the original one",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h27",
+      "kind": "honesty",
+      "text": "Test: lock (snapshot A) -> set_inhibition B while locked -> release -> inhibitions == B, not A; a second test with no intervening call restores A",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c38",
+      "kind": "requirement",
+      "text": "A quiet-mode drop is not a playback failure: dropped utterances never arm the echo gate, never purge the queue, and never fire on_playback_failure; each drop logs one latched [SENSE stage=speak event=quiet-drop] line (first drop and count on release, not one per utterance)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h28",
+      "kind": "honesty",
+      "text": "Test: with the deadline armed, three utterances enqueued -> poster not called, on_playback_failure not called, gate never armed, exactly one senselog drop line; on release one summary line with count=3",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c39",
+      "kind": "requirement",
+      "text": "The stay_silent acknowledgement is not eaten by its own gate: the deadline arms only after the acknowledgement utterance that follows the tool result has been played (or after a short grace if none arrives), so 'okay, quiet for ten minutes' is heard and the next utterance is the first one dropped",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h29",
+      "kind": "honesty",
+      "text": "Test: tool result returned -> next utterance plays and arms the gate -> the utterance after it is dropped; a tool result followed by no utterance within the grace still arms",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c40",
+      "kind": "requirement",
+      "text": "Sense-class dedupe (c6) is driven by an explicit 'sense: pat|face|sound|vision|...' field on rules.yaml entries (alongside voice); entries without it dedupe by their exact key, and Kiro-authored rules that fall to generic rule/fire dedupe by rule name \u2014 the class is never inferred from free-form rule names",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h30",
+      "kind": "honesty",
+      "text": "Test: rule/fire:pat-acknowledge and rule/fire:nova-pat-cheer both carry sense: pat and collapse; two generic rule/fire events with different rule names within the window both inject",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c41",
+      "kind": "boundary",
+      "text": "Version skew across the two repos is a named refusal, not a crash: a harness sending lock_face/release_face to an older runtime receives the engine's {ok:false, error:\"unknown kind 'lock_face'\"} and Sonic says the body did not respond; the delivery record states the required deploy order (runtime first, then harness)",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h31",
+      "kind": "honesty",
+      "text": "Test: KindRegistry without lock_face returns the unknown-kind refusal for a spooled lock_face command (control.py:321); harness tool test asserts the refusal is passed through verbatim",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "c43",
+      "kind": "requirement",
+      "text": "Every new state is visible and recoverable without SSH: volume changes log one [SENSE stage=act ...] line with old/new levels; the quiet deadline and lock state appear in supervisor.status() (lock read from the runtime's state.json intents view); end_silence and release_face are always accepted even when the harness believes nothing is armed/locked (named no-op), so a confused state is always escapable by voice",
+      "deferred": false,
+      "deferred_reason": ""
+    },
+    {
+      "id": "h32",
+      "kind": "honesty",
+      "text": "Test: status() shows quiet_until and lock fields; end_silence with no deadline returns {ok:true, note:'not silent'}; release_face with no lock returns the runtime's named no-op verbatim",
+      "deferred": false,
+      "deferred_reason": ""
+    }
+  ],
+  "tasks": [
+    {
+      "id": "t1",
+      "summary": "runtime: DoaPoller exposes last-good age; new one-shot 'look-at-sound' LibraryEntry (reachy/behavior/gaze.py + library.py + sense.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "DoaPoller.age_s() returns seconds since the last good DoA reading (None when never); a test drives the clock and asserts it",
+        "run_behavior look-at-sound with no reading or age_s > 8.0 returns {ok:false, error:'no recent sound direction'} and admits no behavior; with a fresh reading it admits a one-shot that aims yaw via orient's doa_angle_to_yaw within max_yaw, default_duration 2.0, StopClass chosen and documented in the entry docstring",
+        "behavior name 'look-at-sound' does not collide with the react rule id 'look-toward-sound' (default_rules.toml:149); tests in tests/test_behavior_gaze.py; uv run pytest -n auto green"
+      ],
+      "deps": [
+        "t2"
+      ],
+      "covers": [
+        "c10",
+        "h6"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t2",
+      "summary": "runtime: face position + selection reach Sense \u2014 capture bbox_norm before the store match, keep last-seen age, choose biggest face with near-tie preference for a recognised one (reachy/behavior/face_sense.py + reachy/vision/face.py + sense.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "Sense gains face_bbox (x,y,w,h normalised) and face_age_s; an unmatched detection still yields a bbox (name stays None) \u2014 test: single unknown face -> bbox present, name None",
+        "Selection test: larger unknown vs smaller known -> larger chosen; two within 15% area of each other, one known -> known chosen",
+        "No change under reachy/vision/face_store.py; existing face_sense tests green; uv run pytest -n auto green"
+      ],
+      "deps": [],
+      "covers": [
+        "c11",
+        "h7",
+        "c12",
+        "h17"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t3",
+      "summary": "runtime: one-shot 'look-at-face' LibraryEntry aiming at Sense.face_bbox (reachy/behavior/gaze.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "run_behavior look-at-face with no face_bbox (or face_age_s > threshold) returns {ok:false, error:'no face known'}; with a bbox it admits a one-shot that maps bbox centre to yaw/pitch within the same clamps as look-at-sound",
+        "tests/test_behavior_gaze.py covers refusal + aim; uv run pytest -n auto green"
+      ],
+      "deps": [
+        "t1",
+        "t2"
+      ],
+      "covers": [
+        "h7"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t4",
+      "summary": "runtime: lock_face / release_face intent kinds + looping 'face-lock' behavior with its own yaw/pitch clamp (reachy/behavior/face_lock.py, registered at composition like goto in cli/_commands/behavior.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "lock_face with no face -> {ok:false, error:'no face known'}; with a face -> {ok:true, op:'lock_face', locked:true} and the behavior follows face_bbox every tick, inhibiting feel-alive and orient-to-sound",
+        "Inhibition snapshot is later-wins: lock (set A) -> set_inhibition B -> release -> inhibitions == B; with no intervening call release restores A",
+        "release_face when not locked -> {ok:true, op:'release_face', released:false, note:'not locked'}; when locked -> released:true, previous inhibitions restored, one event",
+        "Clamp test: bbox at frame edge for 500 ticks -> commanded yaw/pitch never exceed the entry's clamp; tests/test_behavior_face_lock.py; uv run pytest -n auto green"
+      ],
+      "deps": [
+        "t2"
+      ],
+      "covers": [
+        "c37",
+        "h27",
+        "c15",
+        "h18",
+        "c34"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t5",
+      "summary": "runtime: lock lifecycle events + lock cannot outlive the mind \u2014 'face-lost' (after N s, lock persists), 'lock-released' registered in reachy/export/runtime.py raw-action tables; release on mind-offline (reachy/state/nova retained offline for a grace period) or max hold",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "Events reach both the stdout feed and MQTT as reachy/events/intent/face-lost and intent/lock-released (test_export_runtime + test_export_events extended); an unregistered action still drops with REASON_UNKNOWN_EVENT",
+        "Test: locked, face absent for N s -> one face-lost event, still locked; mind offline for the grace period -> lock-released reason=mind-offline and inhibitions restored; max-hold elapsed -> lock-released reason=max-hold"
+      ],
+      "deps": [
+        "t4"
+      ],
+      "covers": [
+        "c14",
+        "h8",
+        "c36",
+        "h26"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t6",
+      "summary": "harness: rules.yaml gains voice (silent|brief|free, default free) and sense fields; quiet templates for rule/fire, rule/fire:pat-acknowledge, rule/fire:nova-face-noticed, pat/*; bus renders the voice marker (config/nervous-system/rules.yaml + reachy_nova/harness/bus.py route_event + tests/test_rules_coverage.py + tests/test_harness_bus.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "Rendering test over every entry named above: inject text contains none of 'reflex', 'rule', 'reacted on its own', 'leaning', 'antenna'",
+        "Generic rule/fire is voice: silent and still produces an inject carrying the marker '(quiet: do not speak about this)'; brief renders '(react briefly if at all)'; free renders no marker; absent voice == free",
+        "test_rules_coverage accepts the new keys and asserts rule/fire is silent; pre-change text is recorded in the test docstring as the before-state (journal 2026-08-26)"
+      ],
+      "deps": [],
+      "covers": [
+        "c2",
+        "h15",
+        "c3",
+        "h2",
+        "c4",
+        "h3",
+        "c40",
+        "h30"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t7",
+      "summary": "harness: sense-class dedupe in NovaBus between route_event and _on_inject (reachy_nova/harness/bus.py + tests/test_harness_bus.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "rule/fire:pat-acknowledge then rule/fire:nova-pat-cheer (both sense: pat) within the window -> exactly one inject; after the window a fresh inject",
+        "Two generic rule/fire events with different rule names and no sense field within the window -> both inject (dedupe by exact key/rule name); each suppressed duplicate logs one [SENSE stage=inject event=dedupe] line"
+      ],
+      "deps": [
+        "t6"
+      ],
+      "covers": [
+        "c6",
+        "h4"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t8",
+      "summary": "harness: recent-sense ring buffer + recall_senses tool (reachy_nova/harness/sense_history.py, wired at NovaBus._on_inject; tool builder in tools.py; EXPECTED_TOOLS)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "Three routed senses then recall -> the three in order with monotonic timestamps and source/type; buffer is bounded (default 20)",
+        "recall_senses tool returns {ok:true, senses:[...]} and appears in EXPECTED_TOOLS; system prompt tells Nova to use it when asked why it moved/felt something"
+      ],
+      "deps": [
+        "t7"
+      ],
+      "covers": [
+        "c7",
+        "h5"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t9",
+      "summary": "harness: system-prompt line (react naturally to body cues, never describe your own mechanism unless asked) + lock_face/release_face tools + gaze tool descriptions for look-at-sound/look-at-face (reachy_nova/harness/app.py HARNESS_SYSTEM_PROMPT + tools.py builders/_BUILDERS/TOOL_SPECS + tests/test_harness_tools.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "EXPECTED_TOOLS includes lock_face and release_face; fake-engine round-trip returns the typed result verbatim; release of an inactive lock passes the runtime's named no-op through unchanged",
+        "An engine that lacks the kind returns {ok:false, error:\"unknown kind 'lock_face'\"} passed through verbatim (skew test)",
+        "tests/test_harness_boundary.py green (no reachy_mini import, no set_target); HARNESS_SYSTEM_PROMPT no longer says 'mention what you did in a few words' for body cues"
+      ],
+      "deps": [
+        "t8",
+        "t10"
+      ],
+      "covers": [
+        "c34",
+        "h13",
+        "c8",
+        "h16",
+        "c41",
+        "h31"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t10",
+      "summary": "harness: shared daemon HTTP client + raise_voice/lower_voice/set_voice_level tools + persisted volume (reachy_nova/harness/daemon_client.py new; speaking.py uses it; tools.py builders; statedir.py nova-volume.json; tests/test_harness_daemon_client.py + test_harness_tools.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "Stubbed client: raise from 95 -> 100 with {ok:true, volume:100, note:'at maximum'}; lower from 15 -> 10 with note 'at minimum'; step default 10; absolute form clamps to [10,100]; HTTP failure -> {ok:false, error}",
+        "Each change logs one [SENSE stage=act source=nova event=volume] old=N new=M line; last level persisted atomically to <state>/nova-volume.json and re-applied at start only if the daemon reports a different value (test with stub)",
+        "No file under reachy-mini-cli changes; NOVA_VOCALIZE_GAIN untouched"
+      ],
+      "deps": [],
+      "covers": [
+        "c16",
+        "h9",
+        "c17",
+        "h19"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t11",
+      "summary": "harness: timed quiet \u2014 QuietState (deadline, later-wins extension, persistence to <state>/nova-quiet.json) + SonicSpeaker gate at _play_one with drop-not-failure semantics and post-acknowledgement arming + supervisor.status() quiet_until (reachy_nova/harness/quiet.py new; speaking.py; supervisor.py; tests/test_harness_quiet.py + test_harness_speaking.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "Deadline armed: three utterances enqueued -> poster never called, on_playback_failure never called, echo gate never armed, exactly one [SENSE stage=speak event=quiet-drop] line; on release one summary line with count=3; after expiry the next utterance plays; hearing.feed keeps being invoked throughout",
+        "Arming order: the first utterance after arm() is played then the gate closes; if no utterance arrives within the grace (2 s) the gate closes anyway",
+        "Restart with a future deadline on disk comes up silent; status() shows quiet_until; an expired file is ignored and removed; extension later-wins returns 'extended'"
+      ],
+      "deps": [
+        "t10"
+      ],
+      "covers": [
+        "c19",
+        "h10",
+        "c21",
+        "h11",
+        "c38",
+        "h28",
+        "c39",
+        "h29",
+        "c22",
+        "h20"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t12",
+      "summary": "harness: stay_silent / end_silence tools (bounded 1-180 min) that also inhibit the runtime 'speak' behavior for the window and mark injects with the quiet marker (tools.py builders + bus.py marker + tests/test_harness_tools.py)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "First call -> {ok:true, until:<ts>, note:'armed'} and one brief acknowledgement is allowed; second call with a longer duration -> 'extended'; end_silence with nothing armed -> {ok:true, note:'not silent'}; minutes outside 1-180 refuse without arming",
+        "Entering quiet spools set_inhibition including 'speak' (merged with the current set), leaving restores it; verified against the fake engine; a runtime whose say path does not go through 'speak' is recorded as a plan risk outcome in the task notes",
+        "While armed, every rendered inject carries '(quiet mode: do not speak)' regardless of the rule's voice level"
+      ],
+      "deps": [
+        "t11",
+        "t8",
+        "t9"
+      ],
+      "covers": [
+        "c35",
+        "h14",
+        "c43",
+        "h32"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t13",
+      "summary": "harness: lock awareness + new-event rules \u2014 heartbeat loss while locked logs 'lock released reason=engine-restart'; status() shows lock state read from state.json intents view; rules.yaml entries for intent/face-lost and intent/lock-released rendered as quiet context (reachy_nova/harness/app.py or supervisor.py; config/nervous-system/rules.yaml; tests)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "Test: engine heartbeat lost while the harness believes it is locked -> one named line and the next lock_face is not blocked by stale local state",
+        "test_rules_coverage green with the two new entries; their templates contain no mechanism words"
+      ],
+      "deps": [
+        "t12"
+      ],
+      "covers": [
+        "c36",
+        "h26",
+        "c14",
+        "h8",
+        "c43",
+        "h32"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t14",
+      "summary": "cold-boot h12: chaos case 5 in tests/chaos/ON_ROBOT.md \u2014 KIRO_CLI_BIN=/nonexistent, restart reachy-nova-harness with FORGE_WRITER=kiro, assert 'started degraded (initial spawn failed' + 'started name=kiro_session' and no 'start failed'; restore and assert 'recovered' with NRestarts unchanged; run it on the robot and paste the journal evidence",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "ON_ROBOT.md has case 5 with exact commands and expected lines; the delivery record cites the journal lines and states that the radio-off attempt was non-reproducing and the boot-ordering race remains unproven"
+      ],
+      "deps": [],
+      "covers": [
+        "c24",
+        "h12",
+        "c25",
+        "h21"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t15",
+      "summary": "docs + version: docs/architecture.md \u00a75.5 tool list and \u00a74 seams (lock intents, quiet, volume), new docs/components/gaze.md and quiet-mode.md, rules.yaml header for voice/sense, deploy order (runtime first) noted; bump pyproject version (PyPI publish on main requires it)",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "architecture.md tool vocabulary lists lock_face, release_face, raise_voice, lower_voice, set_voice_level, stay_silent, end_silence, recall_senses; markdownlint-cli2 clean on touched docs",
+        "pyproject.toml version bumped from 0.2.0; uv run pytest green"
+      ],
+      "deps": [
+        "t13"
+      ],
+      "covers": [
+        "c30",
+        "h22",
+        "c32",
+        "h24"
+      ],
+      "instruction": ""
+    },
+    {
+      "id": "t16",
+      "summary": "live acceptance on the robot + delivery record: deploy runtime then harness; run every success-signal line (pat -> one reaction, no mechanism words; speak up/quieter; stay silent 2 min zero playbacks incl. engine say; look at me / look at the sound / keep looking at me / you can look away; recall 'why did you move?'); write docs/deliveries/2026-08-26-gaze-voice-quiet.md linking each 2026-08-26 pain point to its fix, with unit-only claims labelled",
+      "origin": "llm",
+      "status": "confirmed",
+      "acceptance_criteria": [
+        "Each success-signal line has journal evidence pasted in the delivery record; any line not run live is labelled unit-only with the reason",
+        "The delivery record links narrated reflexes, SSH volume, and no gaze/quiet control to the tasks that removed them and states the deploy order"
+      ],
+      "deps": [
+        "t5",
+        "t14",
+        "t15"
+      ],
+      "covers": [
+        "c1",
+        "h1",
+        "c31",
+        "h23",
+        "c33",
+        "h25"
+      ],
+      "instruction": ""
+    }
+  ],
+  "risks": [
+    {
+      "id": "r1",
+      "text": "Whether runtime rule 'say' speech routes through the 'speak' library behavior (so set_inhibition ['speak'] mutes it) \u2014 if not, quiet needs a runtime-side mute intent (new task in the runtime)",
+      "kind": "unknown_nonblocking",
+      "task_id": "t12",
+      "resolved": false,
+      "resolution": ""
+    },
+    {
+      "id": "r2",
+      "text": "StopClass arbitration for the one-shot gaze behaviors against an active orient-to-sound/feel-alive holding the head channel \u2014 chosen when the LibraryEntry is written; wrong choice shows as the one-shot never winning the head",
+      "kind": "unknown_nonblocking",
+      "task_id": "t1",
+      "resolved": false,
+      "resolution": ""
+    },
+    {
+      "id": "r3",
+      "text": "bbox freshness from the throttled FaceSenseDriver (500 ms, one-tick latch) may make face-lock step rather than track; measure live, tune cadence if needed",
+      "kind": "unknown_nonblocking",
+      "task_id": "t4",
+      "resolved": false,
+      "resolution": ""
+    },
+    {
+      "id": "r4",
+      "text": "Robot unreachable from spark at challenge time; live tasks (t14, t16) need LAN or tailnet reachability re-verified first",
+      "kind": "unknown_nonblocking",
+      "task_id": "t16",
+      "resolved": false,
+      "resolution": ""
+    },
+    {
+      "id": "r5",
+      "text": "Daemon test sound on POST /api/volume/set is unsuppressible; a query flag belongs in reachy_mini",
+      "kind": "follow_up",
+      "task_id": "t10",
+      "resolved": false,
+      "resolution": ""
+    },
+    {
+      "id": "r6",
+      "text": "Two repos, two PRs: runtime must merge and deploy before the harness or lock_face refuses with unknown-kind (typed, survivable) \u2014 merge order is an operator constraint",
+      "kind": "unknown_nonblocking",
+      "task_id": "t16",
+      "resolved": false,
+      "resolution": ""
+    }
+  ]
+}
