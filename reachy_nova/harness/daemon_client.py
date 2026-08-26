@@ -46,6 +46,8 @@ _STOP_PATH = "/api/media/stop_sound"
 
 _HTTP_TIMEOUT_S = 10.0
 
+JSON_CONTENT_TYPE = "application/json"
+
 STAGE = "act"
 SOURCE = "nova"
 
@@ -57,7 +59,7 @@ SOURCE = "nova"
 
 def _default_get(url: str, timeout: float) -> dict:
     req = urllib.request.Request(
-        url, method="GET", headers={"Accept": "application/json"}
+        url, method="GET", headers={"Accept": JSON_CONTENT_TYPE}
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
         return json.loads(resp.read())
@@ -68,7 +70,7 @@ def _default_post(url: str, data: bytes, content_type: str, timeout: float) -> d
         url,
         data=data,
         method="POST",
-        headers={"Content-Type": content_type, "Accept": "application/json"},
+        headers={"Content-Type": content_type, "Accept": JSON_CONTENT_TYPE},
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
         return json.loads(resp.read())
@@ -127,7 +129,7 @@ class DaemonClient:
         """
         body = json.dumps({"volume": int(volume)}).encode("utf-8")
         resp = self._post(
-            f"{self.base_url}{_VOLUME_SET_PATH}", body, "application/json", self.timeout
+            f"{self.base_url}{_VOLUME_SET_PATH}", body, JSON_CONTENT_TYPE, self.timeout
         )
         return int(resp.get("volume", volume))
 
@@ -141,10 +143,10 @@ class DaemonClient:
 
     def play_sound(self, path: str) -> None:
         body = json.dumps({"file": path}).encode("utf-8")
-        self._post(f"{self.base_url}{_PLAY_PATH}", body, "application/json", self.timeout)
+        self._post(f"{self.base_url}{_PLAY_PATH}", body, JSON_CONTENT_TYPE, self.timeout)
 
     def stop_sound(self) -> None:
-        self._post(f"{self.base_url}{_STOP_PATH}", b"{}", "application/json", self.timeout)
+        self._post(f"{self.base_url}{_STOP_PATH}", b"{}", JSON_CONTENT_TYPE, self.timeout)
 
 
 # --------------------------------------------------------------------------- #

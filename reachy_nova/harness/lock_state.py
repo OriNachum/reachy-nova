@@ -58,16 +58,20 @@ class LockState:
         with self._lock:
             self._locked = True
 
-    def mark_released(self, reason: str | None = None) -> None:  # noqa: ARG002 - logged by caller
+    def mark_released(self, reason: str | None = None) -> None:
         """Record a confirmed release — a ``release_face`` the engine confirmed,
         or a ``motion/lock-released`` event the runtime published on its own.
-        *reason* is accepted (and ignored) here so both call sites can pass the
-        same shape; any reason-specific narration already happened via the
-        bus's own ``inject_template`` (see rules.yaml's ``motion/lock-released``
-        entry) before this belief update ever runs.
+        *reason* (``requested``/``mind-offline``/``max-hold`` from the two call
+        sites, or ``None`` when a caller has none to give) is folded into the
+        one-line drop this logs — any reason-specific NARRATION already
+        happened via the bus's own ``inject_template`` (see rules.yaml's
+        ``motion/lock-released`` entry) before this belief update ever runs,
+        but this log line is the belief-tracking side, same as
+        :meth:`on_engine_dropped`'s.
         """
         with self._lock:
             self._locked = False
+        sensory_log.stage(_STAGE, _SOURCE, _EVENT, f"released reason={reason}")
 
     # -- the bus hook --------------------------------------------------------
 

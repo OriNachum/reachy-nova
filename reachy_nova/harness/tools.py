@@ -711,6 +711,46 @@ def _number(value: object, label: str) -> float:
     return float(value)
 
 
+def _voice_target(tool_name: str, params: Mapping, current: int) -> tuple[int, str | None]:
+    """Pure: the clamped target level for *tool_name* given *current*, plus a
+    "at maximum"/"at minimum" note when the raw (unclamped) target overshot.
+
+    No I/O and no lock — :meth:`IntentTools._voice_apply` holds the lock
+    around the read/compute/set/persist run this feeds into.
+    """
+    if tool_name == SET_VOICE_LEVEL:
+        target = _number(params.get("volume"), "'volume'")
+    else:
+        raw_step = params.get("step")
+        step = DEFAULT_VOICE_STEP if raw_step is None else _number(raw_step, "'step'")
+        target = current + step if tool_name == RAISE_VOICE else current - step
+
+    clamped = int(round(max(MIN_VOICE_LEVEL, min(MAX_VOICE_LEVEL, target))))
+    note = None
+    if target > MAX_VOICE_LEVEL:
+        note = "at maximum"
+    elif target < MIN_VOICE_LEVEL:
+        note = "at minimum"
+    return clamped, note
+
+
+def _persist_or_note(applied: int, note: str | None) -> dict:
+    """Persist *applied*; build the result payload, folding a persistence
+    failure into ``note``/``persisted`` exactly as :meth:`IntentTools._voice_apply`
+    used to inline.
+    """
+    persisted = _persist_volume(applied)
+    payload: dict = {"ok": True, "volume": applied}
+    if not persisted:
+        # ok stays True — the daemon really did apply it — but the payload
+        # must not imply it will still be there after a restart.
+        payload["persisted"] = False
+        note = VOLUME_NOT_PERSISTED_NOTE if not note else f"{note}; {VOLUME_NOT_PERSISTED_NOTE}"
+    if note:
+        payload["note"] = note
+    return payload
+
+
 def _params(raw: object) -> dict[str, float]:
     if raw is None:
         return {}
@@ -1206,21 +1246,7 @@ class IntentTools:
             except Exception as err:  # noqa: BLE001 - any client failure is a refusal
                 raise ToolRefused(f"could not read current volume: {err}") from err
 
-            if tool_name == SET_VOICE_LEVEL:
-                target = _number(params.get("volume"), "'volume'")
-            else:
-                raw_step = params.get("step")
-                step = (
-                    DEFAULT_VOICE_STEP if raw_step is None else _number(raw_step, "'step'")
-                )
-                target = current + step if tool_name == RAISE_VOICE else current - step
-
-            clamped = int(round(max(MIN_VOICE_LEVEL, min(MAX_VOICE_LEVEL, target))))
-            note = None
-            if target > MAX_VOICE_LEVEL:
-                note = "at maximum"
-            elif target < MIN_VOICE_LEVEL:
-                note = "at minimum"
+            clamped, note = _voice_target(tool_name, params, current)
 
             if clamped == current:
                 applied = current
@@ -1230,20 +1256,8 @@ class IntentTools:
                 except Exception as err:  # noqa: BLE001 - any client failure is a refusal
                     raise ToolRefused(f"could not set volume: {err}") from err
 
-            persisted = _persist_volume(applied)
+            payload = _persist_or_note(applied, note)
 
-        payload: dict = {"ok": True, "volume": applied}
-        if not persisted:
-            # ok stays True — the daemon really did apply it — but the payload
-            # must not imply it will still be there after a restart.
-            payload["persisted"] = False
-            note = (
-                VOLUME_NOT_PERSISTED_NOTE
-                if not note
-                else f"{note}; {VOLUME_NOT_PERSISTED_NOTE}"
-            )
-        if note:
-            payload["note"] = note
         return payload, current, applied
 
     # -- recall_senses (task t8) -------------------------------------------
@@ -1318,7 +1332,7 @@ class IntentTools:
             "body_muted": body_muted,
         }
 
-    def _end_silence(self, params: Mapping) -> dict:  # noqa: ARG002 - no arguments
+    def _end_silence(self, _params: Mapping) -> dict:
         """``end_silence`` — always accepted; a quiet that was not on is not an error."""
         if self._quiet is None:
             raise ToolRefused(QUIET_NOT_WIRED_REASON)
