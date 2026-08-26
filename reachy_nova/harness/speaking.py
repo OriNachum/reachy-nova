@@ -39,29 +39,26 @@ stdlib + numpy only; never imports ``reachy_mini``
 from __future__ import annotations
 
 import io
-import json
 import os
 import queue
 import threading
-import urllib.request
 import wave
 from collections.abc import Callable
 
 import numpy as np
 
 from reachy_nova import sensory_log
+from reachy_nova.harness.daemon_client import (
+    BASE_URL_ENV,
+    DEFAULT_BASE_URL,
+    DaemonClient,
+)
 from reachy_nova.harness.gate import EchoGate
 
 STAGE_SPEAK = "speak"
 SOURCE = "nova"
 
-DEFAULT_BASE_URL = "http://localhost:8000"
-BASE_URL_ENV = "NOVA_DAEMON_URL"
-_UPLOAD_PATH = "/api/media/sounds/upload"
-_PLAY_PATH = "/api/media/play_sound"
-_STOP_PATH = "/api/media/stop_sound"
 _UPLOAD_FILENAME = "tts_synth.wav"
-_HTTP_TIMEOUT_S = 10.0
 
 #: Poll interval while the worker waits for the gate window / queue items.
 _POLL_S = 0.02
@@ -87,43 +84,17 @@ def _make_wav_bytes(samples: np.ndarray, sample_rate: int) -> bytes:
     return buf.getvalue()
 
 
-def _multipart_encode(filename: str, wav_bytes: bytes) -> tuple[bytes, str]:
-    """Encode a single-file multipart/form-data body; return (body, content-type)."""
-    boundary = "----ReachyNovaSpeakBoundary"
-    ctype = f"multipart/form-data; boundary={boundary}"
-    head = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
-        f"Content-Type: audio/wav\r\n"
-        f"\r\n"
-    ).encode("utf-8")
-    tail = f"\r\n--{boundary}--\r\n".encode("utf-8")
-    return head + wav_bytes + tail, ctype
-
-
-def _post(url: str, data: bytes, content_type: str, timeout: float) -> dict:
-    req = urllib.request.Request(
-        url,
-        data=data,
-        method="POST",
-        headers={"Content-Type": content_type, "Accept": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
-        return json.loads(resp.read())
-
-
 def default_poster(base_url: str, wav_bytes: bytes, filename: str) -> None:
     """Upload *wav_bytes* to the daemon and trigger playback (two POSTs).
 
-    Raises on any HTTP/network failure — the worker's mouth-loss grace path
-    catches everything.
+    Delegates to the shared :class:`~reachy_nova.harness.daemon_client.DaemonClient`
+    (task t10) — same two calls (upload, then play) this module used to make
+    directly. Raises on any HTTP/network failure — the worker's mouth-loss
+    grace path catches everything.
     """
-    base = base_url.rstrip("/")
-    body, ctype = _multipart_encode(filename, wav_bytes)
-    upload_resp = _post(f"{base}{_UPLOAD_PATH}", body, ctype, _HTTP_TIMEOUT_S)
-    saved_path = upload_resp.get("path", filename)
-    play_body = json.dumps({"file": saved_path}).encode("utf-8")
-    _post(f"{base}{_PLAY_PATH}", play_body, "application/json", _HTTP_TIMEOUT_S)
+    client = DaemonClient(base_url=base_url)
+    saved_path = client.upload_sound(wav_bytes, filename)
+    client.play_sound(saved_path)
 
 
 def default_stopper(base_url: str) -> None:
@@ -133,8 +104,7 @@ def default_stopper(base_url: str) -> None:
     its openapi 2026-08-12). Raises on HTTP/network failure — ``preempt()``
     treats a failed stop as best-effort and keeps going.
     """
-    base = base_url.rstrip("/")
-    _post(f"{base}{_STOP_PATH}", b"{}", "application/json", _HTTP_TIMEOUT_S)
+    DaemonClient(base_url=base_url).stop_sound()
 
 
 # --------------------------------------------------------------------------- #

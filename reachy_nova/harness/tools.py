@@ -78,6 +78,9 @@ ENROLL_FACE = "enroll_face"
 FORGE = "forge"
 USE_SKILL = "use_skill"
 AUTHOR_RULE = "author_rule"
+RAISE_VOICE = "raise_voice"
+LOWER_VOICE = "lower_voice"
+SET_VOICE_LEVEL = "set_voice_level"
 
 #: The harness's ENTIRE action set, in publication order. Each addition past
 #: the original six is a deliberate widening of the blast radius, never an
@@ -98,6 +101,9 @@ ACTION_SET: tuple[str, ...] = (
     FORGE,
     USE_SKILL,
     AUTHOR_RULE,
+    RAISE_VOICE,
+    LOWER_VOICE,
+    SET_VOICE_LEVEL,
 )
 
 #: Seconds a tool call waits for the engine to confirm before degrading.
@@ -174,6 +180,18 @@ ENROLL_NAME_TOO_LONG_REASON = (
 #: reaches a durable on-disk identity store, so the one thing worth checking
 #: locally is that it is text a person could actually be called.
 ENROLL_NAME_UNPRINTABLE_REASON = "'name' must contain only printable characters"
+
+#: Voice-level bounds — clamp, never refuse: a model asking to go louder/
+#: quieter than the daemon supports should still get a usable ``ok: true``
+#: at the nearest edge, with a note explaining why it stopped there.
+MIN_VOICE_LEVEL = 10
+MAX_VOICE_LEVEL = 100
+DEFAULT_VOICE_STEP = 10
+
+#: Refusal when ``raise_voice``/``lower_voice``/``set_voice_level`` are called
+#: without a wired :class:`~reachy_nova.harness.daemon_client.DaemonClient`
+#: (mirrors ``FORGE_NOT_WIRED_REASON``'s component-absent shape).
+VOICE_NOT_WIRED_REASON = "voice level control is not wired up yet"
 
 
 class ToolRefused(ValueError):
@@ -475,6 +493,53 @@ TOOL_SPECS: list[dict] = [
             "required": ["goal"],
         },
     ),
+    _spec(
+        RAISE_VOICE,
+        "Speak a bit louder. Confirm briefly and naturally afterward — "
+        "do not read out the volume number.",
+        {
+            "type": "object",
+            "properties": {
+                "step": {
+                    "type": "number",
+                    "description": f"How much louder, {MIN_VOICE_LEVEL}-{MAX_VOICE_LEVEL} "
+                    f"scale. Omit for the default step ({DEFAULT_VOICE_STEP}).",
+                },
+            },
+            "required": [],
+        },
+    ),
+    _spec(
+        LOWER_VOICE,
+        "Speak a bit quieter. Confirm briefly and naturally afterward — "
+        "do not read out the volume number.",
+        {
+            "type": "object",
+            "properties": {
+                "step": {
+                    "type": "number",
+                    "description": f"How much quieter, {MIN_VOICE_LEVEL}-{MAX_VOICE_LEVEL} "
+                    f"scale. Omit for the default step ({DEFAULT_VOICE_STEP}).",
+                },
+            },
+            "required": [],
+        },
+    ),
+    _spec(
+        SET_VOICE_LEVEL,
+        "Set your speaking volume to an exact level. Confirm briefly and "
+        "naturally afterward — do not read out the volume number.",
+        {
+            "type": "object",
+            "properties": {
+                "volume": {
+                    "type": "number",
+                    "description": f"Target volume, {MIN_VOICE_LEVEL}-{MAX_VOICE_LEVEL}.",
+                },
+            },
+            "required": ["volume"],
+        },
+    ),
 ]
 
 
@@ -651,6 +716,10 @@ _BUILDERS = {
     ENROLL_FACE: _build_enroll_face,
 }
 
+#: Dispatched locally against the daemon client, never through the intents
+#: spool — there is no behavior engine on the other end of a volume change.
+VOICE_TOOLS: frozenset[str] = frozenset({RAISE_VOICE, LOWER_VOICE, SET_VOICE_LEVEL})
+
 
 # --------------------------------------------------------------------------- #
 # The registry                                                                #
@@ -675,11 +744,16 @@ class IntentTools:
         browser: object | None = None,
         on_browse_progress: Callable[[str], None] | None = None,
         forge_leg: object | None = None,
+        daemon_client: object | None = None,
     ) -> None:
         # ``forge``/``use_skill`` (deviation d1) drive a ForgeLeg handle the
         # same way ``browse`` drives a NovaBrowser: injected, and refused with
         # a named reason when absent rather than half-working.
         self._forge_leg = forge_leg
+        # ``raise_voice``/``lower_voice``/``set_voice_level`` (task t10) drive
+        # a DaemonClient handle directly — not spool-backed, refused with a
+        # named reason when absent, same shape as the browser/forge legs.
+        self._daemon_client = daemon_client
         self._commands_dir = Path(commands_dir) if commands_dir is not None else None
         self._results_dir = Path(results_dir) if results_dir is not None else None
         self.await_timeout = float(await_timeout)
@@ -764,7 +838,11 @@ class IntentTools:
             payload = {"ok": False, "error": str(err)}
         except Exception as err:  # pragma: no cover - defensive: never crash the voice loop
             payload = {"ok": False, "error": f"{type(err).__name__}: {err}"}
-        _log_outcome(tool_name, payload)
+        # Voice tools log their own single ``event=volume`` senselog line
+        # (old=N new=M) inside ``_voice_tool`` — the generic per-tool-name
+        # line here would be a second line for the same call.
+        if tool_name not in VOICE_TOOLS:
+            _log_outcome(tool_name, payload)
         return json.dumps(payload)
 
     def _dispatch(self, tool_name: str, params: dict) -> dict:
@@ -780,6 +858,8 @@ class IntentTools:
             return self._browse(params)
         if tool_name in (FORGE, USE_SKILL, AUTHOR_RULE):
             return self._forge_tool(tool_name, params)
+        if tool_name in VOICE_TOOLS:
+            return self._voice_tool(tool_name, params)
         return self.submit_and_await(_BUILDERS[tool_name](params))
 
     def _forge_tool(self, tool_name: str, params: Mapping) -> dict:
@@ -855,6 +935,66 @@ class IntentTools:
             raise ToolRefused(BROWSE_NOT_WIRED_REASON)
         self._browser.queue_task(instruction, url)
         return {"ok": True, "queued": True, "instruction": instruction, "url": url}
+
+    # -- voice level (task t10) --------------------------------------------
+
+    def _voice_tool(self, tool_name: str, params: Mapping) -> dict:
+        """``raise_voice``/``lower_voice``/``set_voice_level`` — one senselog line.
+
+        Unlike the spool-backed tools, this logs itself (event ``volume``,
+        ``old=N new=M``) rather than going through the generic per-tool-name
+        line in :func:`_log_outcome` — ``execute`` skips that call for
+        members of :data:`VOICE_TOOLS` so exactly one line is ever emitted,
+        success or failure.
+        """
+        old: int | None = None
+        new: int | None = None
+        try:
+            payload, old, new = self._voice_apply(tool_name, params)
+        except ToolRefused as err:
+            payload = {"ok": False, "error": str(err)}
+        if payload.get("ok") is True:
+            detail = f"old={old} new={new}"
+        else:
+            detail = f"refused reason={payload.get('error')}"
+        sensory_log.stage(SENSE_STAGE, SENSE_SOURCE, "volume", detail)
+        return payload
+
+    def _voice_apply(self, tool_name: str, params: Mapping) -> tuple[dict, int, int]:
+        """Compute + apply the new level; raises :class:`ToolRefused` on any failure."""
+        if self._daemon_client is None:
+            raise ToolRefused(VOICE_NOT_WIRED_REASON)
+        try:
+            current = int(self._daemon_client.get_volume())
+        except Exception as err:  # noqa: BLE001 - any client failure is a refusal
+            raise ToolRefused(f"could not read current volume: {err}") from err
+
+        if tool_name == SET_VOICE_LEVEL:
+            target = _number(params.get("volume"), "'volume'")
+        else:
+            raw_step = params.get("step")
+            step = DEFAULT_VOICE_STEP if raw_step is None else _number(raw_step, "'step'")
+            target = current + step if tool_name == RAISE_VOICE else current - step
+
+        clamped = int(round(max(MIN_VOICE_LEVEL, min(MAX_VOICE_LEVEL, target))))
+        note = None
+        if target > MAX_VOICE_LEVEL:
+            note = "at maximum"
+        elif target < MIN_VOICE_LEVEL:
+            note = "at minimum"
+
+        if clamped == current:
+            applied = current
+        else:
+            try:
+                applied = int(self._daemon_client.set_volume(clamped))
+            except Exception as err:  # noqa: BLE001 - any client failure is a refusal
+                raise ToolRefused(f"could not set volume: {err}") from err
+
+        payload: dict = {"ok": True, "volume": applied}
+        if note:
+            payload["note"] = note
+        return payload, current, applied
 
 
 # --------------------------------------------------------------------------- #

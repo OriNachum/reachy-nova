@@ -75,6 +75,11 @@ def network_change_path() -> Path:
     return state_dir() / "network-change"
 
 
+def volume_state_path() -> Path:
+    """Persisted last-set voice volume — ``<state>/nova-volume.json``."""
+    return state_dir() / "nova-volume.json"
+
+
 def harness_pid_path() -> Path:
     return state_dir() / "nova-harness.pid"
 
