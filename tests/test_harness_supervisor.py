@@ -28,6 +28,19 @@ import pytest
 from reachy_nova.harness import statedir, supervisor
 
 
+class _FakeClock:
+    """Injectable monotonic clock for the lock-belief grace (finding L6)."""
+
+    def __init__(self, t: float = 1000.0):
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
 @pytest.fixture()
 def state_dir(tmp_path, monkeypatch):
     """A throwaway REACHY_STATE_DIR so no test touches the real one."""
@@ -165,12 +178,17 @@ def test_engine_heartbeat_loss_is_a_named_drop(state_dir, caplog):
 def test_engine_heartbeat_loss_clears_the_lock_belief_via_the_lock_state_hook(state_dir, caplog):
     """t13: run()'s lock_state kwarg is notified on the live -> dropped
     transition, so a locally-believed lock does not outlive the engine
-    process that actually held it."""
+    process that actually held it.
+
+    Finding L6 put a grace in front of that clear; ``drop_grace_s=0.0`` keeps
+    this test about the WIRING (does run() reach the belief at all), and the
+    grace itself is covered by the two tests below plus
+    tests/test_harness_lock_state.py."""
     from reachy_nova.harness.lock_state import LockState
 
     caplog.set_level(logging.INFO, logger="nova.sensory")
     _write_heartbeat(state_dir, age_s=0.0)
-    lock_state = LockState()
+    lock_state = LockState(drop_grace_s=0.0)
     lock_state.mark_locked()
     stop = threading.Event()
 
@@ -187,6 +205,100 @@ def test_engine_heartbeat_loss_clears_the_lock_belief_via_the_lock_state_hook(st
         "[SENSE stage=supervise source=nova event=lock] released reason=engine-restart"
         in caplog.text
     )
+
+
+def test_l6_a_flapping_heartbeat_does_not_clear_the_lock_belief(state_dir, caplog):
+    """Live finding L6: the CM4's heartbeat flapped live/lost every ~2 s under
+    load while the runtime lock was fine. run() must cancel the pending drop
+    on the live edge rather than believing the flap."""
+    from reachy_nova.harness.lock_state import LockState
+
+    caplog.set_level(logging.INFO, logger="nova.sensory")
+    _write_heartbeat(state_dir, age_s=0.0)
+    clock = _FakeClock()
+    lock_state = LockState(clock=clock, drop_grace_s=5.0)
+    lock_state.mark_locked()
+    stop = threading.Event()
+
+    def tick_hook(count: int) -> None:
+        # lost, back, lost, back, ... two seconds apart, as observed live.
+        clock.advance(2.0)
+        _write_heartbeat(state_dir, age_s=60.0 if count % 2 else 0.0)
+        if count >= 8:
+            stop.set()
+
+    supervisor.run([], stop, poll_interval=0.0, tick_hook=tick_hook, lock_state=lock_state)
+
+    assert lock_state.locked is True
+    assert "event=lock" not in caplog.text
+
+
+def test_l6_an_engine_that_stays_down_still_clears_the_belief(state_dir, caplog):
+    """The other half: no further heartbeat EDGE ever arrives, so the poll
+    loop's settle() is what has to notice the grace lapsing."""
+    from reachy_nova.harness.lock_state import LockState
+
+    caplog.set_level(logging.INFO, logger="nova.sensory")
+    _write_heartbeat(state_dir, age_s=0.0)
+    clock = _FakeClock()
+    lock_state = LockState(clock=clock, drop_grace_s=5.0)
+    lock_state.mark_locked()
+    stop = threading.Event()
+
+    def tick_hook(count: int) -> None:
+        if count == 1:
+            _write_heartbeat(state_dir, age_s=60.0)  # down, and staying down
+        else:
+            clock.advance(2.0)
+        if count >= 6:
+            stop.set()
+
+    supervisor.run([], stop, poll_interval=0.0, tick_hook=tick_hook, lock_state=lock_state)
+
+    assert lock_state.locked is None
+    assert caplog.text.count("event=lock") == 1
+    assert "released reason=engine-restart" in caplog.text
+
+
+def test_l6_a_lock_state_without_the_new_hooks_is_tolerated(state_dir):
+    """Duck-typed, and every hook is optional: an object with only the
+    original on_engine_dropped() must not crash the watch loop."""
+    calls: list[str] = []
+    legacy = types.SimpleNamespace(on_engine_dropped=lambda: calls.append("dropped"))
+    _write_heartbeat(state_dir, age_s=0.0)
+    stop = threading.Event()
+
+    def tick_hook(count: int) -> None:
+        if count == 1:
+            _write_heartbeat(state_dir, age_s=60.0)
+        if count >= 3:
+            stop.set()
+
+    supervisor.run([], stop, poll_interval=0.0, tick_hook=tick_hook, lock_state=legacy)
+
+    assert calls == ["dropped"]
+
+
+def test_l6_a_raising_lock_state_hook_never_kills_the_watch_loop(state_dir, caplog):
+    caplog.set_level(logging.INFO, logger="nova.sensory")
+
+    def boom():
+        raise RuntimeError("belief exploded")
+
+    exploding = types.SimpleNamespace(on_engine_dropped=boom, on_engine_live=boom, settle=boom)
+    _write_heartbeat(state_dir, age_s=0.0)
+    stop = threading.Event()
+
+    def tick_hook(count: int) -> None:
+        if count == 1:
+            _write_heartbeat(state_dir, age_s=60.0)
+        if count >= 4:
+            stop.set()
+
+    supervisor.run([], stop, poll_interval=0.0, tick_hook=tick_hook, lock_state=exploding)
+
+    assert "lock-state" in caplog.text
+    assert "harness down" in caplog.text
 
 
 def test_find_lock_state_discovers_it_on_a_component():

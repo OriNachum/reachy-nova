@@ -325,3 +325,85 @@ def test_latches_set_while_unarmed_are_not_persisted(state_dir, clock):
     q.set_body_latches(True, True)
     assert q.body_latches() == (True, True)
     assert not path.exists()
+
+
+# --------------------------------------------------------------------------- #
+# 7. Live findings L1/L2 (on-device run 2026-08-26 18:26–18:31)               #
+#                                                                             #
+# L1: the acknowledgement was DROPPED. stay_silent armed at 18:28:34 and      #
+#     Sonic's first utterance arrived 9 s later (generation latency under     #
+#     inject load) — past the old 2 s grace, so the speaker logged a          #
+#     quiet-drop for the one utterance the feature exists to let through.     #
+# L2: Sonic called stay_silent twice inside the same second with the same     #
+#     2-minute request; the second answered note="extended" for an identical  #
+#     deadline.                                                               #
+# --------------------------------------------------------------------------- #
+
+
+def test_l1_a_nine_second_acknowledgement_still_gets_through(state_dir, clock):
+    """The live timing: tool result, 9 s of Sonic latency, then the ack."""
+    quiet = QuietState(clock=clock)
+    assert quiet.grace_s == pytest.approx(15.0)
+    quiet.arm(2)
+    clock.advance(9.0)
+    assert quiet.allow_utterance() is True
+    assert quiet.pending_first_utterance is False
+    # ...and the mouth closes behind it, as before.
+    assert quiet.allow_utterance() is False
+
+
+def test_l1_an_utterance_past_the_grace_is_still_dropped(state_dir, clock):
+    quiet = QuietState(clock=clock)
+    quiet.arm(2)
+    clock.advance(16.0)
+    assert quiet.allow_utterance() is False
+    assert quiet.pending_first_utterance is False
+
+
+def test_l1_the_reservation_survives_until_an_utterance_spends_it(state_dir, clock):
+    """Nothing but an utterance spends the reservation inside the window."""
+    quiet = QuietState(clock=clock)
+    quiet.arm(2)
+    for _ in range(14):
+        clock.advance(1.0)
+        assert quiet.pending_first_utterance is True
+    assert quiet.allow_utterance() is True
+
+
+def test_l1_the_grace_is_env_overridable(state_dir, monkeypatch):
+    monkeypatch.setenv("NOVA_QUIET_ACK_GRACE_S", "30")
+    assert QuietState().grace_s == pytest.approx(30.0)
+
+
+@pytest.mark.parametrize("raw", ["", "soon", "0", "-4", "nan"])
+def test_l1_a_bad_grace_env_falls_back_to_the_default(state_dir, monkeypatch, raw):
+    monkeypatch.setenv("NOVA_QUIET_ACK_GRACE_S", raw)
+    assert QuietState().grace_s == pytest.approx(15.0)
+
+
+def test_l2_an_identical_repeat_request_is_kept_not_extended(state_dir, clock, caplog):
+    """The same stay_silent twice in one second: nothing changed, say so."""
+    quiet = QuietState(clock=clock)
+    first = quiet.arm(2)
+    assert first["note"] == "armed"
+    with caplog.at_level(logging.INFO, logger="nova.sensory"):
+        clock.advance(0.4)
+        second = quiet.arm(2)
+    assert second["note"] == "kept"
+    assert second["until"] == pytest.approx(first["until"], abs=1.0)
+    assert quiet_lines(caplog) == []  # no second quiet line for a no-op
+
+
+def test_l2_a_genuinely_longer_request_still_extends(state_dir, clock):
+    quiet = QuietState(clock=clock)
+    quiet.arm(2)
+    clock.advance(0.4)
+    assert quiet.arm(5)["note"] == "extended"
+
+
+def test_l2_the_repeat_still_reopens_the_acknowledgement_window(state_dir, clock):
+    quiet = QuietState(clock=clock)
+    quiet.arm(2)
+    quiet.allow_utterance()  # spend the first acknowledgement
+    quiet.arm(2)
+    assert quiet.pending_first_utterance is True

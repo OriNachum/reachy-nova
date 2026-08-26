@@ -30,7 +30,15 @@ out of scope for this repo), `reachy_nova/harness/lock_state.py`
 
 The two glances are ordinary `run_behavior` calls naming a gesture the
 runtime's library ships — the gaze one-shots default to about 2 seconds and
-stop on their own, same as `nod` or `shake`. `lock_face`/`release_face` are
+stop on their own, same as `nod` or `shake`. They are ALSO published under
+their own underscored tool names, `look_at_face` and `look_at_sound`
+(optional `duration`, default 2 s), which build exactly the same
+`run_behavior` spool op. That alias is not a second capability: live on
+2026-08-26 Sonic reached for a tool literally named `look_at_face`, got the
+pre-flight "unknown tool" refusal, and abandoned the gesture rather than
+retrying as `run_behavior(name="look-at-face")` (finding L4). A name the
+model already reaches for is worth more than the name we would have
+preferred. `lock_face`/`release_face` are
 their own no-argument tool specs (`{"type": "object", "properties": {},
 "required": []}`) — there is nothing to configure, only whether the lock is
 on.
@@ -73,9 +81,16 @@ face`) narrate what the *body* does with a standing lock once it's held:
   clears `LockState.locked` to `False`, the same as a confirmed
   `release_face` would.
 
-`LockState` is also cleared to unknown (`None`) whenever the engine
-heartbeat itself drops — a lock is a promise the engine keeps, and when the
-engine goes away there is nothing left to have an opinion about. See
+`LockState` is also cleared to unknown (`None`) when the engine heartbeat
+itself drops — a lock is a promise the engine keeps, and when the engine
+goes away there is nothing left to have an opinion about. That clear waits
+out a **5 s** grace (`NOVA_LOCK_DROP_GRACE_S`), and any `engine live` inside
+the grace cancels it: live on 2026-08-26 the heartbeat on a loaded CM4
+flapped live/lost about every 2 s while the runtime lock was held perfectly
+well, and the original edge-triggered clear threw the belief away two
+seconds after every lock (finding L6). The supervisor drives both edges plus
+a `settle()` on every other poll tick, so an engine that stays down still
+clears the belief exactly once even though no further edge ever arrives. See
 `reachy_nova/harness/lock_state.py`'s module docstring for the full
 reasoning; the belief is read-only local color for `supervisor.status()`'s
 `locked` field (`True`/`False`/`None` — never guessed) and never gates a

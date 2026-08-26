@@ -88,9 +88,25 @@ own quiet.
 
 `arm()` leaves `pending_first_utterance` set, so the FIRST utterance after
 arming still plays — "okay, quiet for ten minutes" — and the mouth closes
-behind it. If no utterance arrives within `grace_s` (default 2 s) the mouth
-closes anyway, so a Sonic turn that never produces audio can't leave the
-gate open indefinitely.
+behind it. If no utterance arrives within `grace_s` the mouth closes anyway,
+so a Sonic turn that never produces audio can't leave the gate open
+indefinitely.
+
+The grace defaults to **15 s** (`NOVA_QUIET_ACK_GRACE_S` overrides it; a
+missing, unparseable or non-positive value falls back to the default). It
+started at 2 s and that was too tight to survive real Sonic latency: live on
+2026-08-26 the `stay_silent` tool result landed at 18:28:34 and the spoken
+"okay, quiet" arrived 9 s later, past the window, so the speaker logged a
+`quiet-drop` for the one utterance the whole feature exists to let through
+(finding L1). The reservation is spent by an *utterance*, never by time
+alone inside the window.
+
+A repeated identical request — the model calling `stay_silent(2)` twice
+inside one second, also seen live — lands on a deadline within one second of
+the standing one and answers `note: "kept"`, not `"extended"`: nothing about
+the quiet changed, and it logs no second quiet line (finding L2). It does
+reopen the acknowledgement window, because a repeat is still an exchange the
+robot should be able to answer out loud.
 
 ## Escape by voice
 

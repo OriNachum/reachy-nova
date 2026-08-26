@@ -312,12 +312,15 @@ def run(
     seam — it is called with the tick count after each observation, which is how
     a heartbeat transition is exercised inside a single :func:`run` call.
 
-    *lock_state* (duck-typed: anything with an ``on_engine_dropped()`` method,
-    e.g. :class:`~reachy_nova.harness.lock_state.LockState`) is notified on
-    the live -> dropped transition, so a locally-believed gaze lock does not
-    outlive the engine process that actually held it — see that method's
-    docstring for why this is a supervisor concern rather than a bus one.
-    ``None`` (the default, and every non-t13 caller) skips this entirely.
+    *lock_state* (duck-typed: anything with ``on_engine_dropped()`` /
+    ``on_engine_live()`` / ``settle()``, e.g.
+    :class:`~reachy_nova.harness.lock_state.LockState`) is notified on BOTH
+    heartbeat transitions and given a ``settle()`` on every other tick, so a
+    locally-believed gaze lock neither outlives the engine process that
+    actually held it nor dies to a heartbeat that merely flickered under load
+    (finding L6) — see those methods' docstrings for why this is a supervisor
+    concern rather than a bus one. ``None`` (the default, and every non-t13
+    caller) skips this entirely.
     """
     started = _start_components(components, stop_event)
     _log("start", f"harness up pid={os.getpid()} components={len(started)}")
@@ -329,6 +332,11 @@ def run(
             if live != previous:
                 _log_engine_transition(live, previous, lock_state)
                 previous = live
+            else:
+                # A pending belief drop expires on TIME, not on an edge — and
+                # a genuinely dead engine produces no further edge at all, so
+                # the poll loop is what has to notice (finding L6).
+                _settle_lock_state(lock_state)
             ticks += 1
             if tick_hook is not None:
                 tick_hook(ticks)
@@ -339,23 +347,49 @@ def run(
         _log("stop", f"harness down pid={os.getpid()} ticks={ticks}")
 
 
+def _settle_lock_state(lock_state: object | None) -> None:
+    """Give *lock_state* a chance to expire a pending engine-drop. Never raises."""
+    if lock_state is None:
+        return
+    settle = getattr(lock_state, "settle", None)
+    if settle is None:
+        return
+    try:
+        settle()
+    except Exception as err:  # noqa: BLE001 - a belief update must not kill the loop
+        _log("engine", f"lock-state settle failed detail={err}")
+
+
+def _notify_lock_state(lock_state: object | None, method: str) -> None:
+    """Call ``lock_state.<method>()`` if it has one. Never raises."""
+    if lock_state is None:
+        return
+    hook = getattr(lock_state, method, None)
+    if hook is None:
+        return
+    try:
+        hook()
+    except Exception as err:  # noqa: BLE001 - a belief update must not kill the loop
+        _log("engine", f"lock-state update failed detail={err}")
+
+
 def _log_engine_transition(live: bool, previous: bool | None, lock_state: object | None) -> None:
-    """Log the engine heartbeat TRANSITION and, on a live -> dropped edge,
-    notify *lock_state* (see :func:`run`'s docstring for why).
+    """Log the engine heartbeat TRANSITION and notify *lock_state* on BOTH
+    edges (see :func:`run`'s docstring for why).
+
+    A dropped edge only ARMS the belief drop; the live edge cancels a pending
+    one. On a CM4 whose heartbeat flaps every ~2 s under load (finding L6),
+    the cancel is what keeps a perfectly good runtime lock believed.
     """
     if live:
         _log("engine", "engine live")
+        _notify_lock_state(lock_state, "on_engine_live")
         return
     if previous is None:
         _log("engine", "engine absent")
         return
     _log("engine", "dropped reason=engine-heartbeat-lost")
-    if lock_state is None:
-        return
-    try:
-        lock_state.on_engine_dropped()  # type: ignore[attr-defined]
-    except Exception as err:  # noqa: BLE001 - a belief update must not kill the loop
-        _log("engine", f"lock-state update failed detail={err}")
+    _notify_lock_state(lock_state, "on_engine_dropped")
 
 
 def install_signal_handlers(stop_event: threading.Event) -> Callable[[], None]:

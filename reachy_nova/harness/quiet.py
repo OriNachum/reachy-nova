@@ -9,8 +9,13 @@ from that:
 * **Later always wins.** A second request while quiet is armed can only push
   the deadline OUT (``note="extended"``), never pull it in: asking for five
   more minutes in the middle of a thirty-minute quiet obviously means "at least
-  five more", not "cut it to five" (``note="kept"``). Only :meth:`release`
-  ends a quiet early, and it says whether there was anything to end.
+  five more", not "cut it to five" (``note="kept"``). A repeat of the SAME
+  request — the model calling ``stay_silent(2)`` twice inside one second, seen
+  live 2026-08-26 18:28:34 — lands on a deadline within
+  :data:`SAME_DEADLINE_EPS_S` of the standing one and is ``note="kept"`` too:
+  nothing about the quiet changed, so calling it an "extension" tells the
+  model a story that did not happen (finding L2). Only :meth:`release` ends a
+  quiet early, and it says whether there was anything to end.
 * **It survives a restart.** The deadline is persisted atomically (tmp +
   ``os.replace``) to ``<state>/nova-quiet.json`` on every arm and release, and
   reloaded on construction. A harness restart at 02:05 inside a quiet armed at
@@ -23,8 +28,20 @@ from that:
 * **The acknowledgement is heard.** :meth:`arm` leaves
   :attr:`pending_first_utterance` set, so the FIRST utterance after arming is
   spoken ("okay, quiet for ten minutes") and the mouth closes behind it. If no
-  utterance arrives within ``grace_s`` (default 2 s) the mouth closes anyway —
-  a Sonic turn that never produces audio must not leave the gate open.
+  utterance arrives within ``grace_s`` the mouth closes anyway — a Sonic turn
+  that never produces audio must not leave the gate open.
+
+  That grace is a bet on how long Sonic needs to turn a tool result into
+  audio, and the first bet was wrong: live on 2026-08-26 the ``stay_silent``
+  result landed at 18:28:34 and Sonic's acknowledgement arrived 9 s later, so
+  a 2 s grace dropped the one utterance the whole feature exists to let
+  through (finding L1). The default is now :data:`DEFAULT_GRACE_S` = 15 s,
+  overridable with ``NOVA_QUIET_ACK_GRACE_S`` and parsed defensively (a
+  missing, unparseable or non-positive value falls back to the default rather
+  than closing the mouth instantly). The reservation is spent by an
+  UTTERANCE, never by time alone inside the window: no other utterance can
+  slip through first, because the first :meth:`allow_utterance` after
+  :meth:`arm` IS the acknowledgement.
 
 Quiet gates the SPEAKER only (see :mod:`reachy_nova.harness.speaking`). The ear
 keeps hearing, the mind keeps thinking, sensory events keep flowing: the robot
@@ -56,7 +73,35 @@ SOURCE = "nova"
 EVENT_QUIET = "quiet"
 
 #: How long after arming we still wait for the acknowledgement utterance.
-DEFAULT_GRACE_S = 2.0
+#: 15 s, not the original 2 s: Sonic took 9 s to produce the acknowledgement
+#: under inject load on the live robot (2026-08-26, finding L1).
+DEFAULT_GRACE_S = 15.0
+
+#: Env override for :data:`DEFAULT_GRACE_S`, in seconds.
+GRACE_ENV = "NOVA_QUIET_ACK_GRACE_S"
+
+#: Two deadlines this close together are the SAME deadline (finding L2) — a
+#: repeated identical request, not an extension.
+SAME_DEADLINE_EPS_S = 1.0
+
+
+def default_grace_s() -> float:
+    """The acknowledgement grace, from ``NOVA_QUIET_ACK_GRACE_S`` or the default.
+
+    Parsed defensively: an unset, empty, unparseable, NaN or non-positive
+    value resolves to :data:`DEFAULT_GRACE_S`. A typo in an env var must never
+    be the reason the robot swallowed the one thing it was allowed to say.
+    """
+    raw = os.environ.get(GRACE_ENV)
+    if raw is None:
+        return DEFAULT_GRACE_S
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_GRACE_S
+    if not value > 0.0:  # non-positive, or NaN
+        return DEFAULT_GRACE_S
+    return value
 
 
 def _iso(ts: float) -> str:
@@ -108,17 +153,20 @@ class QuietState:
         :func:`reachy_nova.harness.statedir.quiet_state_path`.
     grace_s:
         How long the acknowledgement window stays open after :meth:`arm`.
+        ``None`` (the default) resolves :func:`default_grace_s` at
+        construction, so the env override applies without every caller
+        having to know about it.
     """
 
     def __init__(
         self,
         clock: Callable[[], float] = time.time,
         path: Path | None = None,
-        grace_s: float = DEFAULT_GRACE_S,
+        grace_s: float | None = None,
     ) -> None:
         self._clock = clock
         self._path = statedir.quiet_state_path() if path is None else Path(path)
-        self.grace_s = float(grace_s)
+        self.grace_s = default_grace_s() if grace_s is None else float(grace_s)
         self._lock = threading.RLock()
         self._until = 0.0
         #: True between arm() and the acknowledgement utterance (or the grace).
@@ -208,11 +256,15 @@ class QuietState:
             if not was_armed:
                 note = "armed"
                 self._until = candidate
-            elif candidate > self._until:
+            elif candidate > self._until + SAME_DEADLINE_EPS_S:
                 note = "extended"
                 self._until = candidate
             else:
+                # Either a SHORTER request (later wins, keep ours) or the same
+                # request repeated within SAME_DEADLINE_EPS_S (finding L2):
+                # the quiet did not actually change, so neither does the note.
                 note = "kept"
+                self._until = max(self._until, candidate)
             # Even a "kept"/"extended" request is an exchange the robot should
             # be able to answer out loud before the mouth closes again.
             self.pending_first_utterance = True

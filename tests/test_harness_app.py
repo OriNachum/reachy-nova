@@ -539,3 +539,11 @@ def test_browser_result_callback_reaches_the_conversation(monkeypatch):
     assert inner.on_result is not None
     inner.on_result("The answer is 42.")
     assert len(injected) == 1 and "The answer is 42." in injected[0]
+
+
+def test_l5_the_prompt_tells_nova_when_to_release_face_and_recall_senses():
+    """Live finding L5: on the robot Nova never called release_face on "you
+    can look away" nor recall_senses on "why did you do that?"."""
+    prompt = app.HARNESS_SYSTEM_PROMPT
+    assert "stop following or look away, call release_face" in prompt
+    assert "call recall_senses before answering" in prompt
