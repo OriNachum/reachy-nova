@@ -88,7 +88,7 @@ def test_generic_rule_fire_still_produces_an_inject(rules_cfg):
     [
         ("rule/fire", "silent"),
         ("rule/fire:pat-acknowledge", "brief"),
-        ("rule/fire:nova-face-noticed", "brief"),
+        ("rule/fire:nova-face-noticed", "silent"),
         ("pat/level1", "brief"),
         ("pat/level2", "brief"),
         ("pat/detected", "brief"),

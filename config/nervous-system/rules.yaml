@@ -302,7 +302,7 @@ rules:
     priority: NORMAL
     urgency: NOW
     llm_evaluate: false
-    voice: brief
+    voice: silent
     sense: face
     inject_template: "(a familiar face is in view)"
 
