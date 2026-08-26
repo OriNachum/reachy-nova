@@ -406,19 +406,27 @@ def dedupe_key_for(
     payload: dict[str, Any] | None,
     rule: dict[str, Any],
 ) -> str:
-    """The dedupe key for one routed event: the rule's ``sense`` class if it
-    names one, else the exact resolved key (``"<source>/<type>:<rule>"`` when
-    the payload names a runtime rule, else ``"<source>/<type>"``).
+    """The dedupe key for one routed event: the rule's ``dedupe`` identity if
+    it names one, else the exact resolved key (``"<source>/<type>:<rule>"``
+    when the payload names a runtime rule, else ``"<source>/<type>"``).
+
+    ``sense`` is deliberately NOT consulted here (F3): it is SenseHistory's
+    semantic class only. Two entries can share a ``sense`` (e.g.
+    ``pat/level1`` and ``pat/level2`` are both "pat") without their injects
+    collapsing into one, because an escalation from one level to the next is
+    a distinct event by the rules' own definition. Only an explicit
+    ``dedupe:`` field collapses two distinctly-keyed entries into one bucket
+    — used on the two pat ``rule/fire`` overrides so the runtime's shipped
+    reflex and the Kiro overlay's own fire count as the same physical touch.
 
     Deliberately NEVER guesses a class from a rule name — two differently
     named, un-classed rule/fire events must dedupe independently (a generic
     reflex fire is not assumed related to another just because both are
-    unclassed). Only an explicit ``sense:`` field in rules.yaml collapses
-    two distinctly-named events into one dedupe bucket.
+    unclassed).
     """
-    sense = rule.get("sense")
-    if isinstance(sense, str) and sense:
-        return sense
+    dedupe = rule.get("dedupe")
+    if isinstance(dedupe, str) and dedupe:
+        return dedupe
     if isinstance(payload, dict):
         rule_name = payload.get("rule")
         if isinstance(rule_name, str) and rule_name:
@@ -718,18 +726,12 @@ class NovaBus:
                     f"window={self._dedupe_window_s:.1f}s",
                 )
                 return
+            # Reserve the key BEFORE calling out, so two concurrent same-key
+            # events can never both pass the check above and double-deliver.
+            # (F6) The reservation is provisional: it is rolled back below if
+            # on_inject raises, so a failed delivery never poisons the window
+            # for the retry that follows it.
             self._last_inject_at[dedupe_key] = now
-
-        if self.history is not None:
-            rule_name = payload.get("rule") if isinstance(payload, dict) else None
-            self.history.record(
-                source,
-                event_type,
-                rule_name,
-                text,
-                rule.get("sense"),
-                rule.get("voice"),
-            )
 
         sensory_log.stage(
             STAGE_INJECT,
@@ -743,6 +745,30 @@ class NovaBus:
         except Exception as err:
             logger.warning("bus: inject callback failed: %s", err, exc_info=True)
             sensory_log.stage(STAGE_INJECT, SOURCE, key, f"dropped reason=inject-failed: {err}")
+            # (F6) Roll back the reservation so the same key can retry
+            # immediately, instead of being suppressed for the dedupe window
+            # by a delivery Nova never actually received. Only undo OUR
+            # reservation — a newer one (a fresh event that raced in after
+            # this failure) must not be clobbered.
+            with self._dedupe_lock:
+                if self._last_inject_at.get(dedupe_key) == now:
+                    del self._last_inject_at[dedupe_key]
+            return
+
+        # (F6) The dedupe timestamp above is already committed; the history
+        # record is written only now, after on_inject succeeded — a raising
+        # callback must never leave SenseHistory claiming Nova was told
+        # something it never actually received.
+        if self.history is not None:
+            rule_name = payload.get("rule") if isinstance(payload, dict) else None
+            self.history.record(
+                source,
+                event_type,
+                rule_name,
+                text,
+                rule.get("sense"),
+                rule.get("voice"),
+            )
 
     def _mark_quiet(self, text: str) -> str:
         """Append :data:`QUIET_MARKER` while a timed quiet is armed."""

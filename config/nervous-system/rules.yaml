@@ -11,11 +11,23 @@
 #       brief  -> " (react briefly if at all)"
 #       free   -> no marker
 #   sense: <class>  (e.g. pat, face, sound, vision)
-#     Names the sensory class an entry belongs to, for future dedupe/fusion
-#     logic across the several rule keys that can carry the same physical
-#     sense (e.g. rule/fire:pat-acknowledge and pat/level1 are both "pat").
-#     Schema-only in this task — rule_for() exposes it unchanged; nothing
-#     yet reads it to suppress or merge events.
+#     Names the sensory class an entry belongs to — SenseHistory's semantic
+#     classification only (what `recall_senses` reports this event as). It is
+#     NOT consulted for inject dedupe (see `dedupe:` below) — two entries can
+#     share a `sense` (e.g. pat/level1 and pat/level2 are both "pat") without
+#     collapsing into one inject, because escalation from one level to the
+#     next is a distinct event the rules' own definition recognizes.
+#   dedupe: <key>
+#     The bus's dedupe IDENTITY (reachy_nova/harness/bus.py dedupe_key_for):
+#     when set, two entries sharing the same `dedupe` key collapse into one
+#     inject within the window (NOVA_SENSE_DEDUPE_S, default 10s) regardless
+#     of which fires first. Absent, an entry dedupes by its own exact
+#     resolved key ("<source>/<type>:<rule>" or "<source>/<type>") — never
+#     guessed from `sense`. Used on the two pat rule/fire overrides below
+#     (`dedupe: pat-touch`) so the runtime's shipped reflex and the Kiro
+#     overlay's own fire collapse into one inject for the same physical pat,
+#     while the raw pat/level1 -> pat/level2 escalation (a distinct sensory
+#     event) is never suppressed just because both carry `sense: pat`.
 
 # Default rule for unknown (source, type) pairs
 default:
@@ -278,6 +290,7 @@ rules:
     llm_evaluate: false
     voice: brief
     sense: pat
+    dedupe: pat-touch
     inject_template: "(someone is petting you)"
 
   "rule/fire:nova-face-noticed":
@@ -297,14 +310,16 @@ rules:
     # A second, Kiro-authored overlay rule that ALSO fires on a pat (live
     # finding 2026-08-26: one physical pat produced two injects ~8s apart —
     # the shipped pat-acknowledge fire and this overlay's own fire). Same
-    # sense class as pat-acknowledge so NovaBus's per-key dedupe (t7,
-    # bus.py) collapses both into one inject regardless of which rule name
-    # arrives first.
+    # `dedupe: pat-touch` key as pat-acknowledge (F3 fix) so NovaBus's
+    # per-key dedupe (t7/F3, bus.py) collapses both into one inject
+    # regardless of which rule name arrives first — narrower than `sense`,
+    # which stays "pat" on both purely for SenseHistory classification.
     priority: NORMAL
     urgency: NOW
     llm_evaluate: false
     voice: brief
     sense: pat
+    dedupe: pat-touch
     inject_template: "(someone is petting you)"
 
   rule/suppress:

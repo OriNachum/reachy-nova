@@ -102,6 +102,47 @@ def test_a_third_pat_after_the_window_produces_a_fresh_inject():
 
 
 # --------------------------------------------------------------------------- #
+# F3: sense-class dedupe must not drop an escalation                         #
+# --------------------------------------------------------------------------- #
+
+
+def pat_level_msg(level: int, ts: float = 0.0):
+    return fake_msg(
+        f"reachy/events/pat/level{level}",
+        {"t": "pat", "ts": ts},
+    )
+
+
+def test_pat_level1_then_level2_within_the_window_both_inject():
+    """F3: pat/level1 and pat/level2 share `sense: pat` in rules.yaml, but a
+    level1 -> level2 escalation is a distinct sensory event and must not be
+    suppressed by the pat sense-class dedupe."""
+    rec = Recorder()
+    clock = make_clock([0.0, 1.0])
+    nb = make_bus(rec, sources="pat", rules_path=RULES_PATH, clock=clock)
+
+    nb.on_message(None, None, pat_level_msg(1))
+    nb.on_message(None, None, pat_level_msg(2))
+
+    assert len(rec.injects) == 2
+
+
+def test_pat_level1_twice_within_the_window_still_dedupes():
+    """The exact-key fallback still collapses two IDENTICAL discrete pat
+    events (same level) within the window — only the cross-rule
+    pat-acknowledge/nova-pat-cheer pair, and now the pat/level* escalation,
+    are meant to change behavior."""
+    rec = Recorder()
+    clock = make_clock([0.0, 1.0])
+    nb = make_bus(rec, sources="pat", rules_path=RULES_PATH, clock=clock)
+
+    nb.on_message(None, None, pat_level_msg(1))
+    nb.on_message(None, None, pat_level_msg(1))
+
+    assert len(rec.injects) == 1
+
+
+# --------------------------------------------------------------------------- #
 # Acceptance criteria 3: never guess a class from the rule name              #
 # --------------------------------------------------------------------------- #
 
@@ -161,9 +202,18 @@ def test_a_suppressed_duplicate_logs_exactly_one_dedupe_line(caplog):
 # --------------------------------------------------------------------------- #
 
 
-def test_dedupe_key_for_prefers_the_sense_class_over_the_resolved_key():
+def test_dedupe_key_for_prefers_the_dedupe_field_over_the_resolved_key():
+    key = bus.dedupe_key_for(
+        "rule", "fire", {"rule": "pat-acknowledge"}, {"sense": "pat", "dedupe": "pat-touch"}
+    )
+    assert key == "pat-touch"
+
+
+def test_dedupe_key_for_ignores_sense_and_falls_back_to_the_resolved_key():
+    """F3: `sense` alone (no `dedupe` field) must NOT collapse the dedupe
+    identity — it is SenseHistory's semantic class only."""
     key = bus.dedupe_key_for("rule", "fire", {"rule": "pat-acknowledge"}, {"sense": "pat"})
-    assert key == "pat"
+    assert key == "rule/fire:pat-acknowledge"
 
 
 def test_dedupe_key_for_falls_back_to_the_resolved_rule_key():
