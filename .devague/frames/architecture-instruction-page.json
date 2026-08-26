@@ -1,0 +1,126 @@
+{
+  "slug": "architecture-instruction-page",
+  "title": "architecture-instruction-page",
+  "schema_version": 5,
+  "status": "drafting",
+  "created": "2026-08-26T06:35:39Z",
+  "updated": "2026-08-26T06:36:10Z",
+  "claims": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "Reachy Nova ships a conceptual architecture instruction page: layers, ownership, communication seams, cognition tiers and invariants of the on-device harness \u2014 readers understand the system without reading code",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c2",
+      "kind": "requirement",
+      "text": "docs/architecture.md (55 lines, the legacy ReachyMiniApp/app_state view, linked from README.md:29) is replaced by a harness-era conceptual page; the legacy direct-SDK path stays as one closing section",
+      "origin": "llm",
+      "status": "proposed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c3",
+      "kind": "boundary",
+      "text": "the page stays at concept level (tiers, ownership, seams, cognition tiers, invariants, walkthroughs); per-file and per-function detail remains in docs/components/*.md and CLAUDE.md's module map, which the page links to",
+      "origin": "llm",
+      "status": "proposed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c4",
+      "kind": "assumption",
+      "text": "the on-device harness over reachy-mini-cli's symbolic runtime is THE architecture; main.py's direct-SDK ReachyMiniApp is superseded (scope plan P5: retire after the wireless harness is proven, which round 2 + kiro-writer deliveries did)",
+      "origin": "llm",
+      "status": "proposed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c5",
+      "kind": "requirement",
+      "text": "the seams table and internal-structure sections are sourced from reachy_nova/harness/{supervisor,bus,gate,hearing,speaking,statedir,tools,rules_overlay,kiro_session,forge_leg,unit}.py and reachy_nova/kiro_acp.py \u2014 every channel named with direction and payload shape",
+      "origin": "llm",
+      "status": "proposed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c6",
+      "kind": "non_goal",
+      "text": "network (iPhone (5) hotspot) and Kiro-session verification are live operational checks on the CM4, recorded in the session, not spec content; the page documents the network/boot model only conceptually",
+      "origin": "llm",
+      "status": "proposed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    }
+  ],
+  "open_vagueness": [],
+  "scope_entries": [
+    {
+      "id": "s1",
+      "surface": "docs/architecture.md + README.md:29",
+      "finding": "existing page describes the retired monolith (ReachyMiniApp, app_state dict, YOLO tracker); it is the only architecture entry point linked from README, so the new page must replace it in place, not sit beside it",
+      "seeds": [
+        "c2"
+      ]
+    },
+    {
+      "id": "s2",
+      "surface": "docs/components/*.md, CLAUDE.md module map",
+      "finding": "17 component docs already carry file-level detail (skill-forge, speech-events, tracking, patting, ...); duplicating them would drift \u2014 the architecture page links down instead",
+      "seeds": [
+        "c3"
+      ]
+    },
+    {
+      "id": "s3",
+      "surface": "docs/plans/2026-08-09-wireless-cli-harness-scope.md, docs/deliveries/2026-08-19-kiro-writer-pettable-upgrade.md",
+      "finding": "single-owner SDK constraint, seams (MQTT reachy/events/#, audio tee, intents spool, rules overlay, daemon HTTP) and the P5 retirement of the direct-SDK path are recorded decisions; kiro-writer delivery proves the harness live on the CM4",
+      "seeds": [
+        "c4"
+      ]
+    },
+    {
+      "id": "s4",
+      "surface": "reachy_nova/harness/*.py, reachy_nova/kiro_acp.py, tests/test_harness_boundary.py",
+      "finding": "harness = supervisor + start/stop units + MQTT bus + tee hearing + daemon-HTTP speaking + legs (vision/memory/forge/cognition_feed) + 11-tool surface; boundary AST-enforced (no reachy_mini import, no set_target); every seam lives in statedir.py",
+      "seeds": [
+        "c5"
+      ]
+    },
+    {
+      "id": "s5",
+      "surface": "device <home-lan-ip>: nmcli profiles, ~/.kiro/agents, journalctl --user -u reachy-nova-harness",
+      "finding": "iPhone (5) profile existed with PSK but timestamp 0 (never joined) \u2014 join proven live 07:33 BST; kiro_session failed at boot (kiro-cli exited before network-online) and the pre-review build never retried; main carries the spawn-survival fix",
+      "seeds": [
+        "c6"
+      ]
+    }
+  ],
+  "lapses": []
+}

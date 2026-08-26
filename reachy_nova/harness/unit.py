@@ -72,6 +72,28 @@ AUTOSTART_UNIT = "reachy-nova-autostart.service"
 
 DESCRIPTION = "Reachy Nova harness (on-device AI peripheral over the symbolic runtime)"
 
+#: Rendered into the harness unit's ``[Unit]`` section, immediately above the
+#: ``After=`` line. LIVE FINDING (2026-08-26): ``network-online.target`` was
+#: reached on this device BEFORE wlan0 actually associated, so the harness
+#: started with no route, kiro-cli exited on spawn, and the writer stayed
+#: absent until a manual restart. The ordering is kept (it is free, and on a
+#: box where the target IS meaningful it saves a retry cycle) but the harness
+#: must never DEPEND on it: there is no ``Wants=``/``Requires=`` on it, and the
+#: network-less start is handled in code — ``KiroSessionUnit`` starts degraded
+#: and retries under its watchdog, Sonic's stream loop reconnects with backoff,
+#: and ``harness/network.py`` turns a real Wi-Fi join into an immediate restart
+#: of both. The comment exists so the next reader does not "fix" the ordering
+#: into a dependency and re-create the 2026-08-26 failure. It deliberately
+#: spells no systemd directive verbatim, so the unit-text tests can assert
+#: "no Wants=/Requires= anywhere in this file" as a flat string search.
+NETWORK_ORDERING_COMMENT = (
+    "# Ordering only - the harness does NOT depend on the network being up:\n"
+    "# network-online.target is reached before wlan0 associates on this device\n"
+    "# (2026-08-26), so a network-less start is handled in code (degraded Kiro\n"
+    "# session + Sonic stream retry + harness/network.py restart on join).\n"
+    "# Never turn this ordering into a Wants or Requires dependency.\n"
+)
+
 RUNTIME_DESCRIPTION = "Reachy Mini CLI symbolic runtime (presence loop)"
 
 DEMO_DESCRIPTION = "Reachy Mini CLI demo mode (manual-only presence loop)"
@@ -122,6 +144,7 @@ def harness_unit_text(
     return (
         "[Unit]\n"
         f"Description={DESCRIPTION}\n"
+        f"{NETWORK_ORDERING_COMMENT}"
         f"After={RUNTIME_UNIT} network-online.target\n"
         "\n"
         "[Service]\n"

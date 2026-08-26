@@ -1,0 +1,146 @@
+#!/bin/bash
+# 90-reachy-failover — NetworkManager dispatcher hook for the dual-network
+# never-downtime failover (task t3,
+# docs/plans/2026-08-26-dual-network-never-downtime.md#t3; spec claims
+# c22/h16/c26/h22).
+#
+# Installed by scripts/install-device-units.sh to
+#   /etc/NetworkManager/dispatcher.d/90-reachy-failover   (root:root, 0755)
+#
+# NetworkManager invokes dispatcher scripts as ROOT with:
+#   $1 = interface name (e.g. wlan0)   $2 = action (up|down|pre-up|pre-down|
+#                                            connectivity-change|dhcp4-change|…)
+# plus a pile of NM_/IP4_ environment variables we deliberately do not depend
+# on (they are absent for some actions, and `set -u` would then kill us).
+#
+# What it does, and why the work is DETACHED rather than inline:
+#
+#   NetworkManager waits for a dispatcher script to finish before it proceeds
+#   (that is the whole point of the no-wait.d/ variant existing), and the work
+#   here can legitimately take tens of seconds — `nmcli connection up` on a
+#   hotspot join is slow, and a rescan is slower. Blocking the dispatcher
+#   queue for 45 s while we join a network the dispatcher event was itself
+#   about is how you deadlock a robot's only radio. So every invocation
+#   returns in milliseconds and the real work runs in transient systemd units:
+#
+#     reachy-netfailover-once.service  — one decision round, per event
+#     reachy-netfailover-loop.service  — the "keep re-evaluating" leg
+#
+#   The loop unit is the answer to the two observed NetworkManager facts this
+#   whole feature exists for (probes s12/s15): NM retries the CURRENT profile
+#   with growing wpa_supplicant backoffs before falling through, and after one
+#   failed fallback attempt (`ssid-not-found` — the iPhone stops beaconing
+#   when its Hotspot screen closes) it stops trying for minutes. A single
+#   event-driven shot cannot cover either window. `--loop` re-decides every
+#   Decision.next_check_s (clamped 5–300 s) and EXITS BY ITSELF once the robot
+#   has been on the preferred network for 5 minutes, so nothing ever has to
+#   stop it — and `systemctl is-active` keeps us from starting a second one.
+#
+#   If systemd-run is unavailable for any reason we fall back to an inline
+#   `--once` under `timeout`, which is strictly better than doing nothing.
+#
+# The harness runs as pollen and reads <state>/network-change, so the files we
+# write as root are chown'd to pollen after every run.
+#
+# Defensive by construction: `set -u` (never `set -e`, and NEVER `pipefail`
+# with an early exit) and every path ends in `exit 0`. A dispatcher script
+# that exits non-zero gets logged as a failure by NM and, worse, an
+# unexpected failure here would be a network hook that itself breaks the
+# network. Everything is announced to journald via `logger -t reachy-failover`.
+
+set -u
+
+IFACE="${1:-}"
+ACTION="${2:-}"
+
+TAG="reachy-failover"
+say() { logger -t "$TAG" -- "$*" 2>/dev/null || true; }
+
+# --- configuration ---------------------------------------------------------
+# The values below are the REFERENCE DEVICE's defaults (the Reachy Mini
+# Wireless: user pollen, the repo venv under /home/pollen). Any other install
+# — a different user, a different checkout, a different venv — gets its real
+# values from /etc/default/reachy-failover, which scripts/install-device-units.sh
+# renders at install time from the interpreter, state dir and user it actually
+# resolved (and self-tests through that same interpreter). Sourcing it FIRST is
+# load-bearing: it seeds REACHY_NOVA_PYTHON / REACHY_STATE_DIR /
+# REACHY_NOVA_USER, which the `${VAR:-default}` fallbacks below then defer to.
+# Without it a custom install passes the installer's self-test and then
+# silently skips every single event on the `[ ! -x "$NOVA_PYTHON" ]` guard.
+DEFAULTS_FILE="${REACHY_FAILOVER_DEFAULTS:-/etc/default/reachy-failover}"
+if [ -r "$DEFAULTS_FILE" ]; then
+    # shellcheck source=/dev/null
+    . "$DEFAULTS_FILE"
+fi
+
+NOVA_USER="${REACHY_NOVA_USER:-pollen}"
+NOVA_PYTHON="${REACHY_NOVA_PYTHON:-/home/pollen/git/reachy-nova/.venv/bin/python}"
+STATE_DIR="${REACHY_STATE_DIR:-/home/pollen/.local/state/reachy}"
+WIFI_IFACE="${REACHY_WIFI_IFACE:-wlan0}"
+LOOP_UNIT="reachy-netfailover-loop"
+ONCE_UNIT="reachy-netfailover-once"
+
+# --- guards ----------------------------------------------------------------
+# Only the single radio. Every other interface (lo, the USB gadget, docker
+# bridges, tailscale0 — which comes up as a RESULT of our own switching and
+# would otherwise re-trigger us) is ignored outright.
+if [ "$IFACE" != "$WIFI_IFACE" ]; then
+    exit 0
+fi
+
+case "$ACTION" in
+    up|down|pre-down|connectivity-change) ;;
+    *)
+        # dhcp4-change, dhcp6-change, hostname, vpn-*, … — not our business.
+        exit 0
+        ;;
+esac
+
+if [ ! -x "$NOVA_PYTHON" ]; then
+    say "no interpreter at $NOVA_PYTHON — skipping ($IFACE/$ACTION)"
+    exit 0
+fi
+
+# --- the one-shot decision round ------------------------------------------
+# Chown runs in the same shell as the decision so <state>/network-change is
+# readable by the harness (pollen) the moment it exists, not one event later.
+CHOWN_CMD="chown $NOVA_USER $STATE_DIR/network-change $STATE_DIR/netfailover.json 2>/dev/null || true"
+ONCE_CMD="$NOVA_PYTHON -m reachy_nova.netfailover --once; $CHOWN_CMD"
+
+if command -v systemd-run >/dev/null 2>&1; then
+    systemd-run \
+        --unit="$ONCE_UNIT-$$" \
+        --collect \
+        --description="reachy netfailover one-shot ($ACTION)" \
+        --setenv=REACHY_STATE_DIR="$STATE_DIR" \
+        --setenv=REACHY_NET_RESCAN=1 \
+        /bin/sh -c "$ONCE_CMD" >/dev/null 2>&1 \
+        && say "dispatched --once ($IFACE/$ACTION)" \
+        || say "could not dispatch --once ($IFACE/$ACTION)"
+else
+    say "systemd-run absent — running --once inline under timeout ($IFACE/$ACTION)"
+    REACHY_STATE_DIR="$STATE_DIR" REACHY_NET_RESCAN=1 \
+        timeout 60 /bin/sh -c "$ONCE_CMD" >/dev/null 2>&1 || true
+fi
+
+# --- the self-terminating re-evaluation loop ------------------------------
+# Idempotent: if the loop is already running (a previous event started it, and
+# it has not yet settled on the preferred network), we leave it alone.
+if command -v systemd-run >/dev/null 2>&1; then
+    if systemctl is-active --quiet "$LOOP_UNIT.service" 2>/dev/null; then
+        say "loop already active ($IFACE/$ACTION)"
+    else
+        LOOP_CMD="$NOVA_PYTHON -m reachy_nova.netfailover --loop; $CHOWN_CMD"
+        systemd-run \
+            --unit="$LOOP_UNIT" \
+            --collect \
+            --description="reachy netfailover re-evaluation loop" \
+            --setenv=REACHY_STATE_DIR="$STATE_DIR" \
+            --setenv=REACHY_NET_RESCAN=1 \
+            /bin/sh -c "$LOOP_CMD" >/dev/null 2>&1 \
+            && say "started $LOOP_UNIT ($IFACE/$ACTION)" \
+            || say "could not start $LOOP_UNIT ($IFACE/$ACTION)"
+    fi
+fi
+
+exit 0

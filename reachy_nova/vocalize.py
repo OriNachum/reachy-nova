@@ -17,6 +17,16 @@ and the playback loop in ``reachy_nova/main.py``). The constant is kept
 independent here (not imported) so this module stays a standalone,
 dependency-light leaf that doesn't pull in the AWS SDK just to synthesize a
 waveform.
+
+A master gain is applied at the very end of synthesis, after the per-kind
+amplitude envelope and intensity-driven ``overall_gain`` but before the
+final ``[-1, 1]`` clip, because on the robot a full-scale vocalize chirp
+was noticeably louder than Nova Sonic's own speech. It defaults to 0.35 and
+is read from ``NOVA_VOCALIZE_GAIN`` at call time (so ``load_dotenv()``
+order never matters), parsed defensively like ``NovaSonic``'s env knobs: a
+missing, non-numeric, or non-positive value falls back to the default, and
+the value is capped at 1.0 — this knob can only make vocalize quieter than
+raw synthesis, never louder.
 """
 
 from __future__ import annotations
@@ -49,6 +59,28 @@ _FADE_SECONDS = 0.02
 # avoid aliasing at low requested sample rates; well below Nyquist for the
 # default 24kHz rate so it never affects normal playback.
 _NYQUIST_GUARD = 0.45
+
+# Master gain applied at the end of synthesis (see module docstring) so
+# vocalize output isn't louder than Nova Sonic's own speech.
+DEFAULT_MASTER_GAIN = 0.35
+
+
+def _master_gain() -> float:
+    """Read ``NOVA_VOCALIZE_GAIN`` defensively, like ``NovaSonic``'s env knobs.
+
+    A missing, unparseable, or non-positive value falls back to
+    ``DEFAULT_MASTER_GAIN``; any value is capped at 1.0 so this can only
+    ever make vocalize quieter than raw synthesis, never louder.
+    """
+    import os
+
+    try:
+        value = float(os.environ.get("NOVA_VOCALIZE_GAIN", ""))
+    except (TypeError, ValueError):
+        return DEFAULT_MASTER_GAIN
+    if value <= 0:
+        return DEFAULT_MASTER_GAIN
+    return min(value, 1.0)
 
 
 def _clamp_duration(duration: float) -> float:
@@ -187,7 +219,7 @@ def synthesize(
     # Overall gain tracks intensity but never fully mutes — intensity shapes
     # pitch excursion/loudness, it isn't an on/off switch.
     overall_gain = 0.3 + 0.7 * intensity
-    signal = signal * env * overall_gain
+    signal = signal * env * overall_gain * _master_gain()
 
     signal = np.clip(signal, -1.0, 1.0)
     return signal.astype(np.float32)

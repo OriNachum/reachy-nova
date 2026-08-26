@@ -24,6 +24,26 @@ Restart follows the same shape as every other watchdog in this codebase
 a wedged kiro-cli binary is retried with increasing patience rather than
 hammered in a tight loop.
 
+Degraded start (task t5)
+------------------------
+The INITIAL spawn is treated exactly like every later one. Live evidence
+(robot journal 2026-08-26): at cold boot the harness started before Wi-Fi
+associated, ``kiro-cli`` exited immediately, ``start()`` raised, and the
+supervisor logged ``start failed name=kiro_session detail=kiro-cli process
+exited`` — after which NOTHING retried, and the writer stayed absent for
+hours until a human restarted the unit. So :meth:`start` never propagates a
+spawn failure: the unit comes up **degraded** (no live session, watchdog
+thread armed anyway) and the ordinary :meth:`_restart_with_backoff` path
+retries until a spawn succeeds. ``status()["degraded"]`` and the
+``[SENSE stage=kiro ... event=start]`` lines make both the degraded start and
+the later recovery visible in the journal.
+
+:meth:`request_restart` is the explicit-trigger seam the network unit uses
+(``harness/network.py`` -> ``harness/app.py``): a Wi-Fi join/move closes the
+current session and wakes the watchdog immediately with backoff reset, rather
+than waiting out a monitor interval on a session bound to an address that no
+longer exists.
+
 Threading model
 ----------------
 :meth:`KiroSessionUnit.prompt` is the only caller-facing entry point; a
@@ -185,6 +205,21 @@ class KiroSessionUnit:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._external_stop: threading.Event | None = None
+        #: Cuts the monitor loop's sleep short so an explicit
+        #: :meth:`request_restart` is acted on within one wait slice instead of
+        #: a whole monitor interval. Distinct from ``_stop``: waking is not
+        #: stopping.
+        self._kick = threading.Event()
+        #: True between a failed spawn and the next successful one — the unit
+        #: is up (thread armed, retrying) but has no live session.
+        self._degraded = False
+        #: Set by :meth:`request_restart`: the NEXT restart skips its backoff
+        #: wait entirely (the caller observed a network change; waiting a
+        #: second on a stream bound to a dead address buys nothing).
+        self._skip_backoff_once = False
+        #: Why that requested restart was asked for — named in its log line so
+        #: an immediate restart reads as "requested", never as a zero backoff.
+        self._requested_reason: str | None = None
 
         self._backoff = self._backoff_initial
         self._healthy_since: float | None = None
@@ -199,24 +234,74 @@ class KiroSessionUnit:
     def start(self, stop_event: threading.Event) -> None:
         """Spawn the first session and start the watchdog thread.
 
-        Blocking: the initial spawn (factory + start + initialize + new_session)
-        happens synchronously here, so a caller sees a ready-or-failed unit,
-        never a unit that silently never came up.
+        The initial spawn (factory + start + initialize + new_session) is
+        attempted synchronously here, but a FAILURE never propagates: the unit
+        comes up degraded (no session, watchdog armed) and the ordinary
+        backoff/restart path retries it. See "Degraded start" in the module
+        docstring for why — an initial spawn failure is almost always a
+        transient environment problem (no route yet at cold boot), and the one
+        behaviour we must never repeat is "failed once, never retried".
         """
         if self._thread is not None and self._thread.is_alive():
             return
         self._external_stop = stop_event
         self._stop.clear()
+        self._kick.clear()
 
-        session = self._spawn_session()
+        session: Any | None
+        failure: str | None = None
+        try:
+            session = self._spawn_session()
+        except KiroAcpError as err:
+            session = None
+            failure = str(err)
+
         with self._session_lock:
             self._session = session
+        with self._status_lock:
+            self._degraded = session is None
 
         self._thread = threading.Thread(
             target=self._monitor_loop, name="kiro-session-monitor", daemon=True
         )
         self._thread.start()
-        _sense("start", "kiro session unit started (one warm session, watchdog armed)")
+        if failure is None:
+            _sense("start", "kiro session unit started (one warm session, watchdog armed)")
+        else:
+            _sense(
+                "start",
+                f"kiro session unit started degraded (initial spawn failed: {failure}) "
+                "— retrying under watchdog",
+            )
+
+    def request_restart(self, reason: str) -> None:
+        """Drop the current session and have the watchdog respawn it NOW.
+
+        The explicit-trigger seam for a network change (``harness/app.py``
+        wires it to :class:`~reachy_nova.harness.network.NetworkUnit`'s
+        ``joined``/``moved`` transitions): a session whose kiro-cli child is
+        bound to an address that no longer exists is worthless, and waiting
+        for it to look dead costs a monitor interval plus a backoff.
+
+        Safe to call from any thread and before :meth:`start` (a unit with no
+        watchdog simply has nothing to wake). Never raises.
+        """
+        with self._session_lock:
+            session = self._session
+            self._session = None
+        with self._status_lock:
+            self._backoff = self._backoff_initial
+            self._healthy_since = None
+            self._skip_backoff_once = True
+            self._requested_reason = reason
+            self._degraded = True
+        _sense("restart", f"restart requested reason={reason}; respawning session now")
+        if session is not None:
+            try:
+                session.close()
+            except Exception as err:  # noqa: BLE001 - best-effort, never raises out
+                logger.debug("kiro_session: close() on requested restart raised: %s", err)
+        self._kick.set()
 
     def stop(self, timeout: float = 5.0) -> None:
         """Stop the watchdog, join it, and close the current session.
@@ -254,6 +339,10 @@ class KiroSessionUnit:
         with self._status_lock:
             return {
                 "alive": alive,
+                # True while the unit is up-and-retrying with no live session
+                # (a failed initial spawn, or a requested/watchdog restart that
+                # has not landed yet) — the observable half of "degraded start".
+                "degraded": self._degraded or not alive,
                 "restarts": self._restarts,
                 "prompts_served": self._prompts_served,
                 "recycles": self._recycles,
@@ -395,6 +484,7 @@ class KiroSessionUnit:
 
     def _monitor_loop(self) -> None:
         while not self._should_stop():
+            self._kick.clear()
             self._watchdog_tick()
             self._wait(self._monitor_interval)
 
@@ -403,6 +493,13 @@ class KiroSessionUnit:
         with self._session_lock:
             session = self._session
         if session is None:
+            # No session at all — a degraded start, or a requested restart that
+            # has not landed yet. This is a RESTARTABLE state, not a resting
+            # one: returning here is what left the writer absent for hours on
+            # 2026-08-26.
+            with self._status_lock:
+                self._healthy_since = None
+            self._restart_with_backoff()
             return
 
         dead = not self._session_alive(session)
@@ -434,11 +531,27 @@ class KiroSessionUnit:
         """
         with self._status_lock:
             self._restarts += 1
-            delay = self._backoff
-            self._backoff = min(self._backoff * 2.0, self._backoff_max)
+            if self._skip_backoff_once:
+                # An explicitly requested restart (network change): the caller
+                # already knows the session is worthless, so skip the wait once
+                # — but leave the ladder itself intact for the failures after.
+                self._skip_backoff_once = False
+                delay = 0.0
+            else:
+                delay = self._backoff
+                self._backoff = min(self._backoff * 2.0, self._backoff_max)
+            was_degraded = self._degraded
+            requested = self._requested_reason
+            self._requested_reason = None
 
-        _sense("restart", f"restart #{self._restarts} in {delay:.2f}s (capped exponential backoff)")
-        self._wait(delay)
+        if delay > 0.0:
+            _sense(
+                "restart",
+                f"restart #{self._restarts} in {delay:.2f}s (capped exponential backoff)",
+            )
+            self._wait(delay)
+        else:
+            _sense("restart", f"restart #{self._restarts} now (requested: {requested})")
         if self._should_stop():
             return
 
@@ -446,6 +559,8 @@ class KiroSessionUnit:
             new_session = self._spawn_session()
         except KiroAcpError as err:
             # Backoff already grew; the next watchdog tick tries again.
+            with self._status_lock:
+                self._degraded = True
             _sense("restart", f"restart failed: {err}")
             return
 
@@ -454,6 +569,13 @@ class KiroSessionUnit:
             self._session = new_session
         with self._status_lock:
             self._prompt_started_at = None
+            self._degraded = False
+        if was_degraded:
+            _sense(
+                "start",
+                f"kiro session unit recovered (session live after {self._restarts} "
+                "watchdog attempt(s))",
+            )
 
         if old_session is not None:
             try:
@@ -491,9 +613,11 @@ class KiroSessionUnit:
         return self._external_stop is not None and self._external_stop.is_set()
 
     def _wait(self, seconds: float) -> None:
-        """Sleep, interruptibly: either stop signal cuts it short."""
+        """Sleep, interruptibly: either stop signal — or a kick — cuts it short."""
         deadline = time.monotonic() + seconds
         while not self._should_stop():
+            if self._kick.is_set():
+                return
             remaining = deadline - time.monotonic()
             if remaining <= 0.0:
                 return

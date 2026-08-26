@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import random
 import threading
 import uuid
 import time
@@ -57,6 +58,47 @@ def _liveness_window() -> float:
     return value if value > 0 else DEFAULT_LIVENESS_S
 
 
+# Restart backoff (see NovaSonic._compute_restart_delay).
+#
+# With no network, a stream open attempt fails fast (AWS_IO_DNS_QUERY_FAILED)
+# and the OLD fixed-3s retry reopened a Bedrock stream every ~6s for as long
+# as the robot stayed offline. That is noisy (log spam, thread churn) and
+# gains nothing: the network is not coming back in the next 3 seconds. An
+# exponential backoff — reset once a session proves itself healthy for a
+# while — keeps a flaky network quiet without slowing down recovery once
+# the network is actually back (the very next restart uses the base delay).
+DEFAULT_RESTART_BASE_S = 3.0
+DEFAULT_RESTART_MAX_S = 60.0
+# How long a session must run cleanly (armed, at least one sign of life)
+# before a subsequent death is treated as a fresh problem rather than a
+# continuation of the same outage, resetting the backoff to the base delay.
+RESTART_HEALTHY_RESET_S = 60.0
+# Upper bound on the random jitter added on top of the backoff delay.
+RESTART_JITTER_FRACTION = 0.10
+
+
+def _restart_base_s() -> float:
+    """Base restart delay in seconds (``NOVA_SONIC_RESTART_BASE_S``, default 3)."""
+    import os
+
+    try:
+        value = float(os.environ.get("NOVA_SONIC_RESTART_BASE_S", ""))
+    except (TypeError, ValueError):
+        return DEFAULT_RESTART_BASE_S
+    return value if value > 0 else DEFAULT_RESTART_BASE_S
+
+
+def _restart_max_s() -> float:
+    """Restart delay cap in seconds (``NOVA_SONIC_RESTART_MAX_S``, default 60)."""
+    import os
+
+    try:
+        value = float(os.environ.get("NOVA_SONIC_RESTART_MAX_S", ""))
+    except (TypeError, ValueError):
+        return DEFAULT_RESTART_MAX_S
+    return value if value > 0 else DEFAULT_RESTART_MAX_S
+
+
 class NovaSonic:
     """Manages a bidirectional voice conversation with Nova Sonic."""
 
@@ -77,6 +119,7 @@ class NovaSonic:
         tools: list[dict] | None = None,
         on_tool_use: Callable[[str, str, dict], None] | None = None,
         on_interruption: Callable[[], None] | None = None,
+        restart_rng: random.Random | None = None,
     ):
         self.region = region or config.region()
         self.model_id = model_id or config.sonic_model_id()
@@ -127,6 +170,17 @@ class NovaSonic:
         # Why the current restart was forced (None = the stream simply died).
         self._forced_restart_reason: str | None = None
 
+        # Restart backoff bookkeeping (see _compute_restart_delay).
+        self._restart_attempt = 0
+        self._restart_rng = restart_rng or random.Random()
+        self._session_start_mono: float | None = None
+        self._session_had_response = False
+        # Set by request_immediate_restart(); honoured by _run_loop's wait
+        # loop even when the current session looks perfectly healthy — the
+        # caller (e.g. a network-change signal) knows better than we do.
+        self._restart_now_event = threading.Event()
+        self._immediate_restart_reason: str | None = None
+
         self.state = "idle"  # idle, listening, thinking, speaking
         self.last_user_text = ""
         self.last_assistant_text = ""
@@ -155,6 +209,9 @@ class NovaSonic:
         self._last_response_mono = mono
         self._input_since_response = False
         self._liveness_stall_seen = False
+        # Restart-backoff bookkeeping: a fresh session starts unproven.
+        self._session_start_mono = mono
+        self._session_had_response = False
 
     def _note_input_sent(self) -> None:
         """Record that we pushed something (audio or text) into the stream."""
@@ -164,6 +221,7 @@ class NovaSonic:
         """Record a sign of life from Bedrock — resets the liveness deadline."""
         self._last_response_mono = time.monotonic() if mono is None else mono
         self._input_since_response = False
+        self._session_had_response = True
 
     def _check_clock_step(self, wall: float, mono: float) -> bool:
         """True (once) when the wall clock was stepped under a live session.
@@ -208,6 +266,60 @@ class NovaSonic:
             f"for {silent_for:.0f}s (limit {window:.0f}s) — forcing a session restart"
         )
         return True
+
+    # ------------------------------------------------------------------
+    # Restart backoff
+    # ------------------------------------------------------------------
+
+    def _maybe_reset_backoff_for_healthy_session(self, death_mono: float) -> None:
+        """Reset the backoff to the base delay if the session just proved itself.
+
+        "Proved itself" means it was armed, actually heard back from Bedrock
+        at least once (a real sign of life, not merely an open socket), and
+        stayed up for at least ``RESTART_HEALTHY_RESET_S`` before dying. A
+        session that never got a response, or died quickly, is treated as a
+        continuation of the same outage and keeps escalating.
+        """
+        if self._session_start_mono is None or not self._session_had_response:
+            return
+        if death_mono - self._session_start_mono >= RESTART_HEALTHY_RESET_S:
+            self._restart_attempt = 0
+
+    def _compute_restart_delay(self) -> tuple[float, int]:
+        """Return ``(delay_seconds, attempt_number)`` for the next restart.
+
+        ``attempt_number`` is 1 on the first consecutive failure, 2 on the
+        second, and so on — reset to 1 whenever the backoff itself resets
+        (a healthy session, or ``request_immediate_restart``). The delay
+        doubles each attempt from the base, capped, then gets up to
+        ``RESTART_JITTER_FRACTION`` of extra jitter on top (also capped, so
+        the jitter can never push the delay past the ceiling).
+        """
+        attempt_number = self._restart_attempt + 1
+        base = _restart_base_s()
+        cap = _restart_max_s()
+        delay = min(base * (2 ** self._restart_attempt), cap)
+        jitter = delay * self._restart_rng.uniform(0.0, RESTART_JITTER_FRACTION)
+        delay = min(delay + jitter, cap)
+        self._restart_attempt += 1
+        return delay, attempt_number
+
+    def request_immediate_restart(self, reason: str) -> None:
+        """Ask the sonic loop to restart the stream now, bypassing backoff.
+
+        Safe to call from another thread (e.g. a network-change callback):
+        it only sets an event and resets bookkeeping — the actual restart
+        happens on the sonic loop's own thread. Restarts even a currently
+        healthy session, because the caller (who observed the network
+        change) knows something the liveness/clock watchdogs cannot: the
+        open stream is bound to an address that no longer exists. Calling
+        this twice in quick succession is harmless — the second call just
+        overwrites the reason and re-sets an already-set event.
+        """
+        self._immediate_restart_reason = reason
+        self._restart_attempt = 0
+        self._restart_now_event.set()
+        logger.info(f"Immediate restart requested: {reason}")
 
     def _should_interrupt(self, user_text: str, assistant_text: str) -> bool:
         """Ask Nova 2 Lite whether the user's speech warrants interrupting the robot."""
@@ -532,6 +644,38 @@ class NovaSonic:
         """Check if either the global or sonic-local stop has been requested."""
         return stop_event.is_set() or self._sonic_stop.is_set()
 
+    async def _interruptible_wait(self, stop_event: threading.Event, delay: float) -> None:
+        """Sleep up to ``delay`` seconds, waking early on stop or an immediate restart.
+
+        Both backoff sleeps below (a failed ``_start_session()`` and the
+        delay before reopening a dead stream) call this instead of a bare
+        ``asyncio.sleep(delay)``. A plain sleep can't observe anything until
+        it returns, so a loop already parked inside a long backoff (up to
+        the 60s cap) was deaf to both ``request_immediate_restart()`` — an
+        "immediate" restart could still take up to 60s (PR #12 finding 2) —
+        and to shutdown — stopping Sonic mid-backoff could block loop
+        termination for up to 60s (finding 3). Polling every 0.1s mirrors
+        the watchdog tick in the response-wait loop below.
+
+        When woken by the immediate-restart event (rather than by elapsing
+        or by stop), the event is consumed here — cleared — so the caller
+        can proceed straight to a zero-additional-delay restart without the
+        request lingering to fire a second, redundant break once the new
+        session's response-wait loop starts.
+        """
+        deadline = time.monotonic() + max(0.0, delay)
+        while time.monotonic() < deadline:
+            if self._should_stop(stop_event):
+                return
+            if self._restart_now_event.is_set():
+                self._restart_now_event.clear()
+                logger.info(
+                    "Immediate restart requested during backoff wait: "
+                    f"{self._immediate_restart_reason} — skipping remaining delay"
+                )
+                return
+            await asyncio.sleep(min(0.1, deadline - time.monotonic()))
+
     async def _run_loop(self, stop_event: threading.Event) -> None:
         self._inject_lock = asyncio.Lock()
 
@@ -540,14 +684,27 @@ class NovaSonic:
             try:
                 await self._start_session()
             except Exception as e:
-                logger.error(f"Session start failed: {e} — retrying in 3s")
-                await asyncio.sleep(3)
+                delay, attempt = self._compute_restart_delay()
+                logger.error(
+                    f"Session start failed: {e} — retrying in {delay:.0f}s (attempt {attempt})"
+                )
+                await self._interruptible_wait(stop_event, delay)
                 continue
 
             response_task = asyncio.create_task(self._process_responses())
             try:
                 # Wait until stop requested OR response loop dies
                 while not self._should_stop(stop_event) and not response_task.done():
+                    # An external caller (e.g. a network-change signal) knows
+                    # the current stream is doomed even though it still looks
+                    # perfectly healthy from in here — honour it immediately,
+                    # bypassing every other check below.
+                    if self._restart_now_event.is_set():
+                        self._forced_restart_reason = (
+                            f"Immediate restart requested: {self._immediate_restart_reason}"
+                        )
+                        break
+
                     # Resilience watchdogs: a stepped wall clock or a stream
                     # that swallows input without ever answering both leave a
                     # perfectly healthy-looking task behind, so neither shows
@@ -594,9 +751,23 @@ class NovaSonic:
             # system prompt only. No conversation recap is replayed.
             self._session_gen += 1  # invalidate any queued coroutines
             self._set_state("idle")
+
+            immediate = self._restart_now_event.is_set()
+            self._restart_now_event.clear()
             reason = self._forced_restart_reason or "Bedrock stream died"
             self._forced_restart_reason = None
-            logger.warning(f"{reason} — restarting session in 3s")
+
+            if immediate:
+                # request_immediate_restart() already reset the backoff —
+                # skip the delay entirely, this restart is urgent.
+                delay = 0.0
+                logger.warning(f"{reason} — restarting session now")
+            else:
+                self._maybe_reset_backoff_for_healthy_session(time.monotonic())
+                delay, attempt = self._compute_restart_delay()
+                logger.warning(
+                    f"{reason} — restarting session in {delay:.0f}s (attempt {attempt})"
+                )
 
             # Force fresh client — old client may hold stale connection state
             self._client = None
@@ -607,14 +778,24 @@ class NovaSonic:
             self._system_content = str(uuid.uuid4())
             self._audio_content = str(uuid.uuid4())
 
-            await asyncio.sleep(3)
+            await self._interruptible_wait(stop_event, delay)
             # Reset inject throttle so new session gets a quiet start
             self._last_inject_time = time.time()
 
         self._set_state("idle")
 
     def start(self, stop_event: threading.Event) -> None:
-        """Start the Nova Sonic session in a background thread."""
+        """Start the Nova Sonic session in a background thread.
+
+        NEVER raises. The Bedrock connection itself is made inside
+        ``_run_loop`` on the new thread, which already retries with backoff
+        forever, so a network-less start is simply a stream that has not
+        connected YET — not a failed component. Even the thread spawn is
+        guarded: the harness supervisor treats a raising ``start()`` as
+        ``start failed name=...`` and never retries it (the exact shape that
+        left the Kiro writer absent for hours on 2026-08-26), so a failure
+        here degrades to a named line instead.
+        """
         import traceback
 
         def _run():
@@ -629,8 +810,16 @@ class NovaSonic:
             finally:
                 loop.close()
 
-        self._thread = threading.Thread(target=_run, name="nova-sonic", daemon=True)
-        self._thread.start()
+        try:
+            self._thread = threading.Thread(target=_run, name="nova-sonic", daemon=True)
+            self._thread.start()
+        except Exception as e:  # noqa: BLE001 - a degraded voice beats a failed component
+            self._thread = None
+            sensory_stage(
+                "supervise", "nova", "component", f"component degraded name=sonic reason={e}"
+            )
+            logger.error(f"Nova Sonic thread failed to start: {e}")
+            return
         logger.info("Nova Sonic thread started")
 
     def stop(self) -> None:

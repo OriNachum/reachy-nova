@@ -118,11 +118,24 @@ def test_echo_gate_policy_defaults_off():
 # --------------------------------------------------------------------------- #
 
 
-def test_default_build_is_four_components_with_named_absences(caplog):
+def test_default_build_is_the_core_components_with_named_absences(caplog):
+    """Sonic/speaker/hearing, the network leg (t5), and the bus.
+
+    The network leg is ALWAYS present — unlike the optional legs it is cheap
+    and local (a /proc read, an ``ip addr`` call, a state-dir file), so there
+    is nothing to gate it on and nothing to degrade over.
+    """
     with caplog.at_level("INFO", logger="nova.sensory"):
         components = _build()
     names = [type(c).__name__ for c in components]
-    assert names == ["NovaSonic", "SonicSpeaker", "TeeHearing", "NovaBus"]
+    assert names == [
+        "NovaSonic",
+        "SonicSpeaker",
+        "TeeHearing",
+        "NetworkReactor",
+        "NetworkUnit",
+        "NovaBus",
+    ]
     lines = _messages(caplog)
     assert any("component absent name=browser reason=act-disabled" in m for m in lines)
     assert any("component absent name=vision reason=omni-model-unset" in m for m in lines)
@@ -139,7 +152,7 @@ def test_act_enabled_adds_a_supervised_browser_wired_for_progress(monkeypatch):
     # IntentTools wired the browser handle AND its progress narration.
     assert adapter.browser.on_progress == sonic.inject_text
     assert hasattr(adapter, "start") and hasattr(adapter, "stop")
-    assert len(components) == 5
+    assert len(components) == 7  # core 3 + network leg (2) + bus + browser
 
 
 def test_browser_component_start_and_stop_never_raise_when_disabled():
@@ -165,7 +178,7 @@ def test_omni_model_set_adds_the_vision_leg_wired_to_bus_and_sonic(monkeypatch):
     assert leg._understand.__self__.omni_model_id == "us.amazon.nova-2-omni-v1:0"
     # …and the one answer goes to Sonic's guarded inject.
     assert leg._on_answer == sonic.inject_text
-    assert len(components) == 5
+    assert len(components) == 7  # core 3 + network leg (2) + bus + vision
 
 
 def test_vision_leg_degrades_to_absent_when_the_bus_cannot_build(monkeypatch, caplog):
@@ -181,7 +194,7 @@ def test_vision_leg_degrades_to_absent_when_the_bus_cannot_build(monkeypatch, ca
     with caplog.at_level("INFO", logger="nova.sensory"):
         components = _build()
     names = [type(c).__name__ for c in components]
-    assert names == ["NovaSonic", "SonicSpeaker", "TeeHearing"]
+    assert names == ["NovaSonic", "SonicSpeaker", "TeeHearing", "NetworkReactor", "NetworkUnit"]
     lines = _messages(caplog)
     assert any("component absent name=bus" in m for m in lines)
     assert any("component absent name=vision reason=no-bus" in m for m in lines)
