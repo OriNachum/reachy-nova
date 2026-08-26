@@ -91,6 +91,7 @@ from typing import Any
 import yaml
 
 from reachy_nova import sensory_log
+from reachy_nova.harness.sense_history import SenseHistory
 
 logger = logging.getLogger(__name__)
 
@@ -443,6 +444,11 @@ class NovaBus:
         client_factory: zero-arg paho-client builder, injectable for tests.
         clock: zero-arg monotonic-seconds source for the dedupe window;
             ``None`` uses :func:`time.monotonic`. Injectable for tests.
+        history: optional :class:`~reachy_nova.harness.sense_history.SenseHistory`
+            (t8). When wired, every inject that actually reaches *on_inject*
+            (post-dedupe — a suppressed duplicate is never recorded) is also
+            appended here, so the ``recall_senses`` tool can answer "why did
+            you move?" from what really happened.
     """
 
     def __init__(
@@ -454,9 +460,11 @@ class NovaBus:
         rules_path: str | Path | None = None,
         client_factory: Callable[[], Any] | None = None,
         clock: Callable[[], float] | None = None,
+        history: SenseHistory | None = None,
     ) -> None:
         self._on_inject = on_inject
         self._on_event = on_event
+        self.history = history
         self.sources = resolve_sources(sources)
         self.broker = broker if broker is not None else broker_url()
         self.host, self.port = parse_broker_url(self.broker)
@@ -688,6 +696,17 @@ class NovaBus:
                 )
                 return
             self._last_inject_at[dedupe_key] = now
+
+        if self.history is not None:
+            rule_name = payload.get("rule") if isinstance(payload, dict) else None
+            self.history.record(
+                source,
+                event_type,
+                rule_name,
+                text,
+                rule.get("sense"),
+                rule.get("voice"),
+            )
 
         sensory_log.stage(
             STAGE_INJECT,

@@ -46,6 +46,7 @@ from .gate import EchoGate, resolve_policy
 from .hearing import TeeHearing
 from .network import NetworkUnit
 from .rules_overlay import upsert_rule
+from .sense_history import SenseHistory
 from .speaking import SonicSpeaker
 from .tools import TOOL_SPECS, IntentTools
 
@@ -60,7 +61,9 @@ HARNESS_SYSTEM_PROMPT = (
     "writes a lasting reflex that keeps working even while you sleep. Use them "
     "when someone asks you to move or react, and mention what you did in a "
     "few words. If a tool answers that the engine did not confirm, say your "
-    "body did not respond."
+    "body did not respond. "
+    "When someone asks why you did something, what you felt, or what just "
+    "happened, call recall_senses and answer from what it returns."
 )
 
 # --------------------------------------------------------------------------- #
@@ -369,10 +372,17 @@ def build_app() -> list[object]:
             "supervise", "nova", "component", "component absent name=kiro-writer reason=writer-http"
         )
 
+    # sense history (t8) — a small, cheap, in-process ring buffer, so it is
+    # ALWAYS constructed (no failure mode worth degrading over, same
+    # reasoning as the network leg) and shared between the bus, which
+    # populates it, and IntentTools, whose recall_senses tool reads it.
+    history = SenseHistory()
+
     intents = IntentTools(
         browser=browser,
         on_browse_progress=sonic.inject_text if browser is not None else None,
         forge_leg=forge_leg,
+        history=history,
     )
     if browser is not None:
         # The browse tool's own result is just the "queued" acknowledgment —
@@ -443,7 +453,7 @@ def build_app() -> list[object]:
     try:
         from .bus import NovaBus
 
-        bus_component = NovaBus(on_inject=sonic.inject_text)
+        bus_component = NovaBus(on_inject=sonic.inject_text, history=history)
         components.append(bus_component)
     except Exception as err:  # noqa: BLE001
         _stage("supervise", "nova", "component", f"component absent name=bus reason={err}")
