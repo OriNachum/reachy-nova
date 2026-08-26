@@ -111,6 +111,7 @@ forced-failover probe, not a journal line).
 
 - Verify key expiry is disabled on the `reachy-mini` node (`tailscale status --json` → `KeyExpiry` absent) — Ori reported it done after the last machine read.
 - h12 stays `low`: reproduce the cold-boot Kiro failure deliberately (power-cycle with Wi-Fi unavailable) to exercise the degraded-start path live.
+- h12: case 5 now exists in `tests/chaos/ON_ROBOT.md` for the Kiro degraded-start path (watchdog-retry proof); it is not the boot-ordering race above, which still needs the power-cycle drill.
 - The failover loop re-scans every 60 s while on the fallback (by spec); watch for Wi-Fi latency blips on `bar-nachum` from the periodic rescans and relax to 120 s if seen.
 - `pre-down.d/` symlink for the hook is not installed (not needed by the drill); add if a pre-down decision ever matters.
 - Frame parks v1 (Sonic conversation resume vs restart — restart is what ships), v3 (mDNS over the hotspot), v5 (Tailscale DERP vs direct over the hotspot NAT) remain open, nonblocking.
