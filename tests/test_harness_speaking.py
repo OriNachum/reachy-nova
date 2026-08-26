@@ -23,6 +23,8 @@ import numpy as np
 import pytest
 
 from reachy_nova.harness.gate import ECHO_GATE_ENV, EchoGate
+from reachy_nova.harness.hearing import TeeHearing
+from reachy_nova.harness.quiet import QuietState
 from reachy_nova.harness.speaking import SonicSpeaker
 
 SAMPLE_RATE = 24000
@@ -495,5 +497,161 @@ def test_a_preempt_landing_during_the_post_cuts_the_sound_again(stop_event):
         assert len(stops) == 2
         assert speaker.utterances_played == 0
         assert not gate.active
+    finally:
+        speaker.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Timed quiet (task t11): the mouth is gated, the ear is not.                 #
+# --------------------------------------------------------------------------- #
+
+
+class _QuietClock:
+    """Injectable wall clock for QuietState inside the speaker tests."""
+
+    def __init__(self, t: float = 1_800_000_000.0):
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+
+@pytest.fixture
+def quiet_state(tmp_path, monkeypatch):
+    """A QuietState on a fake clock, persisting into a tmp state dir."""
+    monkeypatch.setenv("REACHY_STATE_DIR", str(tmp_path))
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    clock = _QuietClock()
+    state = QuietState(clock=clock, grace_s=2.0)
+    return state, clock
+
+
+def _quiet_drop_lines(caplog) -> list[str]:
+    return [
+        rec.getMessage()
+        for rec in caplog.records
+        if "event=quiet-drop]" in rec.getMessage()
+    ]
+
+
+def _quiet_resume_lines(caplog) -> list[str]:
+    return [
+        rec.getMessage()
+        for rec in caplog.records
+        if "event=quiet-resume]" in rec.getMessage()
+    ]
+
+
+def test_utterances_are_dropped_while_quiet_and_summarised_after(
+    stop_event, quiet_state, caplog
+):
+    state, clock = quiet_state
+    gate = EchoGate(margin_s=0.05)
+    poster = RecordingPoster()
+    failures: list[int] = []
+    speaker = SonicSpeaker(
+        gate,
+        sample_rate=SAMPLE_RATE,
+        poster=poster,
+        on_playback_failure=lambda: failures.append(1),
+        quiet=state,
+    )
+    speaker.start(stop_event)
+    try:
+        with caplog.at_level(logging.INFO, logger="nova.sensory"):
+            state.arm(10)
+            clock.advance(3.0)  # the acknowledgement grace lapses unused
+            for _ in range(3):
+                speak_utterance(speaker, [make_chunk(2400)])
+            assert wait_until(lambda: speaker.quiet_drops == 3)
+            time.sleep(0.05)
+
+            assert poster.calls == []  # the mouth never posted
+            assert failures == []  # a quiet drop is NOT mouth loss
+            assert gate.remaining() == 0.0  # the echo gate was never armed
+            assert speaker.utterances_played == 0
+            assert len(_quiet_drop_lines(caplog)) == 1  # latched
+
+            # After the deadline the next utterance plays, and the silence is
+            # summarised with what it cost.
+            clock.advance(601.0)
+            speak_utterance(speaker, [make_chunk(2400)])
+            assert poster.wait_for_calls(1)
+            assert wait_until(lambda: _quiet_resume_lines(caplog))
+        summary = _quiet_resume_lines(caplog)
+        assert len(summary) == 1
+        assert "count=3" in summary[0]
+        assert speaker.utterances_played == 1
+    finally:
+        speaker.stop()
+
+
+def test_the_first_utterance_after_arm_is_spoken_then_the_mouth_closes(
+    stop_event, quiet_state
+):
+    """"okay, quiet for ten minutes" must be heard — the gate closes after it."""
+    state, _clock = quiet_state
+    gate = EchoGate(margin_s=0.0)
+    poster = RecordingPoster()
+    speaker = SonicSpeaker(gate, sample_rate=SAMPLE_RATE, poster=poster, quiet=state)
+    speaker.start(stop_event)
+    try:
+        state.arm(10)
+        speak_utterance(speaker, [make_chunk(2400)])
+        assert poster.wait_for_calls(1)
+        speak_utterance(speaker, [make_chunk(2400)])
+        assert wait_until(lambda: speaker.quiet_drops == 1)
+        time.sleep(0.05)
+        assert len(poster.calls) == 1
+        assert speaker.utterances_played == 1
+    finally:
+        speaker.stop()
+
+
+def test_the_acknowledgement_grace_expires_on_its_own(stop_event, quiet_state):
+    """No utterance within the grace: the mouth closes anyway."""
+    state, clock = quiet_state
+    gate = EchoGate(margin_s=0.0)
+    poster = RecordingPoster()
+    speaker = SonicSpeaker(gate, sample_rate=SAMPLE_RATE, poster=poster, quiet=state)
+    speaker.start(stop_event)
+    try:
+        state.arm(10)
+        clock.advance(2.5)  # grace_s = 2.0
+        speak_utterance(speaker, [make_chunk(2400)])
+        assert wait_until(lambda: speaker.quiet_drops == 1)
+        time.sleep(0.05)
+        assert poster.calls == []
+        assert speaker.utterances_played == 0
+    finally:
+        speaker.stop()
+
+
+def test_quiet_never_reaches_the_ear(stop_event, quiet_state, monkeypatch):
+    """Quiet closes the mouth only: hearing keeps feeding under policy 'off'."""
+    monkeypatch.delenv(ECHO_GATE_ENV, raising=False)
+    state, clock = quiet_state
+    gate = EchoGate(margin_s=0.05)
+    poster = RecordingPoster()
+    speaker = SonicSpeaker(gate, sample_rate=SAMPLE_RATE, poster=poster, quiet=state)
+
+    fed: list[int] = []
+    ear = TeeHearing(feed=lambda chunk: fed.append(len(chunk)), gate=gate)
+    assert ear.echo_gate_policy == "off"
+    chunk_bytes = 4 * 1600  # 100 ms of float32 at 16 kHz
+
+    speaker.start(stop_event)
+    try:
+        state.arm(10)
+        clock.advance(3.0)
+        for _ in range(3):
+            speak_utterance(speaker, [make_chunk(2400)])
+        assert wait_until(lambda: speaker.quiet_drops == 3)
+        ear._drain(bytearray(b"\x00" * chunk_bytes * 2), 16000, chunk_bytes)
+        assert len(fed) == 2
+        assert ear.chunks_gated == 0
     finally:
         speaker.stop()
