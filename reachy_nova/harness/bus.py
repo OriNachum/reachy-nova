@@ -344,6 +344,72 @@ def route_event(
     return text, REASON_INJECT
 
 
+#: Env var overriding the per-key inject dedupe window (seconds).
+DEDUPE_WINDOW_ENV = "NOVA_SENSE_DEDUPE_S"
+#: Default dedupe window — comfortably past the ~8s gap observed live
+#: between a runtime's shipped reflex fire and a Kiro-authored overlay
+#: rule's own fire for the same physical pat.
+DEFAULT_DEDUPE_WINDOW_S = 10.0
+
+
+def dedupe_window_s(env: dict[str, str] | None = None) -> float:
+    """The per-key inject dedupe window in seconds (default 10s).
+
+    Reads ``NOVA_SENSE_DEDUPE_S``, parsed defensively: unset, blank,
+    non-numeric or non-positive values all fall back to the default rather
+    than raising or (worse) silently disabling the window.
+    """
+    source_env = os.environ if env is None else env
+    raw = source_env.get(DEDUPE_WINDOW_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_DEDUPE_WINDOW_S
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "bus: unparseable %s=%r; using default %.1fs",
+            DEDUPE_WINDOW_ENV,
+            raw,
+            DEFAULT_DEDUPE_WINDOW_S,
+        )
+        return DEFAULT_DEDUPE_WINDOW_S
+    if value <= 0:
+        logger.warning(
+            "bus: non-positive %s=%r; using default %.1fs",
+            DEDUPE_WINDOW_ENV,
+            raw,
+            DEFAULT_DEDUPE_WINDOW_S,
+        )
+        return DEFAULT_DEDUPE_WINDOW_S
+    return value
+
+
+def dedupe_key_for(
+    source: str,
+    event_type: str,
+    payload: dict[str, Any] | None,
+    rule: dict[str, Any],
+) -> str:
+    """The dedupe key for one routed event: the rule's ``sense`` class if it
+    names one, else the exact resolved key (``"<source>/<type>:<rule>"`` when
+    the payload names a runtime rule, else ``"<source>/<type>"``).
+
+    Deliberately NEVER guesses a class from a rule name — two differently
+    named, un-classed rule/fire events must dedupe independently (a generic
+    reflex fire is not assumed related to another just because both are
+    unclassed). Only an explicit ``sense:`` field in rules.yaml collapses
+    two distinctly-named events into one dedupe bucket.
+    """
+    sense = rule.get("sense")
+    if isinstance(sense, str) and sense:
+        return sense
+    if isinstance(payload, dict):
+        rule_name = payload.get("rule")
+        if isinstance(rule_name, str) and rule_name:
+            return f"{source}/{event_type}:{rule_name}"
+    return f"{source}/{event_type}"
+
+
 def harness_state_payload(status: str) -> str:
     """The retained ``nova/harness/state`` body (also used for the Last Will)."""
     return json.dumps({"status": status, "ts": time.time()}, separators=(",", ":"))
@@ -375,6 +441,8 @@ class NovaBus:
         broker: broker URL; ``None`` reads ``REACHY_MQTT_URL``.
         rules_path: nervous-system rules file; ``None`` uses the repo's.
         client_factory: zero-arg paho-client builder, injectable for tests.
+        clock: zero-arg monotonic-seconds source for the dedupe window;
+            ``None`` uses :func:`time.monotonic`. Injectable for tests.
     """
 
     def __init__(
@@ -385,6 +453,7 @@ class NovaBus:
         broker: str | None = None,
         rules_path: str | Path | None = None,
         client_factory: Callable[[], Any] | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._on_inject = on_inject
         self._on_event = on_event
@@ -400,6 +469,13 @@ class NovaBus:
         self._connected = False
         self._runtime_online = False
         self._stopped = False
+        # Per-key inject dedupe (t7) — collapses two distinct rule/fire
+        # events for the same physical sense (e.g. a shipped reflex and a
+        # Kiro overlay rule both firing on one pat) into a single inject.
+        self._clock = clock or time.monotonic
+        self._dedupe_window_s = dedupe_window_s()
+        self._dedupe_lock = threading.Lock()
+        self._last_inject_at: dict[str, float] = {}
         # Retained reachy/state/clip cache — the vision leg's read seam.
         self._clip_lock = threading.Lock()
         self._clip_state: dict[str, Any] | None = None
@@ -596,6 +672,23 @@ class NovaBus:
             return
 
         rule = rule_for(self.rules, source, event_type, payload)
+
+        dedupe_key = dedupe_key_for(source, event_type, payload, rule)
+        now = self._clock()
+        with self._dedupe_lock:
+            last_at = self._last_inject_at.get(dedupe_key)
+            if last_at is not None and (now - last_at) < self._dedupe_window_s:
+                age = now - last_at
+                sensory_log.stage(
+                    STAGE_INJECT,
+                    SOURCE,
+                    "dedupe",
+                    f"suppressed key={dedupe_key} age={age:.2f}s "
+                    f"window={self._dedupe_window_s:.1f}s",
+                )
+                return
+            self._last_inject_at[dedupe_key] = now
+
         sensory_log.stage(
             STAGE_INJECT,
             SOURCE,
