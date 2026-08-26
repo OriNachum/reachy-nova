@@ -130,8 +130,7 @@ Quoted verbatim from the `devague summary` skeleton:
 - `d3` — Chaos case 5 injects the fault by moving `kiro-cli` out of
   `~/.local/bin` instead of `KIRO_CLI_BIN=/nonexistent` — `KIRO_CLI_BIN` is read
   from `os.environ`, populated once by `load_dotenv` at harness start, so the
-  plan's knob cannot recover without a harness restart. **Proposed, awaiting
-  approval** at the time of writing.
+  plan's knob cannot recover without a harness restart. Approved.
 - Qodo on reachy-mini-cli #173 found that lock ownership frozen at
   acquisition breaks the lock invariant when a required name was already
   operator-held; ownership is now recomputed on every replacement
