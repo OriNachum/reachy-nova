@@ -17,8 +17,9 @@ from reachy_nova.harness import app, rules_overlay, statedir
 from reachy_nova.harness.bus import NovaBus
 from reachy_nova.harness.gate import EchoGate
 from reachy_nova.harness.hearing import TeeHearing
+from reachy_nova.harness.sense_history import SenseHistory
 from reachy_nova.harness.speaking import SonicSpeaker
-from reachy_nova.harness.tools import TOOL_SPECS
+from reachy_nova.harness.tools import TOOL_SPECS, IntentTools
 from reachy_nova.harness.vision_leg import VisionLeg
 from reachy_nova.nova_browser import NovaBrowser
 from reachy_nova.nova_omni import NovaOmni
@@ -198,6 +199,54 @@ def test_vision_leg_degrades_to_absent_when_the_bus_cannot_build(monkeypatch, ca
     lines = _messages(caplog)
     assert any("component absent name=bus" in m for m in lines)
     assert any("component absent name=vision reason=no-bus" in m for m in lines)
+
+
+# --------------------------------------------------------------------------- #
+# recall_senses / SenseHistory wiring (t8)                                    #
+# --------------------------------------------------------------------------- #
+
+
+def test_system_prompt_tells_nova_to_recall_senses():
+    assert "recall_senses" in app.HARNESS_SYSTEM_PROMPT
+
+
+def test_bus_and_intents_share_the_same_sense_history(monkeypatch):
+    captured: dict = {}
+    real_intent_tools = IntentTools
+
+    def _spy(*args, **kwargs):
+        captured["history"] = kwargs.get("history")
+        return real_intent_tools(*args, **kwargs)
+
+    monkeypatch.setattr(app, "IntentTools", _spy)
+
+    components = _build()
+    bus_component = next(c for c in components if isinstance(c, NovaBus))
+
+    assert isinstance(captured["history"], SenseHistory)
+    assert bus_component.history is captured["history"]
+
+
+def test_bus_history_is_wired_even_when_bus_construction_is_absent(monkeypatch):
+    """The history is cheap/local and always built, regardless of the bus."""
+    import reachy_nova.harness.bus as bus_module
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("no paho on this box")
+
+    monkeypatch.setattr(bus_module, "NovaBus", _boom)
+
+    captured: dict = {}
+    real_intent_tools = IntentTools
+
+    def _spy(*args, **kwargs):
+        captured["history"] = kwargs.get("history")
+        return real_intent_tools(*args, **kwargs)
+
+    monkeypatch.setattr(app, "IntentTools", _spy)
+
+    _build()
+    assert isinstance(captured["history"], SenseHistory)
 
 
 # --------------------------------------------------------------------------- #

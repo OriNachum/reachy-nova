@@ -27,6 +27,7 @@ from reachy_nova.harness import statedir
 from reachy_nova.harness.tools import (
     BROWSE_DISABLED_REASON,
     BROWSE_NOT_WIRED_REASON,
+    DEFAULT_RECALL_SENSES_N,
     DEFAULT_VOICE_STEP,
     DEGRADED_NOTE,
     ENROLL_FACE_TARGET,
@@ -34,8 +35,11 @@ from reachy_nova.harness.tools import (
     ENROLL_NAME_TOO_LONG_REASON,
     ENROLL_NAME_UNPRINTABLE_REASON,
     ENROLL_OP,
+    HISTORY_NOT_WIRED_REASON,
     MAX_ENROLL_NAME_LEN,
+    MAX_RECALL_SENSES_N,
     MAX_VOICE_LEVEL,
+    MIN_RECALL_SENSES_N,
     MIN_VOICE_LEVEL,
     TOOL_SPECS,
     VOICE_NOT_WIRED_REASON,
@@ -65,6 +69,9 @@ EXPECTED_TOOLS = (
     "raise_voice",
     "lower_voice",
     "set_voice_level",
+    # recall_senses (task t8) — reads the SenseHistory ring buffer directly,
+    # never through the intents spool.
+    "recall_senses",
 )
 
 #: ``<time.time_ns()>-<uuid4.hex>.json``
@@ -945,3 +952,106 @@ def test_voice_level_bounds_are_sane():
     assert MIN_VOICE_LEVEL == 10
     assert MAX_VOICE_LEVEL == 100
     assert DEFAULT_VOICE_STEP == 10
+
+
+# --------------------------------------------------------------------------- #
+# recall_senses (task t8) — reads SenseHistory directly, never the spool      #
+# --------------------------------------------------------------------------- #
+
+
+class FakeSenseHistory:
+    """Stub of ``sense_history.SenseHistory`` — no clock, just records calls."""
+
+    def __init__(self, entries=None):
+        self._entries = list(entries or [])
+        self.recent_calls: list[int] = []
+
+    def recent(self, n=5):
+        self.recent_calls.append(n)
+        return self._entries[:n]
+
+
+@pytest.fixture
+def history():
+    return FakeSenseHistory(
+        entries=[
+            {"t": 3.0, "age_s": 0.5, "source": "rule", "type": "fire", "rule": "hear",
+             "text": "third", "sense_class": None, "voice": None},
+            {"t": 2.0, "age_s": 1.5, "source": "face", "type": "recognized", "rule": None,
+             "text": "second", "sense_class": None, "voice": None},
+            {"t": 1.0, "age_s": 2.5, "source": "pat", "type": "level1", "rule": "pat-acknowledge",
+             "text": "first", "sense_class": "touch", "voice": "brief"},
+        ]
+    )
+
+
+@pytest.fixture
+def recall_tools(state_dir, history):
+    return IntentTools(await_timeout=0.15, history=history)
+
+
+def test_recall_senses_returns_the_wired_historys_entries(recall_tools, history):
+    result = json.loads(recall_tools.execute("recall_senses", {}))
+    assert result["ok"] is True
+    assert result["senses"] == history._entries
+    assert history.recent_calls == [DEFAULT_RECALL_SENSES_N]
+
+
+def test_recall_senses_passes_n_through(recall_tools, history):
+    json.loads(recall_tools.execute("recall_senses", {"n": 2}))
+    assert history.recent_calls == [2]
+
+
+@pytest.mark.parametrize("n,expected", [(0, MIN_RECALL_SENSES_N), (-5, MIN_RECALL_SENSES_N),
+                                         (1, 1), (20, 20), (21, MAX_RECALL_SENSES_N),
+                                         (999, MAX_RECALL_SENSES_N)])
+def test_recall_senses_clamps_n_into_bounds(recall_tools, history, n, expected):
+    json.loads(recall_tools.execute("recall_senses", {"n": n}))
+    assert history.recent_calls == [expected]
+
+
+def test_recall_senses_refused_when_not_wired(tools):
+    result = json.loads(tools.execute("recall_senses", {}))
+    assert result == {"ok": False, "error": HISTORY_NOT_WIRED_REASON}
+
+
+def test_recall_senses_never_touches_the_spool(recall_tools):
+    recall_tools.execute("recall_senses", {"n": 3})
+    assert spooled() == []
+
+
+def test_recall_senses_logs_one_sense_line_on_success(recall_tools, caplog):
+    with caplog.at_level(logging.INFO, logger="nova.sensory"):
+        recall_tools.execute("recall_senses", {})
+    (line,) = _sense_lines(caplog)
+    assert "[SENSE stage=act source=nova event=recall_senses]" in line
+    assert "confirmed" in line
+
+
+def test_recall_senses_logs_one_sense_line_when_not_wired(tools, caplog):
+    with caplog.at_level(logging.INFO, logger="nova.sensory"):
+        tools.execute("recall_senses", {})
+    (line,) = _sense_lines(caplog)
+    assert "[SENSE stage=act source=nova event=recall_senses]" in line
+    assert "refused" in line
+
+
+def test_recall_senses_tool_spec_has_no_required_fields():
+    (spec,) = [s for s in TOOL_SPECS if s["toolSpec"]["name"] == "recall_senses"]
+    schema = json.loads(spec["toolSpec"]["inputSchema"]["json"])
+    assert schema["required"] == []
+    assert set(schema["properties"]) == {"n"}
+
+
+def test_recall_senses_tool_spec_names_the_trigger_and_forbids_mechanism_talk():
+    (spec,) = [s for s in TOOL_SPECS if s["toolSpec"]["name"] == "recall_senses"]
+    description = spec["toolSpec"]["description"].lower()
+    assert "why" in description
+    assert "felt" in description or "feel" in description
+    assert "happened" in description
+
+
+def test_recall_senses_bounds_are_sane():
+    assert MIN_RECALL_SENSES_N == 1
+    assert MAX_RECALL_SENSES_N == 20
+    assert DEFAULT_RECALL_SENSES_N == 5

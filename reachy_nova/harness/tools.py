@@ -81,6 +81,7 @@ AUTHOR_RULE = "author_rule"
 RAISE_VOICE = "raise_voice"
 LOWER_VOICE = "lower_voice"
 SET_VOICE_LEVEL = "set_voice_level"
+RECALL_SENSES = "recall_senses"
 
 #: The harness's ENTIRE action set, in publication order. Each addition past
 #: the original six is a deliberate widening of the blast radius, never an
@@ -88,7 +89,11 @@ SET_VOICE_LEVEL = "set_voice_level"
 #: :class:`~reachy_nova.nova_browser.NovaBrowser`, not the intents spool, and
 #: stays refused whenever ``NOVA_ACT_ENABLED`` is off. ``enroll_face`` (task t8)
 #: is the second: it is spool-backed like the original five, but writes a
-#: durable identity rather than a transient pose.
+#: durable identity rather than a transient pose. ``recall_senses`` (task t8)
+#: is the third: like the voice-level tools it is dispatched locally rather
+#: than through the intents spool, reading the in-process
+#: :class:`~reachy_nova.harness.sense_history.SenseHistory` ring buffer
+#: instead of talking to the runtime at all.
 ACTION_SET: tuple[str, ...] = (
     RUN_BEHAVIOR,
     DECLARE_GOAL,
@@ -104,6 +109,7 @@ ACTION_SET: tuple[str, ...] = (
     RAISE_VOICE,
     LOWER_VOICE,
     SET_VOICE_LEVEL,
+    RECALL_SENSES,
 )
 
 #: Seconds a tool call waits for the engine to confirm before degrading.
@@ -192,6 +198,19 @@ DEFAULT_VOICE_STEP = 10
 #: without a wired :class:`~reachy_nova.harness.daemon_client.DaemonClient`
 #: (mirrors ``FORGE_NOT_WIRED_REASON``'s component-absent shape).
 VOICE_NOT_WIRED_REASON = "voice level control is not wired up yet"
+
+#: ``recall_senses`` (task t8) — bounds on how many recent senses a call may
+#: ask for. Out-of-range values are CLAMPED, never refused: a model asking for
+#: too much/too little history should still get a usable answer, same
+#: philosophy as the voice-level tools' clamp-not-refuse.
+MIN_RECALL_SENSES_N = 1
+MAX_RECALL_SENSES_N = 20
+DEFAULT_RECALL_SENSES_N = 5
+
+#: Refusal when ``recall_senses`` is called without a wired
+#: :class:`~reachy_nova.harness.sense_history.SenseHistory` (mirrors
+#: ``VOICE_NOT_WIRED_REASON``'s component-absent shape).
+HISTORY_NOT_WIRED_REASON = "sense history not wired"
 
 
 class ToolRefused(ValueError):
@@ -540,6 +559,25 @@ TOOL_SPECS: list[dict] = [
             "required": ["volume"],
         },
     ),
+    _spec(
+        RECALL_SENSES,
+        "Recall what you actually just sensed and did: use it when someone "
+        "asks why you moved, what you felt, or what just happened, and answer "
+        "from the actual entries in your own words — never describe internal "
+        "mechanisms like tools, injects, or rules.",
+        {
+            "type": "object",
+            "properties": {
+                "n": {
+                    "type": "integer",
+                    "description": f"How many recent senses to recall, "
+                    f"{MIN_RECALL_SENSES_N}-{MAX_RECALL_SENSES_N}. Omit for the "
+                    f"default ({DEFAULT_RECALL_SENSES_N}).",
+                },
+            },
+            "required": [],
+        },
+    ),
 ]
 
 
@@ -745,6 +783,7 @@ class IntentTools:
         on_browse_progress: Callable[[str], None] | None = None,
         forge_leg: object | None = None,
         daemon_client: object | None = None,
+        history: object | None = None,
     ) -> None:
         # ``forge``/``use_skill`` (deviation d1) drive a ForgeLeg handle the
         # same way ``browse`` drives a NovaBrowser: injected, and refused with
@@ -754,6 +793,9 @@ class IntentTools:
         # a DaemonClient handle directly — not spool-backed, refused with a
         # named reason when absent, same shape as the browser/forge legs.
         self._daemon_client = daemon_client
+        # ``recall_senses`` (task t8) reads a SenseHistory ring buffer
+        # directly — same absent-component shape again, never half-working.
+        self._history = history
         self._commands_dir = Path(commands_dir) if commands_dir is not None else None
         self._results_dir = Path(results_dir) if results_dir is not None else None
         self.await_timeout = float(await_timeout)
@@ -860,6 +902,8 @@ class IntentTools:
             return self._forge_tool(tool_name, params)
         if tool_name in VOICE_TOOLS:
             return self._voice_tool(tool_name, params)
+        if tool_name == RECALL_SENSES:
+            return self._recall_senses(params)
         return self.submit_and_await(_BUILDERS[tool_name](params))
 
     def _forge_tool(self, tool_name: str, params: Mapping) -> dict:
@@ -995,6 +1039,28 @@ class IntentTools:
         if note:
             payload["note"] = note
         return payload, current, applied
+
+    # -- recall_senses (task t8) -------------------------------------------
+
+    def _recall_senses(self, params: Mapping) -> dict:
+        """``recall_senses`` — read back the actual recent sense history.
+
+        Refused (before ever touching ``self._history``) when no
+        :class:`~reachy_nova.harness.sense_history.SenseHistory` was wired at
+        construction. ``n`` is CLAMPED into ``[MIN_RECALL_SENSES_N,
+        MAX_RECALL_SENSES_N]`` rather than refused — same clamp-not-refuse
+        philosophy as the voice-level tools, since the model asking for too
+        much/too little history should still get a usable answer.
+        """
+        if self._history is None:
+            raise ToolRefused(HISTORY_NOT_WIRED_REASON)
+        raw_n = params.get("n")
+        if raw_n is None:
+            n = DEFAULT_RECALL_SENSES_N
+        else:
+            n = int(_number(raw_n, "'n'"))
+        clamped = max(MIN_RECALL_SENSES_N, min(MAX_RECALL_SENSES_N, n))
+        return {"ok": True, "senses": self._history.recent(clamped)}
 
 
 # --------------------------------------------------------------------------- #

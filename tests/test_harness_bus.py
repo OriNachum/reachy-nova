@@ -29,6 +29,7 @@ import pytest
 import yaml
 
 from reachy_nova.harness import bus
+from reachy_nova.harness.sense_history import SenseHistory
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RULES_PATH = REPO_ROOT / "config" / "nervous-system" / "rules.yaml"
@@ -734,3 +735,126 @@ def test_rules_yaml_still_parses_as_yaml():
     with open(RULES_PATH) as handle:
         raw = yaml.safe_load(handle)
     assert isinstance(raw["rules"], dict)
+
+
+# --------------------------------------------------------------------------- #
+# SenseHistory wiring (t8) — every inject that reaches on_inject is recorded  #
+# --------------------------------------------------------------------------- #
+
+
+def _custom_rules_path(tmp_path):
+    cfg = {
+        "rules": {
+            "pat/level1": {
+                "priority": "HIGH",
+                "urgency": "IMMEDIATE",
+                "inject_template": "someone is petting you",
+                "sense": "touch",
+                "voice": "brief",
+            },
+            "face/recognized": {
+                "priority": "NORMAL",
+                "urgency": "DEFERRABLE",
+                "inject_template": "{name} is looking at you",
+            },
+            "rule/fire": {
+                "priority": "LOW",
+                "urgency": "DEFERRABLE",
+                "inject_template": "a reflex fired: {rule}",
+            },
+        },
+        "default": {"priority": "NORMAL", "urgency": "DEFERRABLE"},
+    }
+    path = tmp_path / "rules.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    return path
+
+
+def test_history_records_a_routed_inject_with_source_type_and_text(tmp_path):
+    rec = Recorder()
+    history = SenseHistory()
+    nb = make_bus(rec, rules_path=_custom_rules_path(tmp_path), history=history)
+    nb.on_message(
+        None, None, fake_msg("reachy/events/pat/level1", {"t": "pat", "ts": 1.0, "level": 1})
+    )
+    (entry,) = history.recent()
+    assert entry["source"] == "pat"
+    assert entry["type"] == "level1"
+    assert entry["text"] == rec.injects[0]
+    assert entry["sense_class"] == "touch"
+    assert entry["voice"] == "brief"
+
+
+def test_history_records_three_routed_senses_in_order():
+    rec = Recorder()
+    history = SenseHistory()
+    nb = make_bus(rec, history=history, sources="pat,face,rule")
+    nb.on_message(
+        None, None, fake_msg("reachy/events/pat/level1", {"t": "pat", "ts": 1.0, "level": 1})
+    )
+    nb.on_message(
+        None,
+        None,
+        fake_msg("reachy/events/face/recognized", {"t": "face", "ts": 2.0, "name": "Ori"}),
+    )
+    nb.on_message(
+        None,
+        None,
+        fake_msg(
+            "reachy/events/rule/fire",
+            {"t": "rule", "ts": 3.0, "rule": "hear-something-different"},
+        ),
+    )
+    entries = history.recent(3)
+    # newest first — the third routed event is entries[0]
+    assert [e["source"] for e in entries] == ["rule", "face", "pat"]
+    assert [e["type"] for e in entries] == ["fire", "recognized", "level1"]
+    # timestamps are strictly increasing in recording order, so newest-first
+    # is descending.
+    ts = [e["t"] for e in entries]
+    assert ts == sorted(ts, reverse=True)
+    assert len(ts) == len(set(ts))
+
+
+def test_history_does_not_record_a_no_template_drop():
+    rec = Recorder()
+    history = SenseHistory()
+    nb = make_bus(rec, history=history, sources="sense")
+    nb.on_message(
+        None,
+        None,
+        fake_msg(
+            "reachy/events/sense/snapshot",
+            {"t": "sense", "ts": 1.0, "tick": 1, "doa": None},
+        ),
+    )
+    assert rec.injects == []
+    assert history.recent() == []
+
+
+def test_history_does_not_record_a_deduped_suppressed_inject(tmp_path):
+    rec = Recorder()
+    history = SenseHistory()
+    clock_state = {"t": 0.0}
+    nb = make_bus(
+        rec,
+        rules_path=_custom_rules_path(tmp_path),
+        history=history,
+        clock=lambda: clock_state["t"],
+    )
+    msg = fake_msg("reachy/events/pat/level1", {"t": "pat", "ts": 1.0, "level": 1})
+    nb.on_message(None, None, msg)
+    clock_state["t"] += 1.0  # well inside the default 10s dedupe window
+    nb.on_message(None, None, msg)
+    assert len(rec.injects) == 1
+    assert len(history.recent(10)) == 1
+
+
+def test_bus_with_no_history_wired_never_raises():
+    rec = Recorder()
+    nb = make_bus(rec, sources="pat")
+    nb.on_message(
+        None, None, fake_msg("reachy/events/pat/level1", {"t": "pat", "ts": 1.0, "level": 1})
+    )
+    assert len(rec.injects) == 1
+    assert nb.history is None
