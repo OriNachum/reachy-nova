@@ -8,6 +8,9 @@ The wire contract is filesystem paths under one state dir:
 - rules overlay:  ``<state>/behavior/rules.toml``
 - engine heartbeat: ``<state>/behavior/state.json`` ``updated`` field
 - audio tee:      ``<state>/audio_tee.sock`` (or ``$REACHY_AUDIO_TEE_SOCKET``)
+- network change: ``<state>/network-change`` (JSON ``{ssid, ip, ts}``, written
+  atomically by the NetworkManager dispatcher hook — see
+  :mod:`reachy_nova.harness.network`)
 """
 
 from __future__ import annotations
@@ -65,6 +68,11 @@ def audio_tee_socket() -> Path:
     if explicit:
         return Path(explicit)
     return state_dir() / "audio_tee.sock"
+
+
+def network_change_path() -> Path:
+    """The dispatcher hook's drop file — see :mod:`reachy_nova.harness.network`."""
+    return state_dir() / "network-change"
 
 
 def harness_pid_path() -> Path:
