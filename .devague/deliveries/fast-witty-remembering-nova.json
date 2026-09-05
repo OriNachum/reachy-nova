@@ -1,0 +1,658 @@
+{
+  "plan_slug": "fast-witty-remembering-nova",
+  "schema_version": 2,
+  "created": "2026-09-05T22:22:38Z",
+  "updated": "2026-09-05T23:56:07Z",
+  "deviations": [
+    {
+      "id": "d1",
+      "what": "Fixed a pre-existing race in tests/chaos/test_chaos_aws_loss.py (the flap test healed the poster on the failure counter, which is bumped before the mouth-loss purge; it now also waits for speaker.idle). Commit 8aae6c2 on the spec branch, outside any plan task.",
+      "task_ref": "t11",
+      "reason": "t11's tests added enough scheduler load that the race failed ~1 in 3 parallel runs, blocking the TDD gate; the reactor itself was not at fault (pre-t11 tree 18/18 clean, chaos test alone 10/10).",
+      "affects": [
+        "t11"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable",
+      "seq": 1
+    },
+    {
+      "id": "d2",
+      "what": "Task branches are named agent/fwrn-<task> instead of the skill's agent/<task> convention: agent/t3..t8 already existed from the kiro-writer round and were never deleted.",
+      "task_ref": "t1",
+      "reason": "avoid reusing or deleting another round's branches",
+      "affects": [],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable",
+      "seq": 2
+    },
+    {
+      "id": "d3",
+      "what": "t8's chunked speaker waits out the previous chunk's AUDIO before posting the next, not the echo gate's padded window (gate.remaining() <= 0) as the acceptance criterion literally said; whole-utterance mode keeps the literal wait. It also moved the playback_failures increment after the mouth-loss purge (the counter now names a fully handled failure).",
+      "task_ref": "t8",
+      "reason": "app.py builds EchoGate() with margin_s=1.0 for the EAR (echo tail); paying it between chunks of one sentence would insert 1 s of silence per chunk \u2014 worse than the delay being fixed. The margin still gates hearing (gate.active) for the whole window. Pinned by two tests in tests/test_harness_speaking.py.",
+      "affects": [
+        "t8",
+        "t18"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable",
+      "seq": 3
+    },
+    {
+      "id": "d4",
+      "what": "Mood reaches Sonic only indirectly: mood.render() is fed into the Lite reactor's context (so opted-in reaction plans reflect it), but no mood sentence is injected into Sonic directly or included in the history replay block. Assumption c9 said 'rendered into the context Sonic and Lite see'.",
+      "task_ref": "t14",
+      "reason": "Injecting a mood sentence on every cue would add noise to the live voice model; the Lite plans already carry it. Left as-is pending Ori's call; a one-line follow-up if wanted (prefix mood to the compactor's replay context block).",
+      "affects": [
+        "t14",
+        "t18"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "needs-follow-up",
+      "seq": 4
+    },
+    {
+      "id": "d5",
+      "what": "t17 deployed without a pip reinstall although pyproject.toml changed: the only change is the version line (0.3.0 -> 0.4.0), no dependency changed, and the device runs an editable install from the checkout. The installed metadata version stays 0.3.0 until the next reinstall.",
+      "task_ref": "t17",
+      "reason": "A pip install on the CM4 takes many minutes and the root disk is at 91 % with 1.3 GB free; the code that runs is the checkout's, so nothing behavioural depends on the metadata version.",
+      "affects": [
+        "t17"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable",
+      "seq": 5
+    },
+    {
+      "id": "d6",
+      "what": "Post-deploy fix (outside any plan task): Nova 2 Sonic's contentEnd carries no role field on the wire (journal: 'contentEnd type=AUDIO role=? stopReason=END_TURN'), so the speaking state now also ends on an AUDIO END_TURN; a PARTIAL_TURN keeps speaking. Answers the hard question on c2.",
+      "task_ref": "t2",
+      "reason": "With the role check alone every turn ended on the 4 s speaking watchdog, which delayed deferred cues (c6/h4) by 4 s and kept the speaking guard up 4 s longer than needed.",
+      "affects": [
+        "t2",
+        "t9",
+        "t18"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable",
+      "seq": 28
+    },
+    {
+      "id": "d7",
+      "what": "Post-deploy fix narrowing confirmed h18: liveness input is now a sustained speech burst (at least 5 of the last 20 mic chunks above a 0.02 floor, was one chunk above 0.01), and text injects / tool results no longer count as input at all \u2014 h18's clause 'an inject or tool result still counts as input' no longer holds.",
+      "task_ref": "t2",
+      "reason": "Deployed 0.4.0 still restarted a quiet room at 00:12:20 (3 min after the last reply): measured mic RMS median 0.005 with one chunk in ten above 0.02 even at midnight, so one loud chunk latched 'input flowing'; and a quiet body cue inject legitimately gets no reply, which the old rule read as a zombie. The zombie signature that matters (a person speaks, nothing comes back for 180 s) is still detected; the clock-step watchdog is untouched.",
+      "affects": [
+        "t2",
+        "t18"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "risky",
+      "seq": 29
+    },
+    {
+      "id": "d8",
+      "what": "Post-deploy incident and fix (outside any plan task): the first memory replay opened with one of Nova's own lines (the ledger's first entry was a pat reaction), Bedrock refused the stream with 'First message in chat history should not be Assistant', and the harness replayed the same history on every restart \u2014 the mind sat in a restart loop at the 60 s backoff cap from 00:12 to 00:22 BST. Fix 1309c69: harness/history_blocks.normalise_history (USER first, roles alternating, no trailing USER) applied in the compactor and at the sender; the compactor always emits the USER context block first; a replay circuit breaker suspends replay after two deaths within 10 s of a replaying start and lifts it when a session lives.",
+      "task_ref": "t12",
+      "reason": "c11/c12 specified the replay order but not Bedrock's role constraints, and the challenge pass asked for containment on every new failure mode; the live wire shape supplied both.",
+      "affects": [
+        "t10",
+        "t12",
+        "t18"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "needs-follow-up",
+      "seq": 30
+    },
+    {
+      "id": "d9",
+      "what": "Post-deploy fix f104731: the liveness watchdog's default window is 900 s (was 180 s) and the speech floor 0.05 (was 0.02 after d7): with a person at the desk, chairs/typing/movement produced 5-of-20 bursts above 0.02 that Bedrock never answers, so a quiet room still restarted every 180 s (00:27:42, 00:30:47). The ~7 min proactive rotation replaces any session, zombie included, so the watchdog is a conservative second net. Also: the Lite reactor feeds its last five 'say' lines back into the prompt as lines not to reuse \u2014 three consecutive pats had produced the identical plan.",
+      "task_ref": "t2",
+      "reason": "h18 promised no liveness restart in a 10-minute quiet stretch; two attempts at a mic-energy gate could not tell a person moving about from a person talking, and the rotation makes a long window safe. The reactor repeat is the spec's own 'varies its reactions' promise (c8/c10).",
+      "affects": [
+        "t2",
+        "t11",
+        "t18"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable",
+      "seq": 31
+    },
+    {
+      "id": "d10",
+      "what": "Post-deploy fix 9bb4d90: the speaker's playback queue bound is 90 chunks (was 8). Sonic generates audio faster than real time, so a ~35 s reply parked most of itself in the queue while the first chunks played; at 8 every chunk past the eighth pending one was dropped (12 'queue-full' drops in one reply on the robot at 00:38) and the robot skipped words. Process slip: that commit was pushed and deployed with one red test (the old bound's assertion) because a piped pytest hid the failure from set -e; fixed in the next commit within minutes.",
+      "task_ref": "t8",
+      "reason": "The whole-utterance design never queued more than one item per utterance, so the bound of 8 was never exercised; chunking changed the queue's job from 'utterances' to 'chunks of one reply'.",
+      "affects": [
+        "t8",
+        "t18"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable",
+      "seq": 32
+    },
+    {
+      "id": "d11",
+      "what": "Post-deploy fix f4ee46c (outside any plan task): the vision leg handed the raw Omni description (426-852 chars) to Sonic bare and Sonic narrated all of it \u2014 a 30 s unprompted monologue ~66 s after every harness start (00:23:47, 00:38:46, 00:43:50). Now wrapped by app.py's render_vision_cue as '(you glance around: ...) (react briefly if at all)', cut at a sentence end inside 240 chars, delivered with sense_class=vision. Pre-existing and untouched: the runtime's clip has had the same timestamp since boot (the clip rider is not producing new clips), so the glance only recurs after a harness restart.",
+      "task_ref": "t14",
+      "reason": "The persona removes the helper register but a bare scene report is not a cue the persona knows how to treat briefly; this was the single biggest 'nudgy' behaviour left after the round and it was invisible in tests because the vision leg is Omni-model-gated on the dev box.",
+      "affects": [
+        "t14",
+        "t18"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable",
+      "seq": 37
+    }
+  ],
+  "evidence": [
+    {
+      "id": "e1",
+      "obligation_ref": "o1",
+      "test_ref": "tests/test_harness_speaking.py::test_a_short_reply_is_flushed_by_inactivity_alone",
+      "behavior_text": "a 0.5 s reply followed by silence is queued within 0.4 s of its last sample with no state change",
+      "contract_text": "h2",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "fake clock drives the flush; green in the 1776-test suite at dbeb7c1",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 6
+    },
+    {
+      "id": "e2",
+      "obligation_ref": "o1",
+      "test_ref": "tests/test_harness_speaking.py::test_chunks_post_in_order_and_a_preempt_purges_the_rest",
+      "behavior_text": "chunks post in order; a preempt purges every remaining chunk",
+      "contract_text": "h2",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "asserted on the injectable poster/stopper seams",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 7
+    },
+    {
+      "id": "e3",
+      "obligation_ref": "o2",
+      "test_ref": "tests/test_sonic_session_config.py::TestSessionStartPayload::test_unrecognised_value_sends_high_and_warns",
+      "behavior_text": "payload carries the endpointing value; unset/unrecognised -> HIGH with a warning; one INFO line per start",
+      "contract_text": "h3",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "payload through a fake _send, log via caplog",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 8
+    },
+    {
+      "id": "e4",
+      "obligation_ref": "o3",
+      "test_ref": "tests/test_harness_deferred_cues.py::TestDrainOnUtteranceEnd::test_the_drained_text_carries_the_age",
+      "behavior_text": "deferred cue delivered after the assistant contentEnd with the age prefix",
+      "contract_text": "h4",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "fake send log",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 9
+    },
+    {
+      "id": "e5",
+      "obligation_ref": "o3",
+      "test_ref": "tests/test_harness_deferred_cues.py::TestDrainOnUtteranceEnd::test_an_expired_cue_is_dropped_and_never_sent",
+      "behavior_text": "a cue older than the TTL is dropped with reason=deferred-expired",
+      "contract_text": "h4",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "injected clock",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 10
+    },
+    {
+      "id": "e6",
+      "obligation_ref": "o4",
+      "test_ref": "tests/test_harness_persona.py::test_env_override_wins_over_the_repo_file",
+      "behavior_text": "the file NOVA_PERSONA_PATH names becomes the persona text",
+      "contract_text": "h5",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "round-trip through load()",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 11
+    },
+    {
+      "id": "e7",
+      "obligation_ref": "o4",
+      "test_ref": "tests/test_harness_app.py",
+      "behavior_text": "build_app composes persona + TOOL_GUIDE, voice amy, TOOL_SPECS snapshot unchanged, no 'assistant'",
+      "contract_text": "h5",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "74 tests in the file",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 12
+    },
+    {
+      "id": "e8",
+      "obligation_ref": "o5",
+      "test_ref": "tests/test_harness_bus.py",
+      "behavior_text": "react: lite routing with markers, dedupe before the call, voice: none never reaches Lite",
+      "contract_text": "h6",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "13 reactor-path tests + unchanged rules_voice/rules_coverage",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 13
+    },
+    {
+      "id": "e9",
+      "obligation_ref": "o5",
+      "test_ref": "tests/test_harness_lite_reactor.py::test_hung_lite_call_times_out_without_blocking_other_cues",
+      "behavior_text": "a hung Lite call times out at the deadline; other cues unaffected; template delivered with a named drop",
+      "contract_text": "h20",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "30 s hanging fake with a 0.2 s timeout",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 14
+    },
+    {
+      "id": "e10",
+      "obligation_ref": "o6",
+      "test_ref": "tests/test_harness_ledger.py",
+      "behavior_text": "locked NDJSON append, quiet-window exclusion, 24 h truncation, atomic rewrite, latched drop on a read-only dir",
+      "contract_text": "h7 + h22",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "14 tests incl. 2x500-line concurrency and the read-only case",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 15
+    },
+    {
+      "id": "e11",
+      "obligation_ref": "o6",
+      "test_ref": "tests/test_harness_memory_compactor.py",
+      "behavior_text": "compaction on its own thread, atomic memory file, 24 h expiry, stale-clock guard, trailing-prose tolerance, history() shape",
+      "contract_text": "h7",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "26 tests with a fake Lite",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 16
+    },
+    {
+      "id": "e12",
+      "obligation_ref": "o7",
+      "test_ref": "tests/test_sonic_rotation.py",
+      "behavior_text": "history blocks after the system prompt and before audio; idle-gated rotation with deadline; 'rotation delay=0 replay=<n>'; immediate-restart path replays; no assistant-initiating text",
+      "contract_text": "h8",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "48 tests over a fake send log and an injected clock",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 17
+    },
+    {
+      "id": "e13",
+      "obligation_ref": "o8",
+      "test_ref": "tests/test_sonic_resilience.py::TestSpeechGatedInput::test_a_quiet_room_fed_past_the_window_never_trips",
+      "behavior_text": "sub-floor chunks past the window never trip the watchdog; one word then silence still does",
+      "contract_text": "h18",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "asserted both ways",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 18
+    },
+    {
+      "id": "e14",
+      "obligation_ref": "o9",
+      "test_ref": "tests/test_harness_speaking.py::test_each_chunk_is_deleted_after_its_window",
+      "behavior_text": "chunk files deleted after their window; cap of 8; failed delete named and playback continues",
+      "contract_text": "h19",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "three tests on the deleter seam",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 19
+    },
+    {
+      "id": "e15",
+      "obligation_ref": "o10",
+      "test_ref": "tests/test_harness_switches.py",
+      "behavior_text": "0/false/off -> off, unset -> on, other -> on + warning; describe() one line",
+      "contract_text": "h25",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "25 tests; app.py tests assert the old path per switch",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 20
+    },
+    {
+      "id": "e16",
+      "obligation_ref": "o11",
+      "test_ref": "tests/test_harness_persona.py::test_source_says_embedded_when_the_file_is_absent",
+      "behavior_text": "embedded default in use with one senselog line naming the missing path; subprocess test reports 'embedded'",
+      "contract_text": "h26",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "also the subprocess test",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 21
+    },
+    {
+      "id": "e17",
+      "obligation_ref": "o12",
+      "test_ref": "tests/test_harness_persona.py::test_persona_names_no_character_and_no_book",
+      "behavior_text": "forbidden names absent and register words present in both texts",
+      "contract_text": "h27",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "parametrised grep",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 22
+    },
+    {
+      "id": "e18",
+      "obligation_ref": "o13",
+      "test_ref": "tests/test_harness_boundary.py",
+      "behavior_text": "AST boundary holds on the finished branch",
+      "contract_text": "h9",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "19 passed at dbeb7c1; endpoint grep in the audit note",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 23
+    },
+    {
+      "id": "e19",
+      "obligation_ref": "o14",
+      "test_ref": "git diff main -- reachy_nova/harness/hearing.py",
+      "behavior_text": "zero diff lines",
+      "contract_text": "h12",
+      "evidence_type": "observation",
+      "strength": "fidelity",
+      "strength_basis": "diff at dbeb7c1",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 24
+    },
+    {
+      "id": "e20",
+      "obligation_ref": "o15",
+      "test_ref": "tests/test_packaging.py + uv run pytest -n auto",
+      "behavior_text": "1776 passed; version 0.4.0",
+      "contract_text": "h13",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "at dbeb7c1",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 25
+    },
+    {
+      "id": "e21",
+      "obligation_ref": "o15",
+      "test_ref": "robot deploy 2026-09-06 00:08",
+      "behavior_text": "robot runs dbeb7c1; switches on, persona file (1464 chars), endpointing=HIGH, history replayed blocks=0, engine live in 8 s; the only traceback is the OLD process's shutdown",
+      "contract_text": "h13 + c33 + c34",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "journal over ssh after systemctl restart",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 26
+    },
+    {
+      "id": "e22",
+      "obligation_ref": "o16",
+      "test_ref": "tests/test_harness_app.py + grep -rE 'session_state|nova_feedback|emotions' reachy_nova/harness",
+      "behavior_text": "statedir.ledger_path()/memory_path() under <state>; grep finds prose only",
+      "contract_text": "h11",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "audit note",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:11:00Z",
+        "commit": "dbeb7c1"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 27
+    },
+    {
+      "id": "e23",
+      "obligation_ref": "o7",
+      "test_ref": "robot journal 2026-09-06 00:42:43-00:52:55",
+      "behavior_text": "one proactive rotation at age=420s: 'rotation delay=0 replay=2 age=420s' at 00:49:43.76, new session listening at 00:49:44.26 (0.5 s), history replayed blocks=2, no greeting, no stream death",
+      "contract_text": "h8: a healthy rotation is one journal line with delay=0 and the replay count",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "journal read over ssh; the 'Nova knows the topic afterwards' half needs Ori's question and is still pending",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:53:55Z",
+        "commit": "9bb4d90"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 33
+    },
+    {
+      "id": "e24",
+      "obligation_ref": "o1",
+      "test_ref": "robot journal 2026-09-06 00:43-00:51 (five replies on 9bb4d90)",
+      "behavior_text": "first chunk played 0.80 / 0.37 / 0.59 / 0.56 / 0.50 s after 'Utterance audio started' (was 6.0-9.9 s on f936f11); chunks contiguous, zero queue-full drops",
+      "contract_text": "h2: every 'played' at most 1.5 s after 'Utterance audio started'",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "journal timing lines; the heard-to-audio median is still unmeasured \u2014 no USER transcript this evening",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:53:55Z",
+        "commit": "9bb4d90"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 34
+    },
+    {
+      "id": "e25",
+      "obligation_ref": "o8",
+      "test_ref": "robot journal 2026-09-06 00:42:43-00:52:55",
+      "behavior_text": "ten minutes with four pats and their replies and otherwise silence: zero 'liveness stall' restarts (on f936f11 the same window held three)",
+      "contract_text": "h18: no liveness restart with nobody speaking for 10 minutes",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "counts from journalctl; window 900 s and floor 0.05 in force",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:53:55Z",
+        "commit": "9bb4d90"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 35
+    },
+    {
+      "id": "e26",
+      "obligation_ref": "o5",
+      "test_ref": "robot journal 2026-09-06 00:45-00:50 (Lite reactor with recent-line feedback)",
+      "behavior_text": "four consecutive pats got four different lines: 'Thank you!', 'Mmm, that feels nice!', 'That tickles!', 'Yup, that's nice!' (latency 0.6-1.0 s); before f104731 three pats got the identical line",
+      "contract_text": "c8/c10: varies its reactions",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "stage=react lines",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-05T23:53:55Z",
+        "commit": "9bb4d90"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 36
+    }
+  ],
+  "deltas": [],
+  "supersessions": []
+}
