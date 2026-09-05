@@ -187,7 +187,16 @@ def test_repeated_cloud_flaps_never_require_a_restart(stop_event, caplog) -> Non
     for cycle in (1, 2):
         poster.mode = "refuse"
         speak(speaker)
-        assert wait_until(lambda: speaker.playback_failures == cycle), f"cycle {cycle}"
+        # ``playback_failures`` is bumped at the START of the mouth-loss path,
+        # before the gate clear and the queue purge. Healing the poster and
+        # queueing the next utterance on that signal alone races the purge:
+        # under scheduler load the worker can still be inside its purge loop
+        # when the healed utterance lands, and eats it (seen as a ~1-in-3
+        # flake under pytest-xdist on 2026-09-06). ``idle`` flips only after
+        # the whole attempt has resolved (task_done), so wait for both.
+        assert wait_until(
+            lambda: speaker.playback_failures == cycle and speaker.idle
+        ), f"cycle {cycle}"
         assert speaker.worker_alive
         poster.mode = "ok"
         speak(speaker)
