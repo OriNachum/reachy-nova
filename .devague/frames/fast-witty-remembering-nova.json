@@ -1,0 +1,1017 @@
+{
+  "slug": "fast-witty-remembering-nova",
+  "title": "fast-witty-remembering-nova",
+  "schema_version": 6,
+  "status": "exported",
+  "created": "2026-09-05T20:46:44Z",
+  "updated": "2026-09-05T21:15:00Z",
+  "claims": [
+    {
+      "id": "c1",
+      "kind": "announcement",
+      "text": "Reachy Nova now answers within about a second of what you say instead of after a long silence, speaks like a friend with a dry wit rather than an eager helper, varies how it reacts to the same touch or face, hands the deeper reactions to Nova 2 Lite, and remembers who you are and what you talked about across restarts and session rotations.",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h1",
+          "text": "A 10-minute live conversation on the robot shows all four properties at once \u2014 fast (journal timings), witty (Ori's verdict), varied (two pats, two different reactions), remembering (a topic survives a stream rotation) \u2014 with the journal and Ori's word as the evidence.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Verify on the robot: run a 10-minute conversation, grep the harness journal for the timing lines named in h-conditions on c2/c6/c12, and record Ori's verdict on tone in the delivery doc.",
+      "revisions": []
+    },
+    {
+      "id": "c2",
+      "kind": "requirement",
+      "text": "The speaker plays Sonic's reply audio in small chunks through the daemon HTTP route instead of buffering the whole utterance: a chunk is flushed when it reaches the target size (~1 s of audio, split at a low-energy point so words are not cut) OR when no new audio has arrived for ~300 ms \u2014 never by waiting for Sonic to leave 'speaking', because on the robot that transition is produced by the 4-second speaking watchdog, not by an end-of-turn event (journal 2026-09-05 21:52-22:02: every 0.8-1.3 s reply was queued 4.3-4.6 s after its first audio chunk, each time on 'Speaking watchdog: no audio for 4s'). First audio lands within ~1 s of Sonic's first audio chunk regardless of reply length; the echo gate serialises chunks one-speaker-at-a-time; a barge-in preempt purges every remaining chunk; the 4 s watchdog stays only as the stuck-state safety net.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h2",
+          "text": "In the harness journal every 'played' line lands at most 1.5 s after its utterance's 'Utterance audio started' line; chunks of one utterance play in order with no overlap (the gate serialises them); a barge-in during chunked playback stops the sound and no later chunk of that utterance ever plays \u2014 asserted in tests/test_harness_speaking.py and heard live.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [
+        {
+          "id": "q1",
+          "text": "Why does Sonic's contentEnd for the assistant turn not end the speaking state on this stream \u2014 missing event, different role/type, or an ignored stopReason? Log contentEnd type/role/stopReason at INFO in the first build task and answer from the journal.",
+          "resolved": false,
+          "blocking": false,
+          "resolution": ""
+        }
+      ],
+      "links": [],
+      "instruction": "Implement in reachy_nova/harness/speaking.py: replace the state-change flush with a chunker (target ~1 s, split at the lowest-energy 50 ms window in the last 200 ms, plus a 300 ms inactivity flush on a timer); keep _play_one per chunk; keep gate.arm_for(chunk duration); verify with tests/test_harness_speaking.py (ordering, preempt purge, inactivity flush) and live journal timings.",
+      "revisions": [
+        {
+          "text": "The speaker plays Sonic's reply audio in small chunks (first sentence or ~1 s of audio, then the rest as it arrives) through the daemon HTTP route, instead of buffering the whole utterance until Sonic leaves 'speaking': first audio lands within ~1 s of Sonic's first audio chunk regardless of reply length; the echo gate serialises chunks one-speaker-at-a-time; a barge-in preempt purges every remaining chunk.",
+          "kind": "requirement",
+          "reason": "challenge: flush is driven by the 4 s speaking watchdog, not Sonic's end-of-turn"
+        }
+      ]
+    },
+    {
+      "id": "c3",
+      "kind": "non_goal",
+      "text": "No direct ALSA streaming from the harness: reachy-mini-cli docs/operating-reachy.md measured (2026-08-02) that the XVF3800 AEC cancels only the daemon's own playback (2.06x baseline for the robot's own voice vs 4.72x peak for anything else played into the same speaker), so audio the harness pushes straight at the reachymini_audio_sink ALSA device would come back through the mic as an echo Sonic hears. Every playback path in this round goes through the daemon.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c4",
+      "kind": "boundary",
+      "text": "The harness still never opens a reachy_mini SDK client (AST-enforced by tests/test_harness_boundary.py). The durable sub-second, gap-free path \u2014 a streaming speaker-feed seam mirroring the audio tee \u2014 is upstream work in reachy-mini-cli (issue #162, still OPEN as of 2026-09-05) and is a follow-up, not part of this round; chunked daemon-HTTP playback is the path this round ships.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h9",
+          "text": "tests/test_harness_boundary.py still passes on the finished branch (no reachy_mini import, no set_target in reachy_nova/harness), and the only playback calls the harness makes are the daemon's upload, play_sound and stop_sound endpoints.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Verify: tests/test_harness_boundary.py green; grep the harness for daemon endpoint paths \u2014 only upload, play_sound, stop_sound, sounds list/delete, volume.",
+      "revisions": [
+        {
+          "text": "The harness still never opens a reachy_mini SDK client (AST-enforced by tests/test_harness_boundary.py). The durable sub-second path \u2014 a streaming speaker-feed seam mirroring the audio tee \u2014 is upstream work in reachy-mini-cli (issue #162, still OPEN, unshipped as of 2026-09-05); this round's chunked daemon-HTTP playback is the interim unless the user decides to build #162 first (see the pending decision).",
+          "kind": "boundary",
+          "reason": "q4 resolved"
+        }
+      ]
+    },
+    {
+      "id": "c5",
+      "kind": "requirement",
+      "text": "Sonic's sessionStart carries turnDetectionConfiguration.endpointingSensitivity (the documented HIGH|MEDIUM|LOW knob the harness never sets today), read from NOVA_SONIC_ENDPOINTING; unset means HIGH (fastest turn-taking; may cut off hesitant speakers \u2014 set MEDIUM in .env if that bites). The value in force is logged once per session start.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h3",
+          "text": "The journal logs the endpointing value once per session start; with NOVA_SONIC_ENDPOINTING unset it is HIGH, with it set to MEDIUM or LOW that value is sent; an unrecognised value falls back to HIGH with a named warning, never a failed session.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Implement in reachy_nova/nova_sonic.py _start_session: add turnDetectionConfiguration to sessionStart from NOVA_SONIC_ENDPOINTING (default HIGH, fail-open to HIGH with a warning); log the value once; unit-test the event payload.",
+      "revisions": [
+        {
+          "text": "Sonic's sessionStart carries turnDetectionConfiguration.endpointingSensitivity (the documented HIGH|MEDIUM|LOW knob the harness never sets today), read from an env var (NOVA_SONIC_ENDPOINTING) with a default the user picks; the chosen value is logged once per session start.",
+          "kind": "requirement",
+          "reason": "q1 still open \u2014 default stated so confirming c5 decides it"
+        }
+      ]
+    },
+    {
+      "id": "c6",
+      "kind": "requirement",
+      "text": "A body cue that arrives while Sonic is generating is no longer dropped: it is parked in a small latest-wins slot per sense class (pat, face, sound, vision) with a short TTL and delivered through the same inject_text path the moment the utterance ends. The 3 s throttle and the named-drop log lines stay; only the 'dropped reason=speaking' fate changes to 'deferred'.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h4",
+          "text": "A pat during a 10 s reply produces an inject within 1 s of the utterance ending, logged as 'deferred' rather than 'dropped reason=speaking'; a second pat during the same reply replaces the first (latest-wins per sense class); a deferred cue older than its TTL is dropped with a named reason; the 3 s throttle and the 10 s dedupe are unchanged (tests/test_harness_bus_dedupe.py still green).",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Implement: a DeferredCues slot (per sense class, latest-wins, TTL 5 s) that inject_text fills instead of dropping while _speaking, drained from _set_state('listening') through the normal inject path with the age-aware text (c32); tests for replace, expire, drain order.",
+      "revisions": []
+    },
+    {
+      "id": "c7",
+      "kind": "success_signal",
+      "text": "Measured from the harness journal over a 10-minute live conversation: every utterance's first 'played' line lands at most 1.5 s after its 'Utterance audio started' line (today: 6.0 s and 9.9 s); the median gap from a 'heard' transcript to first audible audio is at most 2.5 s; a session rotation leaves no audible 3 s hole and Nova still knows the topic afterwards; and Ori reports it feels like talking to a friend with a dry wit rather than a helper.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h10",
+          "text": "The signal is checked on the robot in one 10-minute session and written into the delivery doc with the journal lines quoted: the per-utterance gap, the median heard-to-audio gap, one rotation with the topic retained, and Ori's one-line verdict on tone.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Verify on the robot: one 10-minute session; grep the journal for the c2/c6/c12 lines; quote them in docs/deliveries/<date>-fast-witty-remembering-nova.md with Ori's verdict.",
+      "revisions": []
+    },
+    {
+      "id": "c8",
+      "kind": "requirement",
+      "text": "The persona is rewritten and moved out of code into one text file the harness loads at startup (config/persona/nova.md): a dry, teasing companion in the spirit of Wit from the Stormlight Archive \u2014 quick wordplay, deflating pretension, teasing the person it likes, occasional sudden sincerity, never cruel to the vulnerable, never a helper: it does not offer help unasked, never asks how it can help, and reacts to body cues with a word, a sound, or nothing. Variety is asked for directly ('do not repeat an opener you used in the last few minutes') and shown with one or two one-shot exchanges rather than phrase lists (the Nova 2 Sonic guide: Sonic 2 over-uses listed phrases). Tool mechanics leave the persona and live only in the tool descriptions. Voice id becomes amy.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h5",
+          "text": "The persona text lives in one file read at startup \u2014 editing it and restarting changes the next session's system prompt with no code change; Sonic's toolConfiguration is byte-identical to today's; the voice id sent in promptStart is amy; and in a 10-minute live session Nova never offers help unasked or asks how it can help, and reacts to two pats with different words.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Implement: config/persona/nova.md (register + 2 one-shot exchanges, no character names, no quotes); loader with NOVA_PERSONA_PATH and an embedded default; app.py builds HARNESS_SYSTEM_PROMPT = persona + a short tool-usage paragraph; voice_id='amy'; tests: file overrides default, toolConfiguration unchanged.",
+      "revisions": [
+        {
+          "text": "The persona is rewritten and moved out of code into one text file the harness loads (e.g. config/persona/nova.md): a friend with dry wit and gentle cynicism who never offers help unasked, never asks how it can help, reacts to cues with a word, a sound, or nothing, and varies its reactions instead of repeating openers. Per the Nova 2 Sonic prompting guide, tone is shown with one or two one-shot examples rather than phrase lists (Sonic 2 over-uses listed phrases). Tool mechanics leave the persona text and live in the tool descriptions only.",
+          "kind": "requirement",
+          "reason": "q2 resolved: Wit/Hoid register"
+        }
+      ]
+    },
+    {
+      "id": "c9",
+      "kind": "assumption",
+      "text": "A small mood variable lives in the harness (fed by pats, recognised faces, conversation turns and silence; decaying over minutes) and is rendered into the context Sonic and Lite see ('you are in a playful mood', 'nobody has spoken to you for ten minutes'), so the same pat reads differently across the day. This ports the idea of config/emotions.yaml, not the legacy emotions.py module, and emits nothing new on the cognition feed.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c10",
+      "kind": "requirement",
+      "text": "A Nova 2 Lite reaction tier: rules.yaml entries can opt a cue into it (a new per-entry field, e.g. react: lite); for those cues the bus sends Lite the rendered cue plus the recent sense history, the day's memory (topics and important items), the mood and the last few exchanges, and Lite returns a one-line reaction plan (what to say or hint at, a vocalisation, a gesture from the engine's library, or nothing). That plan becomes the inject Sonic receives, and a gesture in it is submitted through the intents spool. Lite failure or timeout falls back to the plain template inject with a named drop; Sonic keeps owning the live voice.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h6",
+          "text": "A cue whose rules.yaml entry opts into the Lite tier reaches Nova 2 Lite with the recent sense history, the person profile, the mood and the last exchanges, and Lite's one-line plan becomes the inject within a named timeout (default 2 s) \u2014 on timeout or error the plain template inject is delivered and the drop is named; a cue that does not opt in renders byte-identically to today (tests/test_rules_coverage.py unchanged).",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Implement: rules.yaml gains react: lite per entry; bus hands those cues to a LiteReactor worker (NovaOmni._invoke-style call, 2 s timeout) with sense history + day memory + mood + last exchanges; the plan text goes through route_event markers and _deliver; gesture lines submit through IntentTools; fallback to template on failure; tests with a fake Lite.",
+      "revisions": [
+        {
+          "text": "A Nova 2 Lite reaction tier: rules.yaml entries can opt a cue into it (a new per-entry field, e.g. react: lite); for those cues the bus sends Lite the rendered cue plus the recent sense history, the person profile, the mood and the last few exchanges, and Lite returns a one-line reaction plan (what to say or hint at, a vocalisation, a gesture from the engine's library, or nothing). That plan becomes the inject Sonic receives, and a gesture in it is submitted through the intents spool. Lite failure or timeout falls back to the plain template inject with a named drop; Sonic keeps owning the live voice.",
+          "kind": "requirement",
+          "reason": "challenge: no per-person identity reaches the harness"
+        }
+      ]
+    },
+    {
+      "id": "c11",
+      "kind": "requirement",
+      "text": "A conversation ledger and compaction: USER and ASSISTANT transcripts (already delivered by on_transcript) and every delivered sense are appended to an NDJSON ledger in the state dir (<state>/nova-conversation.jsonl). A background job \u2014 on its own thread, never on Sonic's response thread \u2014 asks Nova 2 Lite to distil the ledger into the topics mentioned and the items it judges important (a request, a preference, a running joke, something Nova was told to stop doing), stored in <state>/nova-memory.json with a timestamp; entries older than 24 hours expire and are dropped. At every Sonic session start the surviving memory is replayed as conversation history the documented way: once, after the system prompt, before audio streaming begins.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h7",
+          "text": "Every USER/ASSISTANT transcript and every delivered sense is appended to the ledger; the compaction job runs on its own thread and never blocks Sonic's response loop; the memory file holds topics and important items with timestamps and anything older than 24 h is gone after the next compaction; a Sonic session started after a harness restart receives the surviving memory as conversation history before any audio is sent (verified by the event order in the Sonic send log).",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Implement: harness/ledger.py (locked NDJSON append from on_transcript and bus; 24 h truncation) and harness/memory_compactor.py (background thread, Lite prompt -> topics + important items with timestamps, 24 h expiry, atomic write); NovaSonic gains a history_provider called in _start_session between the system prompt and the audio contentStart; tests with fakes.",
+      "revisions": [
+        {
+          "text": "A conversation ledger and compaction: USER and ASSISTANT transcripts (already delivered to the harness by on_transcript) and every delivered sense are appended to an NDJSON ledger in the state dir (<state>/nova-conversation.jsonl); a Nova 2 Lite compaction job keeps a rolling summary of the session and a per-person profile (name, preferences, running jokes, what they asked Nova to stop doing) in <state>/nova-memory.json. Both are replayed as conversation history at every Sonic session start \u2014 the documented way: once, after the system prompt, before audio streaming begins.",
+          "kind": "requirement",
+          "reason": "q5 resolved: topics + important items, Lite in background, 24 h"
+        }
+      ]
+    },
+    {
+      "id": "c12",
+      "kind": "requirement",
+      "text": "Sonic sessions rotate proactively a little before the stream's connection limit and on every watchdog or network restart, replaying the compacted history and summary on the new stream; a rotation of a healthy session uses zero restart delay (today every restart is clean \u2014 'system prompt only, no recap' \u2014 and waits the 3 s base backoff).",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h8",
+          "text": "A rotation of a healthy session appears in the journal as one line naming delay=0 and the number of history items replayed; after a rotation Ori asks 'what were we just talking about' and Nova answers from the replayed history; the liveness, clock-step and network restart paths all replay the same way.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Implement in nova_sonic.py: a rotation timer (~7 min) that waits for idle (listening, no tool in flight, speaker.idle) with a hard deadline, restarts with delay 0 and replays history; log one line 'rotation delay=0 replay=<n>'; the liveness/clock/network paths reuse the same replay; tests for idle wait and deadline.",
+      "revisions": []
+    },
+    {
+      "id": "c13",
+      "kind": "boundary",
+      "text": "Memory lives in the harness state dir and nowhere else: the qq memory leg stays optional and is absent on the device (no qq backends there), and the legacy session_state.py, emotions.py and nova_feedback.py modules are not revived in the harness \u2014 it gets its own small ledger.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h11",
+          "text": "The ledger and memory files live under the harness state dir (REACHY_STATE_DIR / ~/.local/state/reachy); a grep of reachy_nova/harness for session_state, nova_feedback and emotions still finds nothing; and the harness starts and speaks with no qq backend present, as it does on the robot today.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c14",
+      "kind": "non_goal",
+      "text": "No changes to the Kiro writer, the forge pipeline or the runtime's rules engine in this round; a runtime rule's say field stays a single fixed line (reachy-mini-cli reachy/behavior/rules.py caps it at 500 characters, no variants), so reaction variety is the mind's job, not the body's.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c15",
+      "kind": "boundary",
+      "text": "The hearing path is untouched: the tee delivers post-AEC audio in 32 ms chunks, the harness re-chunks to 100 ms and resamples with np.interp, and the echo gate is off (hardware AEC verified live 2026-08-10) \u2014 it contributes at most ~100 ms and is not where the delay lives.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h12",
+          "text": "reachy_nova/harness/hearing.py has no functional diff on the finished branch and tests/test_harness_hearing.py is unchanged and green.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c16",
+      "kind": "boundary",
+      "text": "Ships as a reachy-nova version bump (pyproject 0.3.0 -> 0.4.0) with the test suite green (uv run pytest is the merge gate and the PyPI publish job on main refuses a reused version); deployed to the robot by git pull plus a harness restart on its editable install; no IP addresses in any committed doc or PR text.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h13",
+          "text": "pyproject.toml reads version 0.4.0, uv run pytest -n auto is green in CI before merge, the robot runs the merged commit after git pull plus a harness restart, and no committed doc or PR text contains an IP address.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c17",
+      "kind": "non_goal",
+      "text": "No new Sonic tools: the action vocabulary (run_behavior, goto, lock_face, recall_senses, stay_silent, ...) is unchanged. What changes is the persona text, the inject context (mood, memory, Lite reaction plans), the playback timing and the session lifecycle.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c18",
+      "kind": "decision",
+      "text": "Persona register: dry and teasing \u2014 in the spirit of Wit (Hoid) from Sanderson's Stormlight Archive: quick wordplay, mock the pretentious not the vulnerable, sudden unexpected sincerity, never cruel.",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c19",
+      "kind": "decision",
+      "text": "Voice: amy (Nova 2 Sonic en-GB). English-only voice \u2014 matthew/tiffany remain the only polyglot options if other languages are ever wanted.",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c20",
+      "kind": "decision",
+      "text": "Playback path: chunked playback through the daemon HTTP route ships now as the interim; the streaming speaker-feed seam (reachy-mini-cli#162) is the follow-up, not part of this round.",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c21",
+      "kind": "decision",
+      "text": "Memory policy: Nova keeps the topics mentioned and the items judged important; importance is judged in the background by Nova 2 Lite, never on the voice path; everything expires after one day.",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c22",
+      "kind": "audience",
+      "text": "Ori and whoever is in the room with the robot \u2014 family and guests who talk to Nova and pet it; secondarily the operator reading the harness journal to see what the mind did and why.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h14",
+          "text": "Nova responds to whoever speaks, not only to Ori \u2014 a guest who talks to it gets the same speed and register \u2014 and every decision the mind takes is still visible in the journal as a [SENSE ...] line.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c23",
+      "kind": "after_state",
+      "text": "You finish a sentence and Nova is already answering about a second later, in amy's voice, with a dry line rather than an offer to help; a pat while it is mid-sentence still gets a reaction the moment it stops talking; the same pat at breakfast and at night gets different reactions; the deeper reactions are shaped in the background by Nova 2 Lite; and after a restart or a stream rotation Nova still knows what you talked about today and what mattered.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h15",
+          "text": "Each clause of the after-state maps to a confirmed requirement and its honesty condition (c2/h2 speed, c8/h5 register and voice, c6/h4 pat mid-sentence, c9 variety by mood, c10/h6 Lite, c11/h7 + c12/h8 memory across rotation) \u2014 there is no promised behaviour without a requirement behind it.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c24",
+      "kind": "before_state",
+      "text": "Today every reply is preceded by 6\u201310 s of silence because the whole utterance is buffered before playback (journal 2026-09-05: 9.9 s before a 12.5 s reply, 6.0 s before a 4.2 s reply); the register is an eager assistant; every cue produces the same one-line reaction; a cue during speech is dropped; and every stream restart (including the documented ~8-minute rotation) wipes the conversation and adds a 3 s hole.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h16",
+          "text": "The before-state numbers are the ones in the 2026-09-05 journal (9.9 s / 12.5 s, 6.0 s / 4.2 s) and the code facts cite speaking.py (buffer until leaving speaking), nova_sonic.py (clean restart, 3 s base backoff, inject dropped while speaking) \u2014 each is checkable at commit f936f11.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c25",
+      "kind": "why_it_matters",
+      "text": "A companion that answers ten seconds late and talks like a help desk is not a companion; the point of a robot in the room is that talking to it feels like talking to someone who is present, has a personality, and remembers the morning.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h17",
+          "text": "Ori, after the live session, says talking to Nova feels like talking to someone present rather than to a help desk; if that verdict is negative the round is not closed, whatever the timings say.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c26",
+      "kind": "requirement",
+      "text": "The response-liveness watchdog stops treating a quiet room as a dead stream: the harness feeds mic audio continuously, so 'input flowing with no response for 180 s' is simply three minutes of nobody talking \u2014 and on 2026-09-05 the journal shows the stream restarted at 21:42:13, 21:45:17, 21:48:22, 21:51:26, 22:02:34 and 22:05:48, each 'Response liveness stall forced a restart', each wiping the conversation and costing ~3.6 s of deafness. Input counts as 'flowing' only when it carried speech energy above the mic floor or a text inject/tool result was sent; a stream that is silent with a silent room is healthy.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h18",
+          "text": "With nobody speaking for 10 minutes the journal shows no liveness restart; the clock-step zombie case (input sent AND speech energy or an inject, no response for the window) still restarts; tests/test_sonic_resilience.py covers both.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Implement in nova_sonic.py: feed_audio marks input as flowing only when the chunk's RMS exceeds a floor (env NOVA_SONIC_SPEECH_FLOOR, default ~0.01, cf. hearing.py's 0.09 speech vs 0.002 floor) or an inject/tool result was sent; tests: silent input never trips the watchdog, speech-then-silence still does.",
+      "revisions": []
+    },
+    {
+      "id": "c27",
+      "kind": "requirement",
+      "text": "Chunked playback uploads each chunk under its own filename (today every utterance overwrites one file, tts_synth.wav, which is safe only because the next post waits for the previous window to elapse) and deletes it after its window through the daemon's DELETE /api/media/sounds/{filename} (present in the daemon's OpenAPI on the robot, alongside GET /api/media/sounds); at most a handful of chunk files ever exist, because the robot's root disk is at 90 % with 1.4 GB free.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h19",
+          "text": "After a 10-minute session GET /api/media/sounds lists no nova chunk files older than the last utterance; a failed DELETE is a named senselog line, never a failed playback.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Implement: per-chunk filename nova-<utt>-<seq>.wav, DELETE after the chunk's window (DaemonClient.delete_sound), keep at most 8 files; a failed delete is a named drop; tests with the injectable post/get seam.",
+      "revisions": []
+    },
+    {
+      "id": "c28",
+      "kind": "requirement",
+      "text": "Nova 2 Lite reaction calls and memory compaction never run on the MQTT client thread or on Sonic's response loop: the bus hands a Lite-tier cue to a small worker (the same pattern app.py uses for tool calls), and the inject that results goes through inject_text like every other cue \u2014 so a slow or hung Lite call can delay one reaction but never a face, a pat, or the clip-state cache.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h20",
+          "text": "A Lite call stubbed to hang for 30 s in tests leaves bus message handling and the speaker unaffected; the reaction times out at its named deadline and the template inject is delivered.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Implement: LiteReactor and the compactor each own a single worker thread with a bounded queue (latest-wins); never call Bedrock from paho's callback or Sonic's response loop; test with a hanging fake.",
+      "revisions": []
+    },
+    {
+      "id": "c29",
+      "kind": "assumption",
+      "text": "A Lite reaction plan is delivered through exactly the same rendering as a template inject: the entry's voice marker (silent/brief) and the timed-quiet marker are appended to the plan text, the per-key dedupe reservation happens before the Lite call (so a duplicate pat never costs a second Lite call), the delivered text is what SenseHistory records, and voice: none cues never go to Lite at all.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h21",
+          "text": "tests/test_rules_voice.py extended: a Lite-tier entry with voice: brief yields an inject ending in the brief marker; a voice: none entry produces no Lite call; the second pat inside the dedupe window produces neither a Lite call nor an inject.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c30",
+      "kind": "requirement",
+      "text": "Ledger and memory writes are bounded and atomic and never on the voice path: appends are serialised by one lock (transcripts arrive on Sonic's thread, senses on the MQTT thread), nothing is appended while the timed quiet is armed (QuietState.active), the memory file is written temp-then-rename like the persisted quiet deadline, the ledger is truncated to the last 24 h at each compaction, and a write failure (the disk is 90 % full) is a named senselog drop that leaves speech untouched.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h22",
+          "text": "With the state dir made read-only the harness still hears and speaks and the journal names the ledger drop once (latched); a kill -9 mid-compaction leaves either the old or the new memory file, never a truncated one (tests/test_harness_quiet.py's atomic-write pattern reused).",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Implement: one lock around ledger appends; skip appends while quiet.active(); memory file written temp+os.replace (reuse quiet.py's helper); ledger truncated at compaction; write errors latched to one senselog line; tests with a read-only state dir and with quiet armed.",
+      "revisions": [
+        {
+          "text": "Ledger and memory writes are bounded and atomic and never on the voice path: appends are serialised by one lock (transcripts arrive on Sonic's thread, senses on the MQTT thread), the memory file is written temp-then-rename like the persisted quiet deadline, the ledger is truncated to the last 24 h at each compaction, and a write failure (the disk is 90 % full) is a named senselog drop that leaves speech untouched.",
+          "kind": "requirement",
+          "reason": "q6 resolved"
+        }
+      ]
+    },
+    {
+      "id": "c31",
+      "kind": "assumption",
+      "text": "A proactive rotation waits for an idle moment \u2014 Sonic in listening state, no tool call in flight, speaker queue empty \u2014 with a hard deadline shortly before the 8-minute limit, so a reply, a tool result or a playing chunk is never cut by our own rotation; and the replayed history ends with a compact USER-role context block ('earlier today we talked about ...') plus the last two or three exchanges verbatim, capped in size, after which Nova says nothing until spoken to \u2014 a rotation must not produce a greeting.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h23",
+          "text": "In a 20-minute live session with two rotations Ori hears no greeting and no cut-off reply at either rotation, and the journal shows each rotation line preceded by an idle check.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c32",
+      "kind": "assumption",
+      "text": "A deferred cue is delivered with its age in the text ('(someone petted you a few seconds ago, while you were talking)'), because with chunked playback Sonic finishes generating before the human has finished hearing, so a reaction to a mid-reply pat is already a beat late by the time it plays.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h24",
+          "text": "The deferred inject text differs from the immediate one and names the delay; a cue deferred past its TTL (default 5 s) is dropped with reason=deferred-expired.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c33",
+      "kind": "requirement",
+      "text": "Every new behaviour has an env kill switch that restores today's behaviour without a code change, resolved once at start and logged once: NOVA_CHUNKED_PLAYBACK=0 (whole-utterance playback), NOVA_LITE_REACTIONS=0 (template injects only), NOVA_MEMORY=0 (no ledger, no replay), NOVA_PERSONA_PATH (and an embedded default persona when the file is absent or unreadable). An unrecognised value resolves to the new default with a named warning \u2014 the same fail-open policy rule the echo gate follows.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h25",
+          "text": "Each switch has a test asserting the old path is taken when it is off, and the journal's first lines after start name every switch's resolved value.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Implement: resolve NOVA_CHUNKED_PLAYBACK, NOVA_LITE_REACTIONS, NOVA_MEMORY, NOVA_PERSONA_PATH once in app.py build_app via one helper (fail-open to the new default with a warning); log the resolved set on start; a test per switch that the old path is taken when off.",
+      "revisions": []
+    },
+    {
+      "id": "c34",
+      "kind": "boundary",
+      "text": "The persona file is resolved the way rules.yaml is (repo path by default, env override) and the harness embeds a default persona string, so a wheel install \u2014 which ships nothing under the repo-root config/ directory (pyproject package-data covers reachy_nova/ only) \u2014 still has a personality. The pre-existing gap that a wheel install also lacks rules.yaml is noted, not fixed here.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h26",
+          "text": "A wheel built with uv build, installed into a clean venv, starts the harness and logs the embedded default persona in use plus one senselog line naming the missing file; with NOVA_PERSONA_PATH pointing at a file, that file's text is what promptStart's system prompt carries.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "Implement: persona path resolution mirrors bus.load_rules (repo path default, env override, embedded default string on failure); test that a missing file yields the embedded persona and one senselog line.",
+      "revisions": []
+    },
+    {
+      "id": "c35",
+      "kind": "boundary",
+      "text": "The persona file describes the register in original words \u2014 quick, dry, teasing, deflating pretension, sudden sincerity, never cruel \u2014 and does not name, quote, or role-play the character it is inspired by: Nova is Nova, in the spirit of Wit, not Wit; the file contains no text from the books.",
+      "origin": "llm",
+      "status": "confirmed",
+      "honesty_conditions": [
+        {
+          "id": "h27",
+          "text": "A test greps config/persona/nova.md and the embedded default for the character's names and for any sentence longer than eight words that appears in the source books' commonly quoted lines, and finds none; in a live session Nova, asked who it is, answers as Nova.",
+          "status": "confirmed",
+          "instruction": ""
+        }
+      ],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    },
+    {
+      "id": "c36",
+      "kind": "decision",
+      "text": "Raw ledger policy: truncated to the last 24 hours at each compaction; nothing is written to the ledger (transcripts or senses) while a timed quiet is armed.",
+      "origin": "user",
+      "status": "confirmed",
+      "honesty_conditions": [],
+      "hard_questions": [],
+      "links": [],
+      "instruction": "",
+      "revisions": []
+    }
+  ],
+  "open_vagueness": [
+    {
+      "id": "v1",
+      "text": "The stream's connection limit on this account: the v1 Nova Sonic docs give a default 8-minute connection limit; the Nova 2 pages fetched did not restate it. Confirm from the harness journal at long uptime (cadence of 'Bedrock stream died \u2014 restarting') before fixing the rotation interval.",
+      "kind": "unknown_nonblocking",
+      "claim_id": "c12",
+      "resolved": true,
+      "resolution": "Measured on the robot 2026-09-05: session started 21:51:29.93, died 21:59:30.43 with 'Model has timed out in processing the request' \u2014 480.5 s. The Nova 2 Sonic connection limit on this account is 8 minutes; rotate at ~7 min.",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v2",
+      "text": "Nova 2 Lite round-trip latency from the robot is unmeasured (today Lite is only called for the barge-in verdict and the 60 s clip description); measure it before deciding which cues route through the Lite reaction tier and what its timeout is.",
+      "kind": "unknown_nonblocking",
+      "claim_id": "c10",
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v3",
+      "text": "The daemon's behaviour for back-to-back play_sound chunks is unmeasured: speaking.py's docstring says concurrent plays mix at the device, upload+play costs ~100 ms on the robot (journal 2026-09-05), but gap and click at chunk boundaries have not been listened to.",
+      "kind": "unknown_nonblocking",
+      "claim_id": "c2",
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v4",
+      "text": "Upstream follow-up: reachy-mini-cli#162 streaming speaker-feed seam (audio-out counterpart to the audio tee, played through the runtime's held media client via push_audio_sample) \u2014 the durable sub-second, gap-free path.",
+      "kind": "follow_up",
+      "claim_id": "c4",
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v5",
+      "text": "Per-person memory is not buildable yet: the face cue that reaches the harness is the rule/fire of nova-face-noticed, whose payload names the rule, not the person (rules.yaml comment; app.py FACE_RULE) \u2014 identity stays in the runtime's face store. Memory in this round is per-household-per-day; a per-person layer needs the runtime to publish the recognised name (reachy-mini-cli follow-up).",
+      "kind": "follow_up",
+      "claim_id": "c11",
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    },
+    {
+      "id": "v6",
+      "text": "Pre-existing: a wheel install of reachy-nova has no config/nervous-system/rules.yaml (bus falls back to the permissive default rule set with one senselog line). Out of this round's scope; worth packaging the config under reachy_nova/ later.",
+      "kind": "follow_up",
+      "claim_id": "c34",
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
+    }
+  ],
+  "scope_entries": [
+    {
+      "id": "s1",
+      "surface": "reachy_nova/harness/speaking.py (SonicSpeaker.on_state_change / on_audio_chunk)",
+      "finding": "The speaker buffers every Sonic audio chunk and enqueues the utterance only on the transition OUT of 'speaking' (or at the 15 s max_buffer_s cap); the WAV is then uploaded and played through the daemon HTTP route. So the human hears nothing until Sonic has finished generating the whole reply \u2014 latency scales with reply length, not with the network. The docstring records why: reachy-mini-cli 0.48.0 had no streaming speaker feed (#162).",
+      "seeds": [
+        "c2",
+        "c3"
+      ]
+    },
+    {
+      "id": "s2",
+      "surface": "robot journal, journalctl --user -u reachy-nova-harness, 2026-09-05 21:35-21:39 BST (harness f936f11 = v0.3.0 main, runtime 0.51.1 on wireless-motor-enable)",
+      "finding": "Two utterances this boot: utt-1 'Utterance audio started' 21:36:30.85 -> 'queued duration=12.52s (utterance-complete)' 21:36:40.77 -> 'played' 21:36:40.86 (9.9 s of silence before a 12.5 s reply; upload+play 94 ms); utt-2 audio started 21:39:09.10 -> queued 21:39:15.13 (4.20 s) -> played 21:39:15.22 (6.0 s of silence before a 4.2 s reply). A pat cue injected at 21:39:08.10 reached Sonic audio in 1.0 s \u2014 the model side is fast; the buffering is the delay. No USER 'heard' lines in this 6-minute boot, so heard-to-audio is unmeasured.",
+      "seeds": [
+        "c2",
+        "c7"
+      ]
+    },
+    {
+      "id": "s3",
+      "surface": "docs/plans/2026-08-09-wireless-cli-harness-scope.md, risk R1",
+      "finding": "R1 already named HTTP upload+play as ~1-2 s of added per-utterance latency and asked for a streaming variant upstream. Live it is the entire generation time (6-10 s measured), because the whole utterance is buffered before the first upload \u2014 the risk was under-estimated, not unknown.",
+      "seeds": [
+        "c2"
+      ]
+    },
+    {
+      "id": "s4",
+      "surface": "agentculture/reachy-mini-cli issue #162 + reachy/behavior/speech_act.py + reachy/speech/playback.py (checkout at e9a8f54, v0.51.1)",
+      "finding": "#162 (streaming speaker-feed seam + accepting shed behaviors) is still OPEN with no comments; nothing in the runtime offers an inbound PCM socket. The runtime's own say path pushes PCM through its HELD media client (push_audio_sample buffers ~8 ms for a 5.76 s clip) \u2014 the mechanism a feed seam would reuse \u2014 and falls back to the same daemon HTTP route the harness uses. The harness cannot use push_audio_sample itself (single-owner rule). Which path to build is pending decision q4.",
+      "seeds": [
+        "c4"
+      ]
+    },
+    {
+      "id": "s5",
+      "surface": "reachy-mini-cli docs/operating-reachy.md (AEC scope measurement 2026-08-02; asoundrc section)",
+      "finding": "The daemon and the runtime share /dev/snd/pcmC2D0p through the reachymini_audio_sink ALSA plugin, so a third process could in principle write PCM straight to ALSA \u2014 but the AEC is scoped to the daemon's own playback (2.06x baseline cancelled vs 4.72x peak not cancelled for other audio into the same speaker). Direct ALSA streaming from the harness would give Sonic its own echo.",
+      "seeds": [
+        "c3"
+      ]
+    },
+    {
+      "id": "s6",
+      "surface": "reachy_nova/nova_sonic.py _start_session (sessionStart) + AWS docs nova2-userguide/sonic-input-events.html",
+      "finding": "sessionStart sends only inferenceConfiguration (maxTokens 1024, topP 0.9, temperature 0.7). The Nova 2 Sonic docs define turnDetectionConfiguration.endpointingSensitivity HIGH|MEDIUM|LOW ('HIGH: detects pauses quickly, enabling faster responses but may cut off slower speakers'); the harness never sets it, so it runs at the service default. The default value is pending decision q1.",
+      "seeds": [
+        "c5"
+      ]
+    },
+    {
+      "id": "s7",
+      "surface": "reachy_nova/nova_sonic.py inject_text + reachy_nova/harness/bus.py (_deliver, dedupe_window_s)",
+      "finding": "inject_text DROPS a cue outright while Sonic is generating ('dropped reason=speaking') and drops anything within 3 s of the previous inject ('dropped reason=throttled'); the bus adds a 10 s per-key dedupe. A pat during a reply is therefore lost, not late \u2014 reactions 'as we speak' cannot happen on this path today. Every drop is already a named log line, so a deferral slot only changes the fate, not the observability.",
+      "seeds": [
+        "c6"
+      ]
+    },
+    {
+      "id": "s8",
+      "surface": "reachy_nova/nova_sonic.py _run_loop restart path + AWS docs userguide/speech-bidirection.html (8-minute default connection limit) + nova2-userguide/sonic-input-events.html (conversation history)",
+      "finding": "Every stream restart is 'CLEAN: fresh client, fresh UUIDs, system prompt only. No conversation recap is replayed', after a 3 s base backoff (60 s cap, reset after a healthy 60 s session). The v1 Sonic docs give a default 8-minute connection limit and recommend a new connection carrying the previous chat history; the Nova 2 input-events page says history 'can be included only once, after the system prompt and before audio streaming begins' with USER/ASSISTANT roles. So today the robot forgets everything every rotation and goes silent for 3 s or more.",
+      "seeds": [
+        "c12",
+        "c11"
+      ]
+    },
+    {
+      "id": "s9",
+      "surface": "reachy_nova/harness/app.py HARNESS_SYSTEM_PROMPT + reachy_nova/harness/tools.py TOOL_SPECS + AWS docs nova2-userguide/sonic-system-prompts.html",
+      "finding": "The live persona is one 1,500-character string, roughly two-thirds tool mechanics (which tool moves what, what to say when the engine refuses); the character is one clause ('short, warm, and natural \u2014 a curious household companion, not an assistant'). No banter, no variety guidance, no person context, no mood. Tool descriptions carry their own tone rules ('confirm briefly and naturally'). AWS's own baseline voice prompt is 'a warm, professional, and helpful AI assistant' \u2014 the exact helper register the user wants gone \u2014 and the guide warns Sonic 2 over-uses explicit phrase lists and recommends one-shot examples for natural variation. How sharp the wit gets is pending decision q2.",
+      "seeds": [
+        "c8",
+        "c17"
+      ]
+    },
+    {
+      "id": "s10",
+      "surface": "AWS docs nova2-userguide/sonic-language-support.html + legacy reachy_nova/main.py (voice_id='tiffany')",
+      "finding": "Nova 2 Sonic English voices: tiffany/matthew (en-US, polyglot), amy (en-GB), olivia (en-AU), kiara/arjun (en-IN). The harness uses matthew; the legacy direct-SDK app used tiffany. The docs say the system prompt steers lexical style, not accent or pitch \u2014 voice choice is the only knob on the sound of the personality. Which voice is pending decision q3.",
+      "seeds": []
+    },
+    {
+      "id": "s11",
+      "surface": "config/nervous-system/rules.yaml",
+      "finding": "Every inject is one fixed sentence per cue ('(someone is petting you)' + ' (react briefly if at all)'); llm_evaluate is carried as metadata only ('no model is called here'); voice: none already keeps pure-mechanism cues (look-toward-sound, intent/applied, intent/blocked) out of the model. There is no per-entry hook to route a cue through a model before it becomes an inject, and no context (who is here, mood, how many pats lately) rides along \u2014 so identical cues produce near-identical reactions.",
+      "seeds": [
+        "c6",
+        "c10"
+      ]
+    },
+    {
+      "id": "s12",
+      "surface": "reachy_nova/nova_omni.py + reachy_nova/harness/vision_leg.py + reachy_nova/nova_sonic.py _should_interrupt",
+      "finding": "Nova 2 Lite is used for exactly two stateless jobs: the barge-in INTERRUPT/CONTINUE verdict (maxTokens 10) and the 60 s clip description (Omni unset on this account, so the Lite fallback runs on a still image only \u2014 and the clip itself was reported 'vision-extra-absent' on the device). No reaction judgment goes through Lite; NovaOmni._invoke is already the reusable request-response call (messages-v1 schema, boto3) a reaction tier would build on.",
+      "seeds": [
+        "c10"
+      ]
+    },
+    {
+      "id": "s13",
+      "surface": "reachy_nova/harness/sense_history.py + reachy_nova/harness/cognition_feed.py + reachy_nova/harness/app.py _on_transcript + grep of reachy_nova/harness for session_state|nova_feedback|emotions",
+      "finding": "The harness remembers 20 body cues in a ring buffer (recall_senses) and nothing else: USER transcripts are logged as 'heard', ASSISTANT transcripts go to the cognition feed as 'message', neither is stored; feed.emotion is never emitted; none of session_state.py, nova_feedback.py or emotions.py is imported by the harness package. There is no conversation ledger to compact.",
+      "seeds": [
+        "c11",
+        "c13"
+      ]
+    },
+    {
+      "id": "s14",
+      "surface": "legacy reachy_nova/main.py system prompt + config/emotions.yaml + reachy_nova/skills/*/SKILL.md + docs/components/continous_experience.md",
+      "finding": "The retired direct-SDK app had a richer persona ('You don't describe your capabilities. You just live.'), a 5-emotion state with derived mood and wounds (config/emotions.yaml), session persistence with crash/short-break/long-absence recap injection, and per-skill SKILL.md context \u2014 none of which reaches the harness (ForgeLeg never calls discover(); built-in skills 'belong to the direct-SDK app'). The ideas are worth porting; the modules are not (they assume the SDK loop).",
+      "seeds": [
+        "c9",
+        "c13"
+      ]
+    },
+    {
+      "id": "s15",
+      "surface": "reachy_nova/harness/hearing.py + reachy-mini-cli reachy/behavior/audio_tee.py",
+      "finding": "Tee: 32 ms chunks, ~2 s bounded queue, oldest-dropped; harness: 100 ms chunks, np.interp resample to 16 kHz, echo gate policy off (hardware AEC verified 2026-08-10). Worst-case added delay on the ear is on the order of 100 ms \u2014 not a contributor.",
+      "seeds": [
+        "c15"
+      ]
+    },
+    {
+      "id": "s16",
+      "surface": "reachy_nova/harness/forge_leg.py + reachy_nova/harness/kiro_rules.py + reachy-mini-cli reachy/behavior/rules.py (say field)",
+      "finding": "The Kiro writer only authors skills and rules; a rule's say is a single string (MAX_SAY_CHARS 500, no variants, validated by _validate_say). Body-side reactions cannot vary their words; the writer tier is orthogonal to tone and latency.",
+      "seeds": [
+        "c14"
+      ]
+    },
+    {
+      "id": "s17",
+      "surface": "reachy_nova/.github/workflows/publish.yml + pyproject.toml (version 0.3.0)",
+      "finding": "CI runs uv run pytest -n auto on every push/PR to main; a push to main publishes to PyPI and refuses a reused version, so a feature PR must bump pyproject version. The device runs an editable install (uv absent there): deploy is git pull plus a harness restart.",
+      "seeds": [
+        "c16"
+      ]
+    },
+    {
+      "id": "s18",
+      "surface": "reachy_nova/harness/memory_leg.py + reachy_nova/nova_memory.py (qq: MongoDB + Neo4j + core.md/notes.md)",
+      "finding": "The only memory the harness knows how to attach is the qq knowledge system, routed through rules.yaml memory/context and memory/result templates \u2014 and it is absent on the robot (journal: 'memory leg absent \u2014 no qq'). It is retrieval, not a conversation memory; nothing in it summarises or compacts what was said.",
+      "seeds": [
+        "c13"
+      ]
+    },
+    {
+      "id": "s19",
+      "surface": "challenge pass / lifecycle lens: reachy_nova/nova_sonic.py _check_response_liveness + robot journal 2026-09-05 21:42-22:06",
+      "finding": "Six 'Response liveness stall forced a restart' lines exactly 180 s apart while the room was quiet \u2014 the watchdog written for the NTP clock-step zombie fires on ordinary silence because feed_audio marks input as flowing on every 100 ms chunk. Every such restart is a clean start (no recap) plus the 3 s base backoff. This is a bigger source of amnesia than the 8-minute limit.",
+      "seeds": [
+        "c26"
+      ]
+    },
+    {
+      "id": "s20",
+      "surface": "challenge pass / counter-evidence lens: robot journal 2026-09-05 21:51:29 -> 21:59:30 (Bedrock 'Model has timed out in processing the request')",
+      "finding": "The only session that lived past the liveness window (because Ori kept talking) died at 480.5 s with a Bedrock-side timeout: the 8-minute limit holds on Nova 2 Sonic. Park v1 resolved with this evidence; c12's rotation target is ~7 minutes.",
+      "seeds": [
+        "c12"
+      ]
+    },
+    {
+      "id": "s21",
+      "surface": "challenge pass / adjacent-systems lens: daemon OpenAPI on the robot (GET http://localhost:8000/openapi.json, 2026-09-05) + reachy_nova/harness/speaking.py _UPLOAD_FILENAME + df on the robot",
+      "finding": "The daemon exposes upload, play_sound, stop_sound, GET sounds and DELETE sounds/{filename}. speaking.py reuses one filename per utterance; overlapping chunk uploads to one name would corrupt a file still being played. Disk: / is 90 % used, 1.4 GB free \u2014 an unbounded sounds directory is a real outage path.",
+      "seeds": [
+        "c27"
+      ]
+    },
+    {
+      "id": "s22",
+      "surface": "challenge pass / concurrency lens: reachy_nova/harness/bus.py (paho loop_start network thread, callbacks wrapped) + app.py _on_tool_use (per-call daemon thread)",
+      "finding": "Bus callbacks run on paho's single network thread; a 1-2 s Lite round trip there would stall every other cue and the retained clip state. The tool-call path already shows the shape: one short-lived thread per call, result posted back through Sonic.",
+      "seeds": [
+        "c28"
+      ]
+    },
+    {
+      "id": "s23",
+      "surface": "challenge pass / unstated-assumption lens: reachy_nova/harness/bus.py route_event/VOICE_MARKERS/QUIET_MARKER/_deliver + config/nervous-system/rules.yaml voice: none entries",
+      "finding": "Nothing in c10 said where the plan text enters the pipeline; if it bypassed route_event it would drop the markers that took a live round (t6/t14) to get right and could double-charge Lite for a deduped pat.",
+      "seeds": [
+        "c29"
+      ]
+    },
+    {
+      "id": "s24",
+      "surface": "challenge pass / overlooked-actors lens: config/nervous-system/rules.yaml rule/fire:nova-face-noticed + reachy_nova/harness/app.py FACE_RULE",
+      "finding": "The frame's earlier wording leaned on a 'person profile' the harness cannot key: no name crosses the bus. c10 amended to 'the day's memory'; the per-person layer parked as an upstream follow-up.",
+      "seeds": [
+        "c10",
+        "c11"
+      ]
+    },
+    {
+      "id": "s25",
+      "surface": "challenge pass / security-and-data lens: <state>/ layout on the robot (nova-volume.json, nova-quiet.json pattern), reachy_nova/harness/quiet.py atomic write, df / = 90 %",
+      "finding": "A plaintext ledger of everything said in the room is new data the harness never held; the frame said what to keep and for how long but not how the file is written, who may write it concurrently, or what happens when the disk fills. Retention of the raw ledger and the quiet-window exclusion are Ori's call (q6).",
+      "seeds": [
+        "c30"
+      ]
+    },
+    {
+      "id": "s26",
+      "surface": "challenge pass / lifecycle lens: reachy_nova/nova_sonic.py _run_loop (finally: _active=False, _current_tool_use=None; send_tool_result discards on session_gen change) + harness/speaking.py idle property",
+      "finding": "c12 said 'a little before the limit' without saying what happens to work in flight; the restart path drops an in-flight tool use and the speaker keeps playing whatever it holds. Also the journal's first utterance of the boot came 33 s after session start with no heard line \u2014 Sonic can speak unprompted on a fresh session, which a rotation with replayed history could turn into a re-greeting every 7 minutes.",
+      "seeds": [
+        "c31",
+        "c12"
+      ]
+    },
+    {
+      "id": "s27",
+      "surface": "challenge pass / unstated-assumption lens: reachy_nova/harness/speaking.py (playback lags generation by at least one chunk) + nova_sonic.py inject_text speaking guard rationale",
+      "finding": "c6 defers cues until Sonic leaves 'speaking' \u2014 a generation event, not a playback event; the deferred reaction will play after the tail of the reply it interrupted. Naming the age keeps the reaction coherent.",
+      "seeds": [
+        "c32",
+        "c6"
+      ]
+    },
+    {
+      "id": "s28",
+      "surface": "challenge pass / reversibility-and-observability lens: reachy_nova/harness/hearing.py resolve_policy pattern, docs/architecture.md invariant 4 (fail open on policy), .github/workflows/publish.yml (rollback = reinstall 0.3.0)",
+      "finding": "Rolling back the whole release is possible (pip install reachy-nova==0.3.0 on the device; 0.4.0's state files are ignored by 0.3.0), but a single misbehaving piece \u2014 clicking chunk boundaries, a slow Lite tier \u2014 should be switchable off in .env without losing the rest.",
+      "seeds": [
+        "c33"
+      ]
+    },
+    {
+      "id": "s29",
+      "surface": "challenge pass / adjacent-systems lens: reachy_nova/harness/bus.py:164 DEFAULT_RULES_PATH (Path(__file__).parents[2]/config/...) + pyproject.toml package-data + tests/test_packaging.py",
+      "finding": "The robot runs an editable checkout so config/ exists; a PyPI-installed harness would silently run with a permissive empty rule set today, and would have no persona file tomorrow unless a default is embedded.",
+      "seeds": [
+        "c34"
+      ]
+    },
+    {
+      "id": "s30",
+      "surface": "challenge pass / unstated-assumption lens: decision c18 (Wit/Hoid register) + AWS sonic-system-prompts guidance (Sonic 2 follows explicit phrasing closely)",
+      "finding": "A prompt that names a licensed character invites the model to play that character (Roshar, its catch-phrases) rather than to borrow the register; the decision asked for the spirit, not the character.",
+      "seeds": [
+        "c35"
+      ]
+    },
+    {
+      "id": "s31",
+      "surface": "challenge pass / adjacent-systems lens (clean): reachy-mini-cli MindPresence (nova/harness/state), TranscriptSenseDriver mute_until, reTerminal bridge on the cognition feed",
+      "finding": "None of these read the speaker's chunking, the persona or the ledger: the harness state topic, the runtime's self-mute and the NDJSON message feed are untouched by every claim on this frame. Residual risk: the message feed already runs ahead of audible speech and will run further ahead of nothing \u2014 it emits at generation time either way.",
+      "seeds": [
+        "c15"
+      ]
+    },
+    {
+      "id": "s32",
+      "surface": "challenge pass / security lens (clean): Nova 2 Lite receives the day's memory and the last exchanges; compaction runs in the cloud",
+      "finding": "Accepted by Ori in q5 ('importance can be done in background with Nova 2 Lite'); the data already crosses to Bedrock as speech. No new credential, endpoint or trust boundary is introduced \u2014 the same boto3 client and region as the barge-in verdict.",
+      "seeds": []
+    },
+    {
+      "id": "s33",
+      "surface": "challenge pass / cheap-probe lens (proposed, not run): back-to-back play_sound gap on the robot; Lite round-trip from the robot",
+      "finding": "Two probes settle parks v2 and v3 in minutes on the device \u2014 two short WAVs posted back to back with a human ear on the speaker, and one timed Lite invoke from the robot's network \u2014 but both make the robot sound or spend and are Ori's to run or to hand to the plan as its first task.",
+      "seeds": []
+    },
+    {
+      "id": "s34",
+      "surface": "challenge pass / failure-mode lens: robot journal 2026-09-05 21:52-22:03 ('Speaking watchdog: no audio for 4s' immediately precedes every 'queued ... utterance-complete') + reachy_nova/nova_sonic.py _process_responses contentEnd handling",
+      "finding": "Five consecutive short replies (0.84-1.28 s of audio) were each queued 4.3-4.6 s after 'Utterance audio started', and in every case the line before 'queued' is the 4 s speaking watchdog. Sonic's ASSISTANT contentEnd is not flipping _speaking on this stream (whether it never arrives, arrives with a different role/type, or carries a stopReason the code ignores is for the plan to log at INFO). Consequence: today's latency is generation time PLUS a flat 4 s; a chunker keyed on state change would inherit the 4 s on every utterance's last chunk, so the flush must be inactivity-driven.",
+      "seeds": [
+        "c2"
+      ]
+    }
+  ],
+  "lapses": [],
+  "obligations": []
+}
