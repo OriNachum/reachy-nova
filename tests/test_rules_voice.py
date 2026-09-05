@@ -127,6 +127,31 @@ def test_default_block_is_voice_free(raw_rules):
     assert raw_rules["default"].get("voice") == "free"
 
 
+# --------------------------------------------------------------------------- #
+# t13 — react: lite opts a cue into the Nova 2 Lite reaction tier             #
+# --------------------------------------------------------------------------- #
+
+REACT_LITE_ENTRIES = (
+    "rule/fire:pat-acknowledge",
+    "rule/fire:nova-pat-cheer",
+    "rule/fire:nova-face-noticed",
+    "pat/level1",
+    "pat/level2",
+    "pat/detected",
+    "face/recognized",
+)
+
+
+@pytest.mark.parametrize("key", REACT_LITE_ENTRIES)
+def test_entries_opt_into_the_lite_reaction_tier(raw_rules, key):
+    assert raw_rules["rules"][key].get("react") == "lite"
+
+
+def test_look_toward_sound_does_not_opt_into_lite(raw_rules):
+    """voice: none never reaches Lite — the override must not carry react."""
+    assert raw_rules["rules"]["rule/fire:look-toward-sound"].get("react") is None
+
+
 def test_route_event_appends_silent_marker():
     cfg = {
         "rules": {"src/type": {"inject_template": "context", "voice": "silent"}},

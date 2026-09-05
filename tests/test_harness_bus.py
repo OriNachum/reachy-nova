@@ -1083,3 +1083,284 @@ def test_bus_without_a_quiet_state_never_marks_an_inject(tmp_path):
 def test_quiet_marker_text_says_do_not_speak():
     assert "quiet mode" in bus.QUIET_MARKER
     assert "do not speak" in bus.QUIET_MARKER
+
+
+# --------------------------------------------------------------------------- #
+# Lite reactor routing (t13) — react: lite hands the BASE cue to a reactor;   #
+# markers are applied by the bus, on delivery, whichever thread that lands on #
+# --------------------------------------------------------------------------- #
+
+
+class FakeReactor:
+    """Stand-in for :class:`~reachy_nova.harness.lite_reactor.LiteReactor`.
+
+    Records every ``react()`` call as ``(cue, template)``. By default
+    ``deliver`` fires synchronously with ``plan_text`` (matching the
+    acceptance criteria's "use a fake reactor that calls deliver
+    synchronously with a plan string"); with ``auto_deliver=False`` the
+    caller controls timing via ``pending_deliver`` (used to prove a deliver
+    firing on another thread still works).
+    """
+
+    def __init__(self, plan_text: str | None = None, auto_deliver: bool = True) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.plan_text = plan_text
+        self.auto_deliver = auto_deliver
+        self.pending_deliver = None
+
+    def react(self, cue: str, template: str, deliver) -> None:
+        self.calls.append((cue, template))
+        if self.auto_deliver:
+            deliver(self.plan_text if self.plan_text is not None else template)
+        else:
+            self.pending_deliver = deliver
+
+
+def _lite_rules_path(tmp_path, **overrides):
+    entry = {
+        "priority": "NORMAL",
+        "urgency": "NOW",
+        "inject_template": "someone is petting you",
+        "sense": "pat",
+        "voice": "brief",
+        "react": "lite",
+    }
+    entry.update(overrides)
+    cfg = {
+        "rules": {"pat/level1": entry},
+        "default": {"priority": "NORMAL", "urgency": "DEFERRABLE"},
+    }
+    path = tmp_path / "rules-lite.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    return path
+
+
+def _pat_level1_msg():
+    return fake_msg("reachy/events/pat/level1", {"t": "pat", "ts": 1.0, "level": 1})
+
+
+def test_lite_tier_entry_hands_the_base_text_to_the_reactor(tmp_path):
+    """The reactor gets the RENDERED TEMPLATE with no voice marker at all —
+    not the fully-marked text route_event would have produced."""
+    rec = Recorder()
+    reactor = FakeReactor(plan_text="thanks for the pat")
+    nb = bus.NovaBus(
+        on_inject=rec.on_inject,
+        rules_path=_lite_rules_path(tmp_path),
+        sources="pat",
+        reactor=reactor,
+    )
+    nb.on_message(None, None, _pat_level1_msg())
+    assert reactor.calls == [("someone is petting you", "someone is petting you")]
+
+
+def test_lite_tier_delivered_plan_carries_the_entrys_voice_marker(tmp_path):
+    rec = Recorder()
+    reactor = FakeReactor(plan_text="thanks for the pat")
+    nb = bus.NovaBus(
+        on_inject=rec.on_inject,
+        rules_path=_lite_rules_path(tmp_path),
+        sources="pat",
+        reactor=reactor,
+    )
+    nb.on_message(None, None, _pat_level1_msg())
+    assert rec.injects == ["thanks for the pat" + bus.VOICE_MARKERS["brief"]]
+
+
+def test_lite_tier_records_the_delivered_plan_text_in_history(tmp_path):
+    rec = Recorder()
+    history = SenseHistory()
+    reactor = FakeReactor(plan_text="thanks for the pat")
+    nb = bus.NovaBus(
+        on_inject=rec.on_inject,
+        rules_path=_lite_rules_path(tmp_path),
+        sources="pat",
+        reactor=reactor,
+        history=history,
+    )
+    nb.on_message(None, None, _pat_level1_msg())
+    (entry,) = history.recent()
+    assert entry["text"] == rec.injects[0] == "thanks for the pat" + bus.VOICE_MARKERS["brief"]
+    assert entry["sense_class"] == "pat"
+    assert entry["voice"] == "brief"
+
+
+def test_lite_tier_dedupe_suppresses_reactor_call_and_inject_for_a_repeat(tmp_path):
+    clock_state = {"t": 0.0}
+    rec = Recorder()
+    reactor = FakeReactor(plan_text="thanks")
+    nb = bus.NovaBus(
+        on_inject=rec.on_inject,
+        rules_path=_lite_rules_path(tmp_path),
+        sources="pat",
+        reactor=reactor,
+        clock=lambda: clock_state["t"],
+    )
+    nb.on_message(None, None, _pat_level1_msg())
+    clock_state["t"] += 1.0  # well inside the default 10s dedupe window
+    nb.on_message(None, None, _pat_level1_msg())
+    assert len(reactor.calls) == 1
+    assert len(rec.injects) == 1
+
+
+def test_voice_none_entry_with_react_lite_never_calls_the_reactor(tmp_path):
+    """react: lite is documented to never apply to voice: none — structurally
+    enforced because _handle_message routes voice: none to _deliver_muted,
+    which never touches the reactor at all."""
+    rec = Recorder()
+    reactor = FakeReactor(plan_text="thanks")
+    nb = bus.NovaBus(
+        on_inject=rec.on_inject,
+        rules_path=_lite_rules_path(tmp_path, voice="none"),
+        sources="pat",
+        reactor=reactor,
+    )
+    nb.on_message(None, None, _pat_level1_msg())
+    assert reactor.calls == []
+    assert rec.injects == []
+
+
+def test_entries_without_react_lite_ignore_a_wired_reactor(tmp_path):
+    """A rule that doesn't opt in renders byte-identically even when a
+    reactor is wired — react: lite is per-entry, never global."""
+    rec = Recorder()
+    reactor = FakeReactor(plan_text="should never be used")
+    nb = make_bus(rec, rules_path=_custom_rules_path(tmp_path), reactor=reactor)
+    _pat(nb)
+    assert reactor.calls == []
+    assert rec.injects == ["someone is petting you" + bus.VOICE_MARKERS["brief"]]
+
+
+def test_react_lite_without_a_wired_reactor_renders_as_today(tmp_path):
+    rec = Recorder()
+    nb = bus.NovaBus(
+        on_inject=rec.on_inject,
+        rules_path=_lite_rules_path(tmp_path),
+        sources="pat",
+    )
+    nb.on_message(None, None, _pat_level1_msg())
+    assert rec.injects == ["someone is petting you" + bus.VOICE_MARKERS["brief"]]
+
+
+def test_reactor_deliver_from_another_thread_results_in_exactly_one_inject_and_history_record(
+    tmp_path,
+):
+    rec = Recorder()
+    history = SenseHistory()
+    reactor = FakeReactor(auto_deliver=False)
+    nb = bus.NovaBus(
+        on_inject=rec.on_inject,
+        rules_path=_lite_rules_path(tmp_path),
+        sources="pat",
+        reactor=reactor,
+        history=history,
+    )
+    nb.on_message(None, None, _pat_level1_msg())
+    assert reactor.pending_deliver is not None
+
+    t = threading.Thread(target=lambda: reactor.pending_deliver("thanks (from a thread)"))
+    t.start()
+    t.join(timeout=5)
+
+    assert rec.injects == ["thanks (from a thread)" + bus.VOICE_MARKERS["brief"]]
+    assert len(history.recent()) == 1
+
+
+def test_reactor_deliver_on_inject_raise_rolls_back_the_dedupe_reservation(tmp_path):
+    clock_state = {"t": 0.0}
+
+    class FlakyRecorder:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.injects: list[str] = []
+
+        def on_inject(self, text: str) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("sonic is not ready")
+            self.injects.append(text)
+
+    flaky = FlakyRecorder()
+    reactor = FakeReactor(plan_text="thanks")
+    nb = bus.NovaBus(
+        on_inject=flaky.on_inject,
+        rules_path=_lite_rules_path(tmp_path),
+        sources="pat",
+        reactor=reactor,
+        clock=lambda: clock_state["t"],
+    )
+    nb.on_message(None, None, _pat_level1_msg())  # raises, rolled back
+    clock_state["t"] += 0.01  # still well inside the window
+    nb.on_message(None, None, _pat_level1_msg())  # must NOT be suppressed
+
+    assert flaky.calls == 2
+    assert flaky.injects == ["thanks" + bus.VOICE_MARKERS["brief"]]
+
+
+def test_lite_tier_route_senselog_line_when_cue_handed_to_reactor(caplog, tmp_path):
+    rec = Recorder()
+    reactor = FakeReactor(plan_text="thanks")
+    nb = bus.NovaBus(
+        on_inject=rec.on_inject,
+        rules_path=_lite_rules_path(tmp_path),
+        sources="pat",
+        reactor=reactor,
+    )
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        nb.on_message(None, None, _pat_level1_msg())
+    route_lines = [
+        r.getMessage()
+        for r in caplog.records
+        if "[SENSE stage=route source=nova event=pat/level1]" in r.getMessage()
+        and "lite" in r.getMessage()
+    ]
+    assert len(route_lines) == 1
+
+
+def test_on_inject_accepting_sense_class_receives_the_rules_sense(tmp_path):
+    calls: list[tuple[str, str | None]] = []
+
+    class FakeSonic:
+        def inject_text(
+            self, text: str, force: bool = False, sense_class: str | None = None
+        ) -> None:
+            calls.append((text, sense_class))
+
+    sonic = FakeSonic()
+    nb = bus.NovaBus(on_inject=sonic.inject_text, rules_path=_custom_rules_path(tmp_path))
+    _pat(nb)
+    assert calls == [("someone is petting you" + bus.VOICE_MARKERS["brief"], "touch")]
+
+
+def test_on_inject_accepting_sense_class_is_also_used_on_the_lite_path(tmp_path):
+    calls: list[tuple[str, str | None]] = []
+
+    class FakeSonic:
+        def inject_text(
+            self, text: str, force: bool = False, sense_class: str | None = None
+        ) -> None:
+            calls.append((text, sense_class))
+
+    sonic = FakeSonic()
+    reactor = FakeReactor(plan_text="thanks")
+    nb = bus.NovaBus(
+        on_inject=sonic.inject_text,
+        rules_path=_lite_rules_path(tmp_path),
+        sources="pat",
+        reactor=reactor,
+    )
+    nb.on_message(None, None, _pat_level1_msg())
+    assert calls == [("thanks" + bus.VOICE_MARKERS["brief"], "pat")]
+
+
+def test_on_inject_with_a_single_positional_parameter_still_works(tmp_path):
+    """The memory leg's shape (and every existing test's Recorder): called
+    with exactly one positional argument, never a sense_class keyword."""
+    calls: list[str] = []
+
+    def on_inject(text: str) -> None:
+        calls.append(text)
+
+    nb = bus.NovaBus(on_inject=on_inject, rules_path=_custom_rules_path(tmp_path))
+    _pat(nb)
+    assert calls == ["someone is petting you" + bus.VOICE_MARKERS["brief"]]
