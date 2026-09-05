@@ -261,7 +261,11 @@ class SonicSpeaker:
         below it and it never bites (kept for call-site compatibility).
     queue_size:
         Bound of the playback queue; overflow is a named senselog drop
-        (``reason=queue-full``), never a block.
+        (``reason=queue-full``), never a block. 90 chunks (~90 s of audio,
+        ~8 MB) — Sonic generates faster than real time, so a long reply
+        parks most of itself here while the first chunks play; at the old
+        bound of 8 a 35 s reply dropped every chunk past the eighth pending
+        one and skipped words (robot, 2026-09-06 00:38).
     quiet:
         Optional :class:`~reachy_nova.harness.quiet.QuietState`. While it is
         active every chunk is DROPPED before anything else happens — no post,
@@ -300,7 +304,7 @@ class SonicSpeaker:
         poster: Callable[[str, bytes, str], None] | None = None,
         on_playback_failure: Callable[[], None] | None = None,
         max_buffer_s: float = 15.0,
-        queue_size: int = 8,
+        queue_size: int = 90,
         stopper: Callable[[str], None] | None = None,
         quiet: QuietState | None = None,
         chunked: bool = True,

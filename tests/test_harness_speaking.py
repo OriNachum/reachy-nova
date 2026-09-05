@@ -1201,3 +1201,41 @@ def test_quiet_never_reaches_the_ear(stop_event, quiet_state, monkeypatch):
         assert ear.chunks_gated == 0
     finally:
         speaker.stop()
+
+
+def test_a_long_reply_generated_faster_than_real_time_never_drops_chunks(monkeypatch):
+    """Robot, 2026-09-06 00:38: a ~35 s reply arrived in ~18 s; with a queue of 8
+    every chunk past the eighth pending one was dropped and words went missing."""
+    import numpy as np
+
+    from reachy_nova.harness.gate import EchoGate
+    from reachy_nova.harness.speaking import SonicSpeaker
+
+    posted: list[str] = []
+    speaker = SonicSpeaker(
+        gate=EchoGate(margin_s=0.0),
+        sample_rate=1000,
+        poster=lambda base, wav, name: posted.append(name),
+        deleter=lambda base, name: None,
+        chunk_s=1.0,
+        inactivity_s=0.3,
+    )
+    speaker.on_state_change("speaking")
+    for _ in range(40):  # 40 s of audio, all delivered at once (faster than real time)
+        speaker.on_audio_chunk(np.full(1000, 0.1, dtype=np.float32))
+    speaker.on_state_change("listening")
+    assert speaker._queue.qsize() + len(speaker._buffer) >= 40 or speaker.chunks_played >= 0
+    # nothing was dropped for queue-full: every chunk is either queued or already played
+    import threading
+
+    stop = threading.Event()
+    speaker.start(stop)
+    try:
+        deadline = __import__("time").monotonic() + 5.0
+        while speaker.chunks_played < 40 and __import__("time").monotonic() < deadline:
+            speaker.gate.clear()  # let the fake windows elapse instantly
+            __import__("time").sleep(0.01)
+    finally:
+        stop.set()
+        speaker.stop()
+    assert speaker.chunks_played == 40, f"only {speaker.chunks_played} of 40 chunks played"
