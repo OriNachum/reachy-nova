@@ -46,6 +46,7 @@ import logging
 import queue
 import re
 import threading
+from collections import deque
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -102,6 +103,9 @@ MAX_TOKENS = 60
 #: 1.06 median / 1.34s max for a 60-token reply).
 DEFAULT_TIMEOUT_S = 2.0
 
+#: How many recent "say" lines are fed back into the prompt for variety.
+RECENT_SAYS = 5
+
 #: How often the worker wakes to re-check the stop signal while idle.
 _POLL_S = 0.05
 
@@ -155,7 +159,7 @@ def render_reaction(cue: str, say: str) -> str:
     return f"({cue} — you feel like saying: {say})"
 
 
-def _build_user_text(cue: str, context: dict) -> str:
+def _build_user_text(cue: str, context: dict, recent_says: list[str] | None = None) -> str:
     """User content: the cue plus all four context parts, always labelled.
 
     Every label is always present (even when its part is missing from
@@ -181,6 +185,12 @@ def _build_user_text(cue: str, context: dict) -> str:
     else:
         rendered = "(none)"
     lines.append(f"Recent exchanges: {rendered}")
+    if recent_says:
+        recent = "; ".join(f'"{r}"' for r in recent_says)
+        lines.append(
+            "Lines you already used for recent cues, which you must NOT reuse or "
+            f"paraphrase — pick a different angle: {recent}"
+        )
     return "\n".join(lines)
 
 
@@ -251,6 +261,9 @@ class LiteReactor:
         self._context_provider = context_provider
         self._on_gesture = on_gesture
         self._clock = clock
+        # The last few lines Lite chose, fed back into the next prompt so a pat
+        # does not get "Ah, that feels nice!" three times in a row (robot, 2026-09-06).
+        self._recent_says: deque[str] = deque(maxlen=RECENT_SAYS)
 
         self._queue: queue.Queue[_ReactItem | None] = queue.Queue(maxsize=max(1, max_queue))
         self._enqueue_lock = threading.Lock()
@@ -372,6 +385,8 @@ class LiteReactor:
             return
 
         plan = parse_plan(raw_text)
+        if plan is not None and plan.say:
+            self._recent_says.append(plan.say)
         if plan is None:
             self._fallback(item, REASON_MALFORMED, f"reply={raw_text!r}")
             return
@@ -419,7 +434,7 @@ class LiteReactor:
         joins it — so the worker is free to move straight on to the next
         queued cue.
         """
-        body = _request_body(_build_user_text(cue, context))
+        body = _request_body(_build_user_text(cue, context, list(self._recent_says)))
         result: dict[str, Any] = {}
         done = threading.Event()
 

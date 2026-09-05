@@ -43,7 +43,13 @@ INPUT_CHUNK_SIZE = int(INPUT_SAMPLE_RATE * CHUNK_DURATION_MS / 1000)
 # turns that stream into a zombie — sends keep succeeding, no response event
 # ever comes back, and nothing raises — so it must be detected, not waited on.
 CLOCK_STEP_THRESHOLD_S = 60.0
-DEFAULT_LIVENESS_S = 180.0
+# 15 minutes, not 3 (2026-09-06, robot): the proactive session rotation
+# (NOVA_SONIC_ROTATE_S, ~7 min, hard deadline 470 s) already replaces any
+# session — a zombie included — so this watchdog is a conservative second net,
+# not the first line of defence. At 180 s it restarted a quiet room every three
+# minutes on a desk where chairs, typing and a person moving about produce
+# speech-level bursts that Bedrock (rightly) never answers.
+DEFAULT_LIVENESS_S = 900.0
 # History-replay circuit breaker: a session that dies this soon after a start
 # that replayed history counts as a replay death; two in a row suspend replay.
 REPLAY_DEATH_WINDOW_S = 10.0
@@ -76,14 +82,16 @@ def _liveness_window() -> float:
 # chunk loud enough to be speech counts as input now. The default sits between
 # the measured quiet-room floor (~0.002 RMS) and human speech (~0.09 RMS) on
 # this microphone — see harness/hearing.py's echo-gate measurement.
-DEFAULT_SPEECH_FLOOR = 0.02
+DEFAULT_SPEECH_FLOOR = 0.05
 # A single loud chunk is a cough, a door, a dropped spoon — not a person
 # talking to the robot. Only a BURST of speech-level chunks counts as input
 # for the liveness watchdog: at least SPEECH_BURST_CHUNKS above the floor
 # within the last SPEECH_BURST_WINDOW chunks (2 s at 100 ms/chunk). Measured
 # on the robot 2026-09-06 00:15 (quiet house): mic RMS median 0.005, one
 # chunk in ten above 0.02, so a single-chunk trigger restarted the stream
-# every 3 min of silence even after the floor was introduced.
+# every 3 min of silence even after the floor was introduced — and at 0.02
+# with a burst rule a person moving around the desk still did (00:27, 00:30).
+# 0.05 is conversational speech near the robot (measured ~0.09 close-talk).
 SPEECH_BURST_CHUNKS = 5
 SPEECH_BURST_WINDOW = 20
 

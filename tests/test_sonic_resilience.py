@@ -27,7 +27,7 @@ is talking, so "input flowing, no response for 180s" meant "nobody spoke for
 three minutes" and the robot's 2026-09-05 journal carried six forced restarts
 exactly 180s apart in a quiet room — each one a clean session that wiped the
 conversation. A mic chunk therefore counts as input only when its RMS clears
-``NOVA_SONIC_SPEECH_FLOOR`` (default 0.02, between the measured ~0.002 room
+``NOVA_SONIC_SPEECH_FLOOR`` (default 0.05, between the measured ~0.002 room
 floor and the ~0.09 RMS of human speech on this mic — see
 ``harness/hearing.py``); an inject or a tool result still counts
 unconditionally, because those really are us talking to Bedrock.
@@ -230,7 +230,7 @@ def faketime(monkeypatch):
     """Swap the module's ``time`` and ``asyncio`` for fake-clock-driven ones."""
     # The integration tests below rely on the 180s default window, so an
     # ambient override in the developer's environment must not leak in.
-    monkeypatch.delenv("NOVA_SONIC_LIVENESS_S", raising=False)
+    monkeypatch.setenv("NOVA_SONIC_LIVENESS_S", "180")
     # These cases run up to 600 fake seconds, past the 420s default rotation
     # interval (t12) — a rotation there would be correct behaviour and a
     # second restart these assertions do not expect. Rotation has its own
@@ -310,8 +310,9 @@ class TestClockStepDetector:
 class TestResponseLivenessWatchdog:
     @pytest.fixture(autouse=True)
     def _default_window(self, monkeypatch):
-        """Most cases here assert against the 180s default, so drop any override."""
-        monkeypatch.delenv("NOVA_SONIC_LIVENESS_S", raising=False)
+        """These cases are written against a 180 s window; pin it explicitly
+        (the shipped default is 900 s — see test_window_defaults_to_900s)."""
+        monkeypatch.setenv("NOVA_SONIC_LIVENESS_S", "180")
 
     def _armed(self, mono: float = 500.0) -> NovaSonic:
         sonic = NovaSonic()
@@ -368,15 +369,15 @@ class TestResponseLivenessWatchdog:
         assert sonic._check_response_liveness(500.0 + 19.0) is False
         assert sonic._check_response_liveness(500.0 + 21.0) is True
 
-    def test_window_defaults_to_180s(self, monkeypatch):
+    def test_window_defaults_to_900s(self, monkeypatch):
         monkeypatch.delenv("NOVA_SONIC_LIVENESS_S", raising=False)
-        assert nova_sonic._liveness_window() == 180.0
+        assert nova_sonic._liveness_window() == 900.0
 
     def test_garbage_env_falls_back_to_the_default(self, monkeypatch):
         monkeypatch.setenv("NOVA_SONIC_LIVENESS_S", "not-a-number")
-        assert nova_sonic._liveness_window() == 180.0
+        assert nova_sonic._liveness_window() == 900.0
         monkeypatch.setenv("NOVA_SONIC_LIVENESS_S", "0")
-        assert nova_sonic._liveness_window() == 180.0
+        assert nova_sonic._liveness_window() == 900.0
 
     def test_feed_audio_without_a_loop_claims_nothing(self):
         """No loop → nothing was sent, so nothing may be claimed as input."""
@@ -434,12 +435,12 @@ class TestSpeechGatedInput:
     @pytest.fixture(autouse=True)
     def _default_floor(self, monkeypatch):
         monkeypatch.delenv("NOVA_SONIC_SPEECH_FLOOR", raising=False)
-        monkeypatch.delenv("NOVA_SONIC_LIVENESS_S", raising=False)
+        monkeypatch.setenv("NOVA_SONIC_LIVENESS_S", "180")
 
     # -- the floor itself --------------------------------------------------
 
-    def test_floor_defaults_to_0_02(self, monkeypatch):
-        assert nova_sonic._speech_floor() == 0.02
+    def test_floor_defaults_to_0_05(self, monkeypatch):
+        assert nova_sonic._speech_floor() == 0.05
 
     def test_floor_is_overridable_by_env(self, monkeypatch):
         monkeypatch.setenv("NOVA_SONIC_SPEECH_FLOOR", "0.05")
@@ -447,9 +448,9 @@ class TestSpeechGatedInput:
 
     def test_garbage_floor_falls_back_to_the_default(self, monkeypatch):
         monkeypatch.setenv("NOVA_SONIC_SPEECH_FLOOR", "not-a-number")
-        assert nova_sonic._speech_floor() == 0.02
+        assert nova_sonic._speech_floor() == 0.05
         monkeypatch.setenv("NOVA_SONIC_SPEECH_FLOOR", "-1")
-        assert nova_sonic._speech_floor() == 0.02
+        assert nova_sonic._speech_floor() == 0.05
 
     # -- what feed_audio does with it --------------------------------------
 

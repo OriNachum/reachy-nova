@@ -523,7 +523,7 @@ lives under `~/.reachy_nova/skills-active/`.
   it restarts both cloud legs at once —
   `sonic.request_immediate_restart()` and `kiro_unit.request_restart()` — because
   every open connection is bound to the address that just went away, and Sonic's
-  liveness watchdog alone (180 s) cannot meet the 60 s "the mind is back" bound.
+  liveness watchdog alone (900 s) cannot meet the 60 s "the mind is back" bound.
   On a **drop** it logs only: the legs' own watchdogs own the offline state, and
   respawning into a dead network only guarantees a failed respawn.
   `After=network-online.target` on the unit is **ordering only** — it is reached

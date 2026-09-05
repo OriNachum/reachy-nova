@@ -445,3 +445,13 @@ def test_stop_is_idempotent_and_a_second_start_is_a_no_op_while_alive() -> None:
     reactor.stop(timeout=2.0)
     reactor.stop(timeout=2.0)  # idempotent
     assert not reactor.is_alive()
+
+
+def test_recent_lines_are_fed_back_so_the_same_cue_varies():
+    """Three pats in a row got 'Ah, that feels nice!' three times on the robot (2026-09-06)."""
+    from reachy_nova.harness.lite_reactor import _build_user_text
+
+    text = _build_user_text("(someone is petting you)", {}, ["Ah, that feels nice!", "Thank you!"])
+    assert "must NOT reuse" in text
+    assert "Ah, that feels nice!" in text and "Thank you!" in text
+    assert "must NOT reuse" not in _build_user_text("(someone is petting you)", {}, [])
