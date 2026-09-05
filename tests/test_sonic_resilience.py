@@ -21,6 +21,17 @@ conversation recap):
 Both must fire *at most once per cause* and both must re-arm on the new
 session. Neither may fire in a quiet room where nothing was sent.
 
+"Input" is the load-bearing word in watchdog 2, and the first version got it
+wrong: the harness feeds the microphone to Sonic 10x/s whether or not anybody
+is talking, so "input flowing, no response for 180s" meant "nobody spoke for
+three minutes" and the robot's 2026-09-05 journal carried six forced restarts
+exactly 180s apart in a quiet room — each one a clean session that wiped the
+conversation. A mic chunk therefore counts as input only when its RMS clears
+``NOVA_SONIC_SPEECH_FLOOR`` (default 0.01, between the measured ~0.002 room
+floor and the ~0.09 RMS of human speech on this mic — see
+``harness/hearing.py``); an inject or a tool result still counts
+unconditionally, because those really are us talking to Bedrock.
+
 Time is faked throughout (a ``_FakeClock`` swapped into the module's ``time``
 slot plus an ``asyncio`` proxy whose ``sleep`` advances that clock) so the
 integration tests cover minutes of simulated time in milliseconds of real
@@ -35,6 +46,7 @@ import logging
 import threading
 import types
 
+import numpy as np
 import pytest
 
 from reachy_nova import nova_sonic
@@ -353,29 +365,158 @@ class TestResponseLivenessWatchdog:
         monkeypatch.setenv("NOVA_SONIC_LIVENESS_S", "0")
         assert nova_sonic._liveness_window() == 180.0
 
-    def test_feed_audio_counts_as_input(self, monkeypatch):
-        """Audio fed to a live session marks input-since-last-response."""
-        import numpy as np
-
+    def test_feed_audio_without_a_loop_claims_nothing(self):
+        """No loop → nothing was sent, so nothing may be claimed as input."""
         sonic = self._armed()
         sonic._active = True
         sonic._loop = None  # feed_audio bails out before scheduling anything
-        sonic.feed_audio(np.zeros(160, dtype=np.float32))
-        assert sonic._input_since_response is False, "nothing was sent, so nothing is claimed"
+        sonic.feed_audio(_speech())
+        assert sonic._input_since_response is False
 
-        scheduled: list = []
 
-        def _capture(coro, loop):
-            coro.close()  # never awaited — we only care that it was scheduled
-            scheduled.append(coro)
-            return None
+# --------------------------------------------------------------------------
+# 2b. speech-gated input — a quiet room is not a zombie stream
+# --------------------------------------------------------------------------
 
-        monkeypatch.setattr(nova_sonic.asyncio, "run_coroutine_threadsafe", _capture)
-        sonic._loop = types.SimpleNamespace()
-        sonic.feed_audio(np.zeros(160, dtype=np.float32))
 
-        assert scheduled, "expected feed_audio to schedule a send"
-        assert sonic._input_since_response is True
+def _tone(rms: float, seconds: float = 0.1) -> np.ndarray:
+    """One mic chunk at a given RMS, shaped like the hearing leg's output.
+
+    100 ms of float32 mono at 16 kHz — exactly what ``TeeHearing`` hands to
+    ``feed_audio`` ten times a second.
+    """
+    n = int(nova_sonic.INPUT_SAMPLE_RATE * seconds)
+    t = np.arange(n, dtype=np.float32) / nova_sonic.INPUT_SAMPLE_RATE
+    return (rms * np.sqrt(2.0) * np.sin(2 * np.pi * 220.0 * t)).astype(np.float32)
+
+
+def _room_tone() -> np.ndarray:
+    """The measured quiet-room floor on this mic (~0.002 RMS)."""
+    return _tone(0.002)
+
+
+def _speech() -> np.ndarray:
+    """The measured RMS of human speech on this mic (~0.09)."""
+    return _tone(0.09)
+
+
+class _Feeder:
+    """A live-enough NovaSonic whose sends are captured instead of awaited."""
+
+    def __init__(self, monkeypatch, mono: float = 500.0):
+        self.sonic = NovaSonic()
+        self.sonic._arm_watchdogs(1_000.0, mono)
+        self.sonic._active = True
+        self.sonic._loop = types.SimpleNamespace()
+        self.sent: list = []
+        monkeypatch.setattr(nova_sonic.asyncio, "run_coroutine_threadsafe", self._capture)
+
+    def _capture(self, coro, loop):
+        coro.close()  # never awaited — we only care that it was scheduled
+        self.sent.append(coro)
+        return None
+
+
+class TestSpeechGatedInput:
+    @pytest.fixture(autouse=True)
+    def _default_floor(self, monkeypatch):
+        monkeypatch.delenv("NOVA_SONIC_SPEECH_FLOOR", raising=False)
+        monkeypatch.delenv("NOVA_SONIC_LIVENESS_S", raising=False)
+
+    # -- the floor itself --------------------------------------------------
+
+    def test_floor_defaults_to_0_01(self, monkeypatch):
+        assert nova_sonic._speech_floor() == 0.01
+
+    def test_floor_is_overridable_by_env(self, monkeypatch):
+        monkeypatch.setenv("NOVA_SONIC_SPEECH_FLOOR", "0.05")
+        assert nova_sonic._speech_floor() == 0.05
+
+    def test_garbage_floor_falls_back_to_the_default(self, monkeypatch):
+        monkeypatch.setenv("NOVA_SONIC_SPEECH_FLOOR", "not-a-number")
+        assert nova_sonic._speech_floor() == 0.01
+        monkeypatch.setenv("NOVA_SONIC_SPEECH_FLOOR", "-1")
+        assert nova_sonic._speech_floor() == 0.01
+
+    # -- what feed_audio does with it --------------------------------------
+
+    def test_silence_is_still_sent_but_is_not_input(self, monkeypatch):
+        feeder = _Feeder(monkeypatch)
+        feeder.sonic.feed_audio(np.zeros(1600, dtype=np.float32))
+        assert feeder.sent, "the audio itself is sent either way"
+        assert feeder.sonic._input_since_response is False
+
+    def test_room_tone_is_not_input(self, monkeypatch):
+        feeder = _Feeder(monkeypatch)
+        feeder.sonic.feed_audio(_room_tone())
+        assert feeder.sent
+        assert feeder.sonic._input_since_response is False
+
+    def test_speech_is_input(self, monkeypatch):
+        feeder = _Feeder(monkeypatch)
+        feeder.sonic.feed_audio(_speech())
+        assert feeder.sent
+        assert feeder.sonic._input_since_response is True
+
+    def test_the_floor_moves_with_the_env(self, monkeypatch):
+        monkeypatch.setenv("NOVA_SONIC_SPEECH_FLOOR", "0.5")
+        feeder = _Feeder(monkeypatch)
+        feeder.sonic.feed_audio(_speech())  # 0.09 RMS, now below the floor
+        assert feeder.sonic._input_since_response is False
+
+    def test_a_stereo_chunk_is_measured_after_the_downmix(self, monkeypatch):
+        """Stereo speech is still speech (and an empty chunk is not)."""
+        feeder = _Feeder(monkeypatch)
+        mono = _speech()
+        feeder.sonic.feed_audio(np.stack([mono, mono], axis=1))
+        assert feeder.sonic._input_since_response is True
+
+    def test_an_empty_chunk_is_harmless(self, monkeypatch):
+        feeder = _Feeder(monkeypatch)
+        feeder.sonic.feed_audio(np.zeros(0, dtype=np.float32))
+        assert feeder.sonic._input_since_response is False
+
+    # -- and what the watchdog therefore concludes -------------------------
+
+    def test_a_quiet_room_fed_past_the_window_never_trips(self, monkeypatch):
+        """The regression: 200s of mic chunks with nobody talking is not a stall."""
+        feeder = _Feeder(monkeypatch)
+        for _ in range(2000):  # 200s at 10 chunks/s
+            feeder.sonic.feed_audio(_room_tone())
+        assert len(feeder.sent) == 2000, "every chunk still reached the stream"
+        assert feeder.sonic._check_response_liveness(500.0 + 200.0) is False
+
+    def test_one_word_then_silence_still_trips(self, monkeypatch, caplog):
+        """Somebody spoke and Bedrock never answered — that IS the zombie."""
+        feeder = _Feeder(monkeypatch)
+        for _ in range(1000):
+            feeder.sonic.feed_audio(_room_tone())
+        assert feeder.sonic._input_since_response is False, "the mic alone claimed nothing"
+        feeder.sonic.feed_audio(_speech())  # one word, 100 ms of it
+        for _ in range(999):
+            feeder.sonic.feed_audio(_room_tone())
+        with caplog.at_level(logging.WARNING, logger="reachy_nova.nova_sonic"):
+            stalled = feeder.sonic._check_response_liveness(500.0 + 200.0)
+        assert stalled is True
+        assert "liveness" in caplog.records[0].getMessage().lower()
+
+    def test_an_inject_still_counts_as_input(self, monkeypatch):
+        feeder = _Feeder(monkeypatch)
+        for _ in range(2000):
+            feeder.sonic.feed_audio(_room_tone())
+        assert feeder.sonic._input_since_response is False, "the mic alone claimed nothing"
+        feeder.sonic.inject_text("someone is petting you")
+        assert feeder.sonic._input_since_response is True
+        assert feeder.sonic._check_response_liveness(500.0 + 200.0) is True
+
+    def test_a_tool_result_still_counts_as_input(self, monkeypatch):
+        feeder = _Feeder(monkeypatch)
+        for _ in range(2000):
+            feeder.sonic.feed_audio(_room_tone())
+        assert feeder.sonic._input_since_response is False, "the mic alone claimed nothing"
+        feeder.sonic.send_tool_result("tu-1", "done")
+        assert feeder.sonic._input_since_response is True
+        assert feeder.sonic._check_response_liveness(500.0 + 200.0) is True
 
 
 # --------------------------------------------------------------------------
