@@ -89,6 +89,15 @@ def quiet_state_path() -> Path:
     return state_dir() / "nova-quiet.json"
 
 
+def ledger_path() -> Path:
+    """Conversation ledger — ``<state>/nova-conversation.jsonl``.
+
+    See :mod:`reachy_nova.harness.ledger`: locked NDJSON append of USER/
+    ASSISTANT transcripts and delivered senses, truncated to the last 24 h.
+    """
+    return state_dir() / "nova-conversation.jsonl"
+
+
 def harness_pid_path() -> Path:
     return state_dir() / "nova-harness.pid"
 
