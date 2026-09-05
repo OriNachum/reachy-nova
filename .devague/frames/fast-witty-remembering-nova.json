@@ -4,7 +4,7 @@
   "schema_version": 6,
   "status": "exported",
   "created": "2026-09-05T20:46:44Z",
-  "updated": "2026-09-05T21:15:00Z",
+  "updated": "2026-09-05T23:11:02Z",
   "claims": [
     {
       "id": "c1",
@@ -1013,5 +1013,150 @@
     }
   ],
   "lapses": [],
-  "obligations": []
+  "obligations": [
+    {
+      "id": "o1",
+      "claim_id": "c2",
+      "seam": "SonicSpeaker -> daemon HTTP (upload/play_sound/DELETE)",
+      "behavior": "reply audio reaches the speaker in ~1 s chunks, in order, purged on preempt; first audio within ~1 s of Sonic's first chunk",
+      "source_text": "The speaker plays Sonic's reply audio in small chunks through the daemon HTTP route instead of buffering the whole utterance: a chunk is flushed when it reaches the target size (~1 s of audio, split at a low-energy point so words are not cut) OR when no new audio has arrived for ~300 ms \u2014 never by waiting for Sonic to leave 'speaking', because on the robot that transition is produced by the 4-second speaking watchdog, not by an end-of-turn event (journal 2026-09-05 21:52-22:02: every 0.8-1.3 s reply was queued 4.3-4.6 s after its first audio chunk, each time on 'Speaking watchdog: no audio for 4s'). First audio lands within ~1 s of Sonic's first audio chunk regardless of reply length; the echo gate serialises chunks one-speaker-at-a-time; a barge-in preempt purges every remaining chunk; the 4 s watchdog stays only as the stuck-state safety net.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o2",
+      "claim_id": "c5",
+      "seam": "NovaSonic -> Bedrock sessionStart",
+      "behavior": "turnDetectionConfiguration.endpointingSensitivity from NOVA_SONIC_ENDPOINTING, HIGH by default, logged once per session",
+      "source_text": "Sonic's sessionStart carries turnDetectionConfiguration.endpointingSensitivity (the documented HIGH|MEDIUM|LOW knob the harness never sets today), read from NOVA_SONIC_ENDPOINTING; unset means HIGH (fastest turn-taking; may cut off hesitant speakers \u2014 set MEDIUM in .env if that bites). The value in force is logged once per session start.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o3",
+      "claim_id": "c6",
+      "seam": "bus -> NovaSonic.inject_text while speaking",
+      "behavior": "a cue during generation is parked latest-wins per sense class and delivered with its age when the utterance ends; TTL 5 s",
+      "source_text": "A body cue that arrives while Sonic is generating is no longer dropped: it is parked in a small latest-wins slot per sense class (pat, face, sound, vision) with a short TTL and delivered through the same inject_text path the moment the utterance ends. The 3 s throttle and the named-drop log lines stay; only the 'dropped reason=speaking' fate changes to 'deferred'.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o4",
+      "claim_id": "c8",
+      "seam": "persona file -> system prompt; promptStart voiceId",
+      "behavior": "the prompt is the persona file text plus TOOL_GUIDE, voice amy, TOOL_SPECS unchanged, no 'assistant'",
+      "source_text": "The persona is rewritten and moved out of code into one text file the harness loads at startup (config/persona/nova.md): a dry, teasing companion in the spirit of Wit from the Stormlight Archive \u2014 quick wordplay, deflating pretension, teasing the person it likes, occasional sudden sincerity, never cruel to the vulnerable, never a helper: it does not offer help unasked, never asks how it can help, and reacts to body cues with a word, a sound, or nothing. Variety is asked for directly ('do not repeat an opener you used in the last few minutes') and shown with one or two one-shot exchanges rather than phrase lists (the Nova 2 Sonic guide: Sonic 2 over-uses listed phrases). Tool mechanics leave the persona and live only in the tool descriptions. Voice id becomes amy.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o5",
+      "claim_id": "c10",
+      "seam": "bus -> LiteReactor -> inject",
+      "behavior": "opted-in cues get a one-line Lite plan within a timeout, markers applied on delivery, template fallback; non-opted entries byte-identical",
+      "source_text": "A Nova 2 Lite reaction tier: rules.yaml entries can opt a cue into it (a new per-entry field, e.g. react: lite); for those cues the bus sends Lite the rendered cue plus the recent sense history, the day's memory (topics and important items), the mood and the last few exchanges, and Lite returns a one-line reaction plan (what to say or hint at, a vocalisation, a gesture from the engine's library, or nothing). That plan becomes the inject Sonic receives, and a gesture in it is submitted through the intents spool. Lite failure or timeout falls back to the plain template inject with a named drop; Sonic keeps owning the live voice.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o6",
+      "claim_id": "c11",
+      "seam": "on_transcript/bus -> ledger -> MemoryCompactor -> Sonic history replay",
+      "behavior": "transcripts and delivered senses are appended; Lite distils topics + important items with 24 h expiry off the hot threads; replayed once after the system prompt",
+      "source_text": "A conversation ledger and compaction: USER and ASSISTANT transcripts (already delivered by on_transcript) and every delivered sense are appended to an NDJSON ledger in the state dir (<state>/nova-conversation.jsonl). A background job \u2014 on its own thread, never on Sonic's response thread \u2014 asks Nova 2 Lite to distil the ledger into the topics mentioned and the items it judges important (a request, a preference, a running joke, something Nova was told to stop doing), stored in <state>/nova-memory.json with a timestamp; entries older than 24 hours expire and are dropped. At every Sonic session start the surviving memory is replayed as conversation history the documented way: once, after the system prompt, before audio streaming begins.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o7",
+      "claim_id": "c12",
+      "seam": "NovaSonic session lifecycle",
+      "behavior": "rotation before the 8-min limit, idle-gated with a hard deadline, delay 0, history replayed, one journal line; every restart replays",
+      "source_text": "Sonic sessions rotate proactively a little before the stream's connection limit and on every watchdog or network restart, replaying the compacted history and summary on the new stream; a rotation of a healthy session uses zero restart delay (today every restart is clean \u2014 'system prompt only, no recap' \u2014 and waits the 3 s base backoff).",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o8",
+      "claim_id": "c26",
+      "seam": "NovaSonic liveness watchdog",
+      "behavior": "silence never counts as input; speech-energy chunks, injects and tool results do",
+      "source_text": "The response-liveness watchdog stops treating a quiet room as a dead stream: the harness feeds mic audio continuously, so 'input flowing with no response for 180 s' is simply three minutes of nobody talking \u2014 and on 2026-09-05 the journal shows the stream restarted at 21:42:13, 21:45:17, 21:48:22, 21:51:26, 22:02:34 and 22:05:48, each 'Response liveness stall forced a restart', each wiping the conversation and costing ~3.6 s of deafness. Input counts as 'flowing' only when it carried speech energy above the mic floor or a text inject/tool result was sent; a stream that is silent with a silent room is healthy.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o9",
+      "claim_id": "c27",
+      "seam": "SonicSpeaker -> daemon sounds store",
+      "behavior": "per-chunk filenames, deleted after their window, at most 8 outstanding, failed delete is one named line",
+      "source_text": "Chunked playback uploads each chunk under its own filename (today every utterance overwrites one file, tts_synth.wav, which is safe only because the next post waits for the previous window to elapse) and deletes it after its window through the daemon's DELETE /api/media/sounds/{filename} (present in the daemon's OpenAPI on the robot, alongside GET /api/media/sounds); at most a handful of chunk files ever exist, because the robot's root disk is at 90 % with 1.4 GB free.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o10",
+      "claim_id": "c33",
+      "seam": "harness switches -> build_app",
+      "behavior": "each switch restores today's behaviour when off; resolved once; one summary line at start",
+      "source_text": "Every new behaviour has an env kill switch that restores today's behaviour without a code change, resolved once at start and logged once: NOVA_CHUNKED_PLAYBACK=0 (whole-utterance playback), NOVA_LITE_REACTIONS=0 (template injects only), NOVA_MEMORY=0 (no ledger, no replay), NOVA_PERSONA_PATH (and an embedded default persona when the file is absent or unreadable). An unrecognised value resolves to the new default with a named warning \u2014 the same fail-open policy rule the echo gate follows.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o11",
+      "claim_id": "c34",
+      "seam": "persona path resolution",
+      "behavior": "repo path by default, env override, embedded default when the file is absent",
+      "source_text": "The persona file is resolved the way rules.yaml is (repo path by default, env override) and the harness embeds a default persona string, so a wheel install \u2014 which ships nothing under the repo-root config/ directory (pyproject package-data covers reachy_nova/ only) \u2014 still has a personality. The pre-existing gap that a wheel install also lacks rules.yaml is noted, not fixed here.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o12",
+      "claim_id": "c35",
+      "seam": "persona text",
+      "behavior": "no character names, no book quotes, no 'assistant'",
+      "source_text": "The persona file describes the register in original words \u2014 quick, dry, teasing, deflating pretension, sudden sincerity, never cruel \u2014 and does not name, quote, or role-play the character it is inspired by: Nova is Nova, in the spirit of Wit, not Wit; the file contains no text from the books.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o13",
+      "claim_id": "c4",
+      "seam": "harness package boundary",
+      "behavior": "no reachy_mini import, no set_target; only upload/play/stop/sounds/volume daemon paths",
+      "source_text": "The harness still never opens a reachy_mini SDK client (AST-enforced by tests/test_harness_boundary.py). The durable sub-second, gap-free path \u2014 a streaming speaker-feed seam mirroring the audio tee \u2014 is upstream work in reachy-mini-cli (issue #162, still OPEN as of 2026-09-05) and is a follow-up, not part of this round; chunked daemon-HTTP playback is the path this round ships.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o14",
+      "claim_id": "c15",
+      "seam": "hearing path",
+      "behavior": "untouched by the round",
+      "source_text": "The hearing path is untouched: the tee delivers post-AEC audio in 32 ms chunks, the harness re-chunks to 100 ms and resamples with np.interp, and the echo gate is off (hardware AEC verified live 2026-08-10) \u2014 it contributes at most ~100 ms and is not where the delay lives.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o15",
+      "claim_id": "c16",
+      "seam": "release + deploy",
+      "behavior": "version 0.4.0, suite green, robot runs the merged commit",
+      "source_text": "Ships as a reachy-nova version bump (pyproject 0.3.0 -> 0.4.0) with the test suite green (uv run pytest is the merge gate and the PyPI publish job on main refuses a reused version); deployed to the robot by git pull plus a harness restart on its editable install; no IP addresses in any committed doc or PR text.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o16",
+      "claim_id": "c13",
+      "seam": "state dir",
+      "behavior": "ledger and memory files under the harness state dir; no legacy modules imported",
+      "source_text": "Memory lives in the harness state dir and nowhere else: the qq memory leg stays optional and is absent on the device (no qq backends there), and the legacy session_state.py, emotions.py and nova_feedback.py modules are not revived in the harness \u2014 it gets its own small ledger.",
+      "origin": "llm",
+      "status": "proposed"
+    }
+  ]
 }
