@@ -1,6 +1,7 @@
 """Nova Sonic - Bidirectional speech-to-speech via Amazon Bedrock."""
 
 import asyncio
+from collections import deque
 import base64
 import json
 import logging
@@ -70,7 +71,16 @@ def _liveness_window() -> float:
 # chunk loud enough to be speech counts as input now. The default sits between
 # the measured quiet-room floor (~0.002 RMS) and human speech (~0.09 RMS) on
 # this microphone — see harness/hearing.py's echo-gate measurement.
-DEFAULT_SPEECH_FLOOR = 0.01
+DEFAULT_SPEECH_FLOOR = 0.02
+# A single loud chunk is a cough, a door, a dropped spoon — not a person
+# talking to the robot. Only a BURST of speech-level chunks counts as input
+# for the liveness watchdog: at least SPEECH_BURST_CHUNKS above the floor
+# within the last SPEECH_BURST_WINDOW chunks (2 s at 100 ms/chunk). Measured
+# on the robot 2026-09-06 00:15 (quiet house): mic RMS median 0.005, one
+# chunk in ten above 0.02, so a single-chunk trigger restarted the stream
+# every 3 min of silence even after the floor was introduced.
+SPEECH_BURST_CHUNKS = 5
+SPEECH_BURST_WINDOW = 20
 
 # Turn detection (see _endpointing_sensitivity).
 #
@@ -301,6 +311,9 @@ class NovaSonic:
 
         # Tool use tracking
         self._current_tool_use: dict | None = None
+
+        # Speech-burst window for the liveness watchdog (see feed_audio).
+        self._energy_recent: deque[bool] = deque(maxlen=SPEECH_BURST_WINDOW)
 
         # Watchdog bookkeeping: a generation that stalls mid-utterance (stream
         # hang, lost contentEnd) must not pin the speaking guard forever.
@@ -882,7 +895,16 @@ class NovaSonic:
                                     self.on_tool_use(tool_name, tool_use_id, params)
                                 except Exception as e:
                                     logger.error(f"on_tool_use callback error: {e}")
-                        elif role == "ASSISTANT":
+                        elif role == "ASSISTANT" or (
+                            content_type == "AUDIO" and stop_reason == "END_TURN"
+                        ):
+                            # LIVE FINDING (robot, 2026-09-06 00:08): Nova 2
+                            # Sonic's contentEnd carries NO role field at all —
+                            # the journal shows ``contentEnd type=AUDIO role=?
+                            # stopReason=END_TURN`` — so the role check alone
+                            # never matched and every utterance ended on the
+                            # 4 s speaking watchdog. An AUDIO END_TURN is the
+                            # end of the spoken turn; a PARTIAL_TURN is not.
                             if self._speaking:
                                 logger.info("Utterance ended — back to listening")
                             self._speaking = False
@@ -1208,8 +1230,10 @@ class NovaSonic:
             asyncio.run_coroutine_threadsafe(
                 self._send_audio_chunk(pcm), self._loop
             )
-            if rms > _speech_floor():
-                # liveness watchdog: somebody actually said something
+            self._energy_recent.append(rms > _speech_floor())
+            if sum(self._energy_recent) >= SPEECH_BURST_CHUNKS:
+                # liveness watchdog: somebody is actually talking (a burst,
+                # not one loud chunk)
                 self._note_input_sent()
         except Exception as e:
             logger.warning(f"feed_audio scheduling failed: {e}")
@@ -1259,7 +1283,9 @@ class NovaSonic:
 
         try:
             asyncio.run_coroutine_threadsafe(self._send_user_text(text, gen), self._loop)
-            self._note_input_sent()  # liveness watchdog: we pushed input
+            # NOT liveness input: a quiet body cue or a tool result legitimately
+            # gets no answer from the model (robot, 2026-09-06). Only sustained
+            # speech-level mic audio counts — see feed_audio.
         except Exception as e:
             logger.warning(f"inject_text scheduling failed: {e}")
 
@@ -1379,7 +1405,9 @@ class NovaSonic:
 
         if delivered:
             self._last_inject_time = time.time()
-            self._note_input_sent()  # liveness watchdog: we pushed input
+            # NOT liveness input: a quiet body cue or a tool result legitimately
+            # gets no answer from the model (robot, 2026-09-06). Only sustained
+            # speech-level mic audio counts — see feed_audio.
 
     def send_tool_result(self, tool_use_id: str, result: str) -> None:
         """Send a tool result back to the Nova Sonic conversation."""
@@ -1431,6 +1459,8 @@ class NovaSonic:
 
         try:
             asyncio.run_coroutine_threadsafe(_send_result(), self._loop)
-            self._note_input_sent()  # liveness watchdog: we pushed input
+            # NOT liveness input: a quiet body cue or a tool result legitimately
+            # gets no answer from the model (robot, 2026-09-06). Only sustained
+            # speech-level mic audio counts — see feed_audio.
         except Exception as e:
             logger.warning(f"send_tool_result scheduling failed: {e}")

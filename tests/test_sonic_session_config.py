@@ -382,6 +382,31 @@ class TestContentEndLogging:
             "contentEnd type=TOOL role=TOOL stopReason=TOOL_USE"
         ]
 
+    def test_an_audio_end_turn_without_a_role_ends_the_speaking_state(self):
+        """The wire shape seen live 2026-09-06: no role field, type + stopReason only."""
+        states: list[str] = []
+        sonic = _make_sonic(on_state_change=states.append)
+        sonic._speaking = True
+
+        _drive_responses(sonic, [
+            {"contentEnd": {"type": "AUDIO", "stopReason": "END_TURN"}},
+        ])
+
+        assert sonic._speaking is False
+        assert states == ["listening"]
+
+    def test_an_audio_partial_turn_keeps_speaking(self):
+        """Mid-utterance chunk boundaries are PARTIAL_TURN — the turn is not over."""
+        sonic = _make_sonic()
+        sonic._speaking = True
+
+        _drive_responses(sonic, [
+            {"contentEnd": {"type": "AUDIO", "stopReason": "PARTIAL_TURN"}},
+            {"contentEnd": {"type": "TEXT", "stopReason": "END_TURN"}},
+        ])
+
+        assert sonic._speaking is True
+
     def test_a_user_end_does_not_end_the_speaking_state(self):
         """Unchanged behaviour — only ASSISTANT flips the guard."""
         sonic = _make_sonic()
