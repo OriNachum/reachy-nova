@@ -224,6 +224,12 @@ def faketime(monkeypatch):
     # The integration tests below rely on the 180s default window, so an
     # ambient override in the developer's environment must not leak in.
     monkeypatch.delenv("NOVA_SONIC_LIVENESS_S", raising=False)
+    # These cases run up to 600 fake seconds, past the 420s default rotation
+    # interval (t12) — a rotation there would be correct behaviour and a
+    # second restart these assertions do not expect. Rotation has its own
+    # file (tests/test_sonic_rotation.py); here it is switched off so each
+    # restart counted below is a *watchdog's* doing and nothing else.
+    monkeypatch.setenv("NOVA_SONIC_ROTATE_S", "0")
     clock = _FakeClock()
     monkeypatch.setattr(nova_sonic, "time", clock.as_module())
     monkeypatch.setattr(nova_sonic, "asyncio", _FastAsyncio(clock))
