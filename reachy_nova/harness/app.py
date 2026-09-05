@@ -105,6 +105,27 @@ TOOL_GUIDE = (
 )
 
 
+#: Longest scene description Nova is handed as a glance; Omni answers run to
+#: 850 characters and Sonic narrated every one of them (robot, 2026-09-06).
+VISION_CUE_MAX_CHARS = 240
+
+
+def render_vision_cue(text: str) -> str:
+    """Shape a scene description as a brief body cue rather than a report.
+
+    Parenthesised like every other cue, cut at the last sentence end inside
+    :data:`VISION_CUE_MAX_CHARS`, and carrying the same brief marker the
+    nervous-system rules append — so the model treats a glance as something
+    to react to with a word or nothing, not something to read out.
+    """
+    body = " ".join(str(text or "").split())
+    if len(body) > VISION_CUE_MAX_CHARS:
+        cut = body[:VISION_CUE_MAX_CHARS]
+        end = max(cut.rfind(". "), cut.rfind("; "))
+        body = (cut[: end + 1] if end > 60 else cut.rstrip()) 
+    return f"(you glance around: {body}) (react briefly if at all)"
+
+
 def build_system_prompt(persona_text: str) -> str:
     """The full system prompt: the persona, a blank line, then the tool guide."""
     return f"{persona_text}\n\n{TOOL_GUIDE}"
@@ -785,6 +806,13 @@ def build_app() -> list[object]:
     if browser is not None:
         components.append(BrowserComponent(browser))
 
+    # vision leg's inject wrapper (live finding 2026-09-06 00:23/00:38/00:43):
+    # the raw Omni description (400-850 chars) handed to Sonic bare produced a
+    # 30 s unprompted monologue about the scene at every harness start. A
+    # glance is a body cue like any other: parenthesised, capped, marked brief.
+    def _vision_cue(text: str) -> None:
+        sonic.inject_text(render_vision_cue(text), sense_class="vision")
+
     # vision leg — Omni is model-config-gated (empty id = preview not enabled)
     # and the bus supplies the retained reachy/state/clip payload it reads.
     if not config.omni_model_id():
@@ -802,7 +830,7 @@ def build_app() -> list[object]:
                 VisionLeg(
                     get_clip_state=bus_component.clip_state,
                     understand=NovaOmni(),
-                    on_answer=sonic.inject_text,
+                    on_answer=_vision_cue,
                 )
             )
         except Exception as err:  # noqa: BLE001

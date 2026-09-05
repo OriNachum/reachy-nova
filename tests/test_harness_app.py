@@ -223,7 +223,16 @@ def test_omni_model_set_adds_the_vision_leg_wired_to_bus_and_sonic(monkeypatch):
     assert isinstance(leg._understand.__self__, NovaOmni)
     assert leg._understand.__self__.omni_model_id == "us.amazon.nova-2-omni-v1:0"
     # …and the one answer goes to Sonic's guarded inject.
-    assert leg._on_answer == sonic.inject_text
+    # The leg's answer reaches Sonic through the brief-cue wrapper, not bare:
+    # a raw 400-850 char Omni description became a 30 s monologue (2026-09-06).
+    seen: list[tuple] = []
+    sonic.inject_text = lambda text, force=False, sense_class=None: seen.append((text, sense_class))
+    leg._on_answer("A person sits at a desk. " * 30)
+    assert len(seen) == 1
+    text, sense_class = seen[0]
+    assert text.startswith("(you glance around: ") and text.endswith(") (react briefly if at all)")
+    assert sense_class == "vision"
+    assert len(text) < 320
     # core 3 + tools + network leg (2) + lite reactor + bus + compactor + vision
     assert len(components) == 10
 
@@ -1054,3 +1063,17 @@ def test_a_real_bus_message_lands_in_the_ledger_through_the_composed_wrapper():
     records = _ledger_records()
     assert [r["kind"] for r in records] == ["sense"]
     assert records[0]["text"] == injected[0][0]
+
+
+def test_vision_descriptions_reach_sonic_as_a_brief_capped_cue():
+    """Robot 2026-09-06: raw 400-850 char Omni descriptions became 30 s monologues."""
+    from reachy_nova.harness.app import VISION_CUE_MAX_CHARS, render_vision_cue
+
+    long = ("A person sits at a desk with a laptop, a cup and a lamp. " * 20).strip()
+    cue = render_vision_cue(long)
+    assert cue.startswith("(you glance around: ")
+    assert cue.endswith(") (react briefly if at all)")
+    inner = cue[len("(you glance around: ") : -len(") (react briefly if at all)")]
+    assert len(inner) <= VISION_CUE_MAX_CHARS
+    assert inner.endswith("."), "cut at a sentence end"
+    assert render_vision_cue("  a cat\n on the desk ") == "(you glance around: a cat on the desk) (react briefly if at all)"
