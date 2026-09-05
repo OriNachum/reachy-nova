@@ -36,6 +36,20 @@
 #     overlay's own fire collapse into one inject for the same physical pat,
 #     while the raw pat/level1 -> pat/level2 escalation (a distinct sensory
 #     event) is never suppressed just because both carry `sense: pat`.
+#   react: lite  (t13)
+#     Opts this entry's cue into the Nova 2 Lite reaction tier: instead of
+#     delivering the rendered template directly, reachy_nova/harness/bus.py's
+#     NovaBus hands the BASE rendered text (no voice/quiet marker yet) to the
+#     wired LiteReactor as both its `cue` and `template`, and whatever plan
+#     text the reactor eventually delivers gets the entry's own voice/quiet
+#     markers applied the same as a plain template render would — so the
+#     inject Nova actually receives, and what SenseHistory records, is always
+#     the DELIVERED text. Ignored (falls back to the plain template path,
+#     byte-identical to an entry without this field) when no reactor is
+#     wired (NOVA_LITE_REACTIONS=0 or the bus was built with reactor=None).
+#     NEVER applies to a `voice: none` entry: `_handle_message` routes those
+#     to SenseHistory-only delivery before `react` is ever consulted, so a
+#     `voice: none` cue never reaches Lite regardless of this field.
 
 # Default rule for unknown (source, type) pairs
 default:
@@ -299,6 +313,7 @@ rules:
     voice: brief
     sense: pat
     dedupe: pat-touch
+    react: lite
     inject_template: "(someone is petting you)"
 
   "rule/fire:nova-face-noticed":
@@ -312,6 +327,7 @@ rules:
     llm_evaluate: false
     voice: silent
     sense: face
+    react: lite
     inject_template: "(a familiar face is in view)"
 
   "rule/fire:nova-pat-cheer":
@@ -328,6 +344,7 @@ rules:
     voice: brief
     sense: pat
     dedupe: pat-touch
+    react: lite
     inject_template: "(someone is petting you)"
 
   "rule/fire:look-toward-sound":
@@ -458,6 +475,7 @@ rules:
     llm_evaluate: false
     voice: brief
     sense: pat
+    react: lite
     inject_template: "(someone is patting you gently)"
 
   pat/level2:
@@ -467,6 +485,7 @@ rules:
     llm_evaluate: false
     voice: brief
     sense: pat
+    react: lite
     inject_template: "(someone is patting you more firmly)"
 
   pat/detected:
@@ -476,6 +495,7 @@ rules:
     llm_evaluate: false
     voice: brief
     sense: pat
+    react: lite
     inject_template: "(someone is touching you)"
 
   face/recognized:
@@ -485,6 +505,7 @@ rules:
     priority: NORMAL
     urgency: NOW
     llm_evaluate: false
+    react: lite
     inject_template: "You notice {name} is here."
 
   face/unknown:
