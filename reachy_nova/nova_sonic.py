@@ -141,6 +141,59 @@ RESTART_HEALTHY_RESET_S = 60.0
 RESTART_JITTER_FRACTION = 0.10
 
 
+# Proactive session rotation (see NovaSonic._rotation_due).
+#
+# Measured on the robot 2026-09-05: the one session that outlived the liveness
+# window started 21:51:29 and died at 21:59:30 — 480.5 s — with Bedrock's
+# "Model has timed out in processing the request". The Nova 2 Sonic connection
+# limit on this account really is 8 minutes, and hitting it costs the whole
+# conversation plus the base backoff. So the harness replaces the session
+# itself, a little early and at a moment when nothing is in flight.
+DEFAULT_ROTATE_S = 420.0
+# ...and if nothing is ever idle, rotate anyway rather than let Bedrock do it
+# for us at 480 s. This is the last quiet exit before the ceiling.
+DEFAULT_ROTATE_DEADLINE_S = 470.0
+# How many conversation-history blocks a fresh session replays at most.
+DEFAULT_HISTORY_MAX_BLOCKS = 8
+# Roles the Nova 2 input-events page accepts for replayed history content.
+HISTORY_ROLES = ("USER", "ASSISTANT")
+
+
+def _rotate_interval_s() -> float:
+    """Session age at which a rotation becomes *possible* (``NOVA_SONIC_ROTATE_S``).
+
+    Read at call time like :func:`_liveness_window`, with the same fallback
+    for a missing or unparseable value — but here ``0`` (or negative) is a
+    meaningful setting rather than nonsense: it turns proactive rotation off
+    entirely and leaves the session to die at the service ceiling as before.
+    """
+    import os
+
+    try:
+        value = float(os.environ.get("NOVA_SONIC_ROTATE_S", ""))
+    except (TypeError, ValueError):
+        return DEFAULT_ROTATE_S
+    return value if value > 0 else 0.0
+
+
+def _rotate_deadline_s() -> float:
+    """Session age past which a rotation happens regardless of what is in flight.
+
+    (``NOVA_SONIC_ROTATE_DEADLINE_S``, default 470 — ten seconds of margin on
+    the measured 480.5 s ceiling.) Unlike the interval this has no "off"
+    value: a deadline of zero would mean "always past it", so a non-positive
+    setting falls back to the default. Rotation as a whole is switched off
+    with ``NOVA_SONIC_ROTATE_S=0``.
+    """
+    import os
+
+    try:
+        value = float(os.environ.get("NOVA_SONIC_ROTATE_DEADLINE_S", ""))
+    except (TypeError, ValueError):
+        return DEFAULT_ROTATE_DEADLINE_S
+    return value if value > 0 else DEFAULT_ROTATE_DEADLINE_S
+
+
 def _restart_base_s() -> float:
     """Base restart delay in seconds (``NOVA_SONIC_RESTART_BASE_S``, default 3)."""
     import os
@@ -185,6 +238,9 @@ class NovaSonic:
         on_interruption: Callable[[], None] | None = None,
         restart_rng: random.Random | None = None,
         deferred_ttl_s: float = deferred_cues.DEFAULT_TTL_S,
+        history_provider: Callable[[], list[dict]] | None = None,
+        history_max_blocks: int = DEFAULT_HISTORY_MAX_BLOCKS,
+        speaker_idle: Callable[[], bool] | None = None,
     ):
         self.region = region or config.region()
         self.model_id = model_id or config.sonic_model_id()
@@ -224,6 +280,24 @@ class NovaSonic:
         # delivered, with their age in the text, the moment the utterance
         # ends. See reachy_nova/harness/deferred_cues.py.
         self._deferred = DeferredCues(ttl_s=deferred_ttl_s)
+
+        # Conversation history replayed into every fresh session — the one
+        # documented place it may go ("only once, after the system prompt and
+        # before audio streaming begins"). Any zero-argument callable
+        # returning ``[{"role": "USER"|"ASSISTANT", "text": ...}, ...]`` will
+        # do; the harness passes the memory compactor's ``history``.
+        self._history_provider = history_provider
+        self._history_max_blocks = history_max_blocks
+
+        # Is the *speaker* done? A rotation must not cut a chunk that is
+        # still playing, and playback lags generation by at least one chunk,
+        # so our own ``_speaking`` flag is not enough. Missing = idle.
+        self._speaker_idle = speaker_idle
+        # Session age (seconds) of a rotation that has been decided but whose
+        # new session has not started yet — carried across so the journal line
+        # can name the age AND the replay count in one grep-able line.
+        self._pending_rotation: float | None = None
+        self._rotation_age_s: float | None = None
 
         # Tool use tracking
         self._current_tool_use: dict | None = None
@@ -338,6 +412,56 @@ class NovaSonic:
             f"for {silent_for:.0f}s (limit {window:.0f}s) — forcing a session restart"
         )
         return True
+
+    # ------------------------------------------------------------------
+    # Proactive rotation
+    # ------------------------------------------------------------------
+
+    def _session_is_idle(self) -> bool:
+        """True when replacing the session right now cuts nothing off.
+
+        Four things can be in flight, and the restart path drops all four:
+        Sonic generating a reply, the speaker still playing one (playback
+        lags generation by at least a chunk), a tool call whose result would
+        be discarded on the session-generation change, and the "thinking"
+        gap between a heard transcript and the first audio. A missing
+        ``speaker_idle`` callable counts as idle — an absent leg must not
+        wedge the rotation shut — but a *raising* one counts as busy, since
+        we then genuinely do not know; the hard deadline covers that case.
+        """
+        if self.state != "listening":
+            return False
+        if self._current_tool_use is not None:
+            return False
+        if self._speaking:
+            return False
+        if self._speaker_idle is None:
+            return True
+        try:
+            return bool(self._speaker_idle())
+        except Exception as e:  # pragma: no cover - defensive, logged not raised
+            logger.debug(f"speaker_idle check failed: {e} — treating as busy")
+            return False
+
+    def _rotation_due(self, mono: float) -> float | None:
+        """Session age at which to rotate *now*, or ``None`` to keep waiting.
+
+        Called on every tick of the response-wait loop, so the common case —
+        a session younger than the interval — costs one env lookup and a
+        subtraction. Past the interval the session is replaced at the first
+        idle moment; past the hard deadline it is replaced regardless,
+        because Bedrock's own timeout at ~480 s is strictly worse (it takes
+        the conversation with it and charges the backoff on the way out).
+        """
+        interval = _rotate_interval_s()
+        if interval <= 0 or self._session_start_mono is None:
+            return None
+        age = mono - self._session_start_mono
+        if age < interval:
+            return None
+        if age >= _rotate_deadline_s():
+            return age
+        return age if self._session_is_idle() else None
 
     # ------------------------------------------------------------------
     # Restart backoff
@@ -462,6 +586,77 @@ class NovaSonic:
         await self._stream.input_stream.send(chunk)
         logger.debug(f"SEND → {event_type} OK")
 
+    async def _replay_history(self) -> int:
+        """Send the conversation history as TEXT blocks; return how many crossed.
+
+        Every restart goes through here — proactive rotation, the liveness and
+        clock-step watchdogs, the network-change path and an ordinary stream
+        death — so "the robot forgets everything on every restart" is fixed in
+        one place rather than four.
+
+        The provider is somebody else's code (the harness's memory compactor,
+        reading a file off a disk that has been 90 % full), so it never takes
+        the session down with it: a raising provider is one warning and an
+        empty replay. Blocks past ``history_max_blocks`` are dropped from the
+        end (the provider returns oldest-first, with its context summary at
+        the front, so the front is the part worth keeping), a role the service
+        does not accept is skipped with a NAMED warning rather than sent and
+        rejected, and an empty block is skipped silently — an empty
+        ``textInput`` is not something to spend a content block on.
+        """
+        blocks: list[dict] = []
+        if self._history_provider is not None:
+            try:
+                blocks = list(self._history_provider() or [])
+            except Exception as e:
+                logger.warning(
+                    f"history provider failed: {e} — starting the session with no replay"
+                )
+                blocks = []
+
+        sent = 0
+        for block in blocks:
+            if sent >= self._history_max_blocks:
+                break
+            role = str(block.get("role", "") or "").strip().upper()
+            text = str(block.get("text", "") or "")
+            if role not in HISTORY_ROLES:
+                logger.warning(
+                    f"history block skipped: role={block.get('role')!r} is not one of "
+                    f"{'/'.join(HISTORY_ROLES)}"
+                )
+                continue
+            if not text.strip():
+                continue
+            content_name = str(uuid.uuid4())
+            await self._send({
+                "contentStart": {
+                    "promptName": self._prompt_name,
+                    "contentName": content_name,
+                    "type": "TEXT",
+                    "interactive": False,
+                    "role": role,
+                    "textInputConfiguration": {"mediaType": "text/plain"},
+                }
+            })
+            await self._send({
+                "textInput": {
+                    "promptName": self._prompt_name,
+                    "contentName": content_name,
+                    "content": text,
+                }
+            })
+            await self._send({
+                "contentEnd": {
+                    "promptName": self._prompt_name,
+                    "contentName": content_name,
+                }
+            })
+            sent += 1
+
+        logger.info(f"history replayed blocks={sent}")
+        return sent
+
     async def _start_session(self) -> None:
         if not self._client:
             self._init_client()
@@ -535,6 +730,18 @@ class NovaSonic:
                 "contentName": self._system_content,
             }
         })
+
+        # Conversation history — the ONLY window the service gives us for it:
+        # "after the system prompt and before audio streaming begins". Nothing
+        # else goes out in between; in particular no assistant-initiating
+        # text, because Sonic can speak unprompted on a fresh session and a
+        # rotation every seven minutes must not become a re-greeting (c31).
+        replayed = await self._replay_history()
+        if self._rotation_age_s is not None:
+            logger.info(
+                f"rotation delay=0 replay={replayed} age={self._rotation_age_s:.0f}s"
+            )
+            self._rotation_age_s = None
 
         # Start audio input stream
         logger.info("Sending audio input contentStart")
@@ -813,6 +1020,14 @@ class NovaSonic:
                         )
                         break
 
+                    # Proactive rotation: replace the session ourselves, at an
+                    # idle moment, before Bedrock's ~8-minute ceiling does it
+                    # for us mid-sentence and without a recap.
+                    rotation_age = self._rotation_due(time.monotonic())
+                    if rotation_age is not None:
+                        self._pending_rotation = rotation_age
+                        break
+
                     # Speaking watchdog: a stalled generation (no audio for 10s
                     # while _speaking) would otherwise pin the inject guard
                     # forever and hold the speaker's utterance buffer hostage.
@@ -843,9 +1058,10 @@ class NovaSonic:
             if self._should_stop(stop_event):
                 break
 
-            # Stream died (or a watchdog forced it) — prepare for restart.
-            # Either way the restart is CLEAN: fresh client, fresh UUIDs,
-            # system prompt only. No conversation recap is replayed.
+            # Stream died, a watchdog forced it, or the rotation timer decided
+            # it was time — prepare for restart. Either way the restart is a
+            # fresh client with fresh UUIDs and the system prompt, plus
+            # whatever ``history_provider`` remembers (see _replay_history).
             self._session_gen += 1  # invalidate any queued coroutines
             # Parked cues belong to the conversation that just died; the fresh
             # session never heard the utterance they interrupted, so delivering
@@ -858,7 +1074,19 @@ class NovaSonic:
             reason = self._forced_restart_reason or "Bedrock stream died"
             self._forced_restart_reason = None
 
-            if immediate:
+            rotation_age = self._pending_rotation
+            self._pending_rotation = None
+
+            if rotation_age is not None and not immediate:
+                # A planned swap of a healthy session, taken at an idle
+                # moment: no backoff, and no "restarting session" warning
+                # either — the single journal line for a rotation is emitted
+                # by the fresh session's replay, so it can name delay, replay
+                # count and age together.
+                delay = 0.0
+                self._restart_attempt = 0
+                self._rotation_age_s = rotation_age
+            elif immediate:
                 # request_immediate_restart() already reset the backoff —
                 # skip the delay entirely, this restart is urgent.
                 delay = 0.0
