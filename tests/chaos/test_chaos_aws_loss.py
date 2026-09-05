@@ -63,6 +63,14 @@ class ChaosPoster:
             return len(self.attempts)
 
 
+def _no_delete(base_url: str, filename: str) -> None:
+    """Chunk-file cleanup, stubbed out: no test here may dial the daemon.
+
+    Chunked playback (t8) deletes each played chunk file through the daemon's
+    DELETE route; the chaos angle is the POST path, so cleanup is a no-op.
+    """
+
+
 def speak(speaker: SonicSpeaker) -> None:
     """Drive one complete Sonic utterance through the callback wire."""
     speaker.on_state_change("speaking")
@@ -107,8 +115,9 @@ def test_cloud_loss_mid_conversation_purges_and_recovers(stop_event, caplog) -> 
     speaker = SonicSpeaker(
         gate=gate,
         sample_rate=SAMPLE_RATE,
-        base_url="http://localhost:9",  # never dialled — the poster is fake
+        base_url="http://localhost:9",  # never dialled — the transports are fake
         poster=poster,
+        deleter=_no_delete,
         on_playback_failure=lambda: failures.append(time.monotonic()),
     )
     speaker.start(stop_event)
@@ -180,7 +189,11 @@ def test_repeated_cloud_flaps_never_require_a_restart(stop_event, caplog) -> Non
     gate = EchoGate(margin_s=0.01)
     poster = ChaosPoster()
     speaker = SonicSpeaker(
-        gate=gate, sample_rate=SAMPLE_RATE, base_url="http://localhost:9", poster=poster
+        gate=gate,
+        sample_rate=SAMPLE_RATE,
+        base_url="http://localhost:9",
+        poster=poster,
+        deleter=_no_delete,
     )
     speaker.start(stop_event)
 
