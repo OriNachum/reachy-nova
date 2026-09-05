@@ -58,6 +58,68 @@ def _liveness_window() -> float:
     return value if value > 0 else DEFAULT_LIVENESS_S
 
 
+# Speech floor for the response-liveness watchdog (see feed_audio).
+#
+# The harness feeds the microphone to Sonic ten times a second whether or not
+# anybody is talking, so "input flowing, no response for 180s" used to mean
+# "nobody spoke for three minutes": the robot's journal for 2026-09-05 carried
+# six "Response liveness stall forced a restart" lines exactly 180s apart in a
+# quiet room, each one a clean session that wiped the conversation. Only a
+# chunk loud enough to be speech counts as input now. The default sits between
+# the measured quiet-room floor (~0.002 RMS) and human speech (~0.09 RMS) on
+# this microphone — see harness/hearing.py's echo-gate measurement.
+DEFAULT_SPEECH_FLOOR = 0.01
+
+# Turn detection (see _endpointing_sensitivity).
+#
+# Nova 2 Sonic's sessionStart accepts turnDetectionConfiguration.
+# endpointingSensitivity: HIGH "detects pauses quickly, enabling faster
+# responses but may cut off slower speakers", LOW waits longer. The harness
+# used to send neither, leaving the service default to decide how long a
+# pause has to be before Nova may answer.
+DEFAULT_ENDPOINTING = "HIGH"
+ENDPOINTING_VALUES = ("HIGH", "MEDIUM", "LOW")
+
+
+def _speech_floor() -> float:
+    """RMS above which a microphone chunk counts as input (``NOVA_SONIC_SPEECH_FLOOR``).
+
+    Read at call time like :func:`_liveness_window`, and with the same
+    fallback rule: a missing, unparseable or non-positive value means the
+    default rather than a gate that lets everything (or nothing) through.
+    """
+    import os
+
+    try:
+        value = float(os.environ.get("NOVA_SONIC_SPEECH_FLOOR", ""))
+    except (TypeError, ValueError):
+        return DEFAULT_SPEECH_FLOOR
+    return value if value > 0 else DEFAULT_SPEECH_FLOOR
+
+
+def _endpointing_sensitivity() -> str:
+    """Turn-detection sensitivity for ``sessionStart`` (``NOVA_SONIC_ENDPOINTING``).
+
+    Read at call time so ``load_dotenv()`` order never matters, and
+    case-insensitive because this is a knob typed into a ``.env`` by hand. An
+    unrecognised value is a NAMED warning plus the default — a typo must not
+    cost the session, and must not be silent either.
+    """
+    import os
+
+    raw = os.environ.get("NOVA_SONIC_ENDPOINTING", "").strip()
+    if not raw:
+        return DEFAULT_ENDPOINTING
+    value = raw.upper()
+    if value not in ENDPOINTING_VALUES:
+        logger.warning(
+            f"Unrecognised NOVA_SONIC_ENDPOINTING={raw!r} — expected one of "
+            f"{'/'.join(ENDPOINTING_VALUES)}; using {DEFAULT_ENDPOINTING}"
+        )
+        return DEFAULT_ENDPOINTING
+    return value
+
+
 # Restart backoff (see NovaSonic._compute_restart_delay).
 #
 # With no network, a stream open attempt fails fast (AWS_IO_DNS_QUERY_FAILED)
@@ -400,15 +462,20 @@ class NovaSonic:
         )
         logger.info("Stream opened OK")
 
-        # Session start
-        logger.info("Sending sessionStart")
+        # Session start — the endpointing sensitivity is resolved per session,
+        # so a .env edit takes effect on the next restart without a redeploy.
+        endpointing = _endpointing_sensitivity()
+        logger.info(f"Sending sessionStart (endpointing={endpointing})")
         await self._send({
             "sessionStart": {
                 "inferenceConfiguration": {
                     "maxTokens": 1024,
                     "topP": 0.9,
                     "temperature": 0.7,
-                }
+                },
+                "turnDetectionConfiguration": {
+                    "endpointingSensitivity": endpointing,
+                },
             }
         })
 
@@ -567,6 +634,20 @@ class NovaSonic:
                         ce = event["contentEnd"]
                         content_type = ce.get("type", "")
                         role = ce.get("role", "")
+                        stop_reason = ce.get("stopReason", "")
+
+                        # Name every contentEnd, whatever we then do with it.
+                        # On the robot (2026-09-05) the ASSISTANT contentEnd
+                        # never ended the speaking state — all five utterances
+                        # of that boot were flushed by the 4s speaking watchdog
+                        # instead — and the logs could not say whether the event
+                        # never arrived, arrived with another role/type, or
+                        # carried a stopReason this branch ignores. These three
+                        # fields are the answer, so they are INFO, not DEBUG.
+                        logger.info(
+                            f"contentEnd type={content_type or '?'} "
+                            f"role={role or '?'} stopReason={stop_reason or '?'}"
+                        )
 
                         if content_type == "TOOL" and self._current_tool_use:
                             # Tool use complete — fire callback
@@ -851,6 +932,11 @@ class NovaSonic:
     def feed_audio(self, samples: np.ndarray) -> None:
         """Feed audio samples from the robot's microphone.
 
+        EVERY chunk is sent — the gate below decides only what the
+        response-liveness watchdog is told, never what Bedrock hears. A quiet
+        room must keep streaming (Sonic's own turn detection lives on that
+        stream) while still counting as "we sent nothing worth answering".
+
         Args:
             samples: float32 audio samples from reachy_mini at 16kHz.
                      Can be mono (N,) or stereo (N, 2).
@@ -862,6 +948,11 @@ class NovaSonic:
         if samples.ndim == 2:
             samples = samples.mean(axis=1)
 
+        # Loudness, measured on the float32 array before the int16 conversion:
+        # this runs on the hearing thread ten times a second, so it stays one
+        # numpy pass over 100ms of samples and nothing more.
+        rms = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
+
         # Convert float32 [-1, 1] to int16 PCM bytes
         pcm = (samples * 32767).astype(np.int16).tobytes()
 
@@ -869,7 +960,9 @@ class NovaSonic:
             asyncio.run_coroutine_threadsafe(
                 self._send_audio_chunk(pcm), self._loop
             )
-            self._note_input_sent()  # liveness watchdog: we pushed input
+            if rms > _speech_floor():
+                # liveness watchdog: somebody actually said something
+                self._note_input_sent()
         except Exception as e:
             logger.warning(f"feed_audio scheduling failed: {e}")
 
@@ -997,5 +1090,6 @@ class NovaSonic:
 
         try:
             asyncio.run_coroutine_threadsafe(_send_result(), self._loop)
+            self._note_input_sent()  # liveness watchdog: we pushed input
         except Exception as e:
             logger.warning(f"send_tool_result scheduling failed: {e}")
