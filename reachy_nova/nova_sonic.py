@@ -24,6 +24,8 @@ from aws_sdk_bedrock_runtime.config import Config
 from smithy_aws_core.identity.environment import EnvironmentCredentialsResolver
 
 from . import config
+from .harness import deferred_cues
+from .harness.deferred_cues import DeferredCues
 from .sensory_log import stage as sensory_stage
 
 logger = logging.getLogger(__name__)
@@ -182,6 +184,7 @@ class NovaSonic:
         on_tool_use: Callable[[str, str, dict], None] | None = None,
         on_interruption: Callable[[], None] | None = None,
         restart_rng: random.Random | None = None,
+        deferred_ttl_s: float = deferred_cues.DEFAULT_TTL_S,
     ):
         self.region = region or config.region()
         self.model_id = model_id or config.sonic_model_id()
@@ -214,6 +217,13 @@ class NovaSonic:
         # Throttle inject_text to prevent flooding the stream
         self._last_inject_time = 0.0
         self._inject_min_interval = 3.0  # seconds between inject_text calls
+
+        # Body cues that arrived mid-utterance. The speaking guard below can
+        # not send them (injecting into a generating stream can hang it), but
+        # it no longer throws them away either: they are parked here and
+        # delivered, with their age in the text, the moment the utterance
+        # ends. See reachy_nova/harness/deferred_cues.py.
+        self._deferred = DeferredCues(ttl_s=deferred_ttl_s)
 
         # Tool use tracking
         self._current_tool_use: dict | None = None
@@ -670,6 +680,9 @@ class NovaSonic:
                                 logger.info("Utterance ended — back to listening")
                             self._speaking = False
                             self._set_state("listening")
+                            # Schedules a task; never awaited here, so a slow
+                            # send cannot stall the response reader.
+                            self._on_speaking_ended()
 
                 except StopAsyncIteration:
                     break
@@ -813,6 +826,9 @@ class NovaSonic:
                         )
                         self._speaking = False
                         self._set_state("listening")
+                        # A cue parked during an utterance the service never
+                        # closed properly is still owed a delivery.
+                        self._on_speaking_ended()
                     await asyncio.sleep(0.1)
             finally:
                 # Mark inactive FIRST to stop all incoming traffic
@@ -831,6 +847,10 @@ class NovaSonic:
             # Either way the restart is CLEAN: fresh client, fresh UUIDs,
             # system prompt only. No conversation recap is replayed.
             self._session_gen += 1  # invalidate any queued coroutines
+            # Parked cues belong to the conversation that just died; the fresh
+            # session never heard the utterance they interrupted, so delivering
+            # them into it would be a reaction to nothing.
+            self._deferred.clear()
             self._set_state("idle")
 
             immediate = self._restart_now_event.is_set()
@@ -966,22 +986,33 @@ class NovaSonic:
         except Exception as e:
             logger.warning(f"feed_audio scheduling failed: {e}")
 
-    def inject_text(self, text: str, force: bool = False) -> None:
+    def inject_text(
+        self, text: str, force: bool = False, sense_class: str | None = None
+    ) -> None:
         """Inject a text message into the conversation (e.g., vision description).
 
         Args:
             text: the text to inject as a USER message
             force: if True, skip the speaking guard (use with caution)
+            sense_class: the rules entry's ``sense:`` value (``pat``, ``face``,
+                ``sound``, ``vision``; ``None`` for anything unclassed). Used
+                only when the cue has to be deferred: it names the latest-wins
+                slot the cue is parked in, so a burst of pats during one reply
+                collapses to one delivery while a pat and a face stay two
+                independent facts.
         """
         if not self._active or not self._loop:
             return
 
         # Don't inject while the model is actively generating audio — this can
         # destabilize the Bedrock bidirectional stream and cause it to hang.
+        # The cue is parked rather than lost: _on_speaking_ended() delivers it
+        # (with its age in the text) the moment the utterance finishes.
         if self._speaking and not force:
+            cue = self._deferred.put(sense_class, text)
             sensory_stage(
                 "inject", "speech", str(uuid.uuid4()),
-                f"dropped reason=speaking text={text[:60]!r}",
+                f"deferred class={cue.sense_class} text={text[:60]!r}",
             )
             return
 
@@ -996,49 +1027,131 @@ class NovaSonic:
             return
         self._last_inject_time = now
 
-        content_name = str(uuid.uuid4())
         gen = self._session_gen  # capture at scheduling time
 
-        async def _inject():
-            async with self._inject_lock:
-                if not self._active or self._session_gen != gen:
-                    return  # session restarted — discard stale inject
-                try:
-                    await self._send({
-                        "contentStart": {
-                            "promptName": self._prompt_name,
-                            "contentName": content_name,
-                            "type": "TEXT",
-                            "interactive": True,
-                            "role": "USER",
-                            "textInputConfiguration": {"mediaType": "text/plain"},
-                        }
-                    })
-                    await self._send({
-                        "textInput": {
-                            "promptName": self._prompt_name,
-                            "contentName": content_name,
-                            "content": text,
-                        }
-                    })
-                except Exception as e:
-                    logger.warning(f"inject_text send failed: {e}")
-                finally:
-                    try:
-                        await self._send({
-                            "contentEnd": {
-                                "promptName": self._prompt_name,
-                                "contentName": content_name,
-                            }
-                        })
-                    except Exception:
-                        pass
-
         try:
-            asyncio.run_coroutine_threadsafe(_inject(), self._loop)
+            asyncio.run_coroutine_threadsafe(self._send_user_text(text, gen), self._loop)
             self._note_input_sent()  # liveness watchdog: we pushed input
         except Exception as e:
             logger.warning(f"inject_text scheduling failed: {e}")
+
+    async def _send_user_text(self, text: str, gen: int) -> None:
+        """The one wire path a USER text message takes: start / text / end.
+
+        Shared by ``inject_text`` and the deferred-cue drain so a parked cue
+        reaches Bedrock through *exactly* the same events, under the same
+        ``_inject_lock`` serialisation and the same stale-session check — the
+        deferral changes when a cue is sent, never how.
+        """
+        lock = self._inject_lock
+        if lock is None:
+            # Only reachable before _run_loop armed the lock (tests, a very
+            # early inject); one lock is still enough to serialise, because
+            # every send below runs on the Sonic loop thread.
+            lock = self._inject_lock = asyncio.Lock()
+        content_name = str(uuid.uuid4())
+        async with lock:
+            if not self._active or self._session_gen != gen:
+                return  # session restarted — discard stale inject
+            try:
+                await self._send({
+                    "contentStart": {
+                        "promptName": self._prompt_name,
+                        "contentName": content_name,
+                        "type": "TEXT",
+                        "interactive": True,
+                        "role": "USER",
+                        "textInputConfiguration": {"mediaType": "text/plain"},
+                    }
+                })
+                await self._send({
+                    "textInput": {
+                        "promptName": self._prompt_name,
+                        "contentName": content_name,
+                        "content": text,
+                    }
+                })
+            except Exception as e:
+                logger.warning(f"inject_text send failed: {e}")
+            finally:
+                try:
+                    await self._send({
+                        "contentEnd": {
+                            "promptName": self._prompt_name,
+                            "contentName": content_name,
+                        }
+                    })
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------------
+    # Deferred cues (see harness/deferred_cues.py)
+    # ------------------------------------------------------------------
+
+    def _on_speaking_ended(self) -> None:
+        """Schedule delivery of any cue parked while the model was generating.
+
+        Called from BOTH places the speaking state ends — the ASSISTANT
+        ``contentEnd`` branch in ``_process_responses`` and the 4 s speaking
+        watchdog in ``_run_loop`` — because a cue parked during an utterance
+        the service never closed properly must still be delivered.
+
+        The drain is *scheduled*, never awaited here: ``_process_responses``
+        is the only reader of the response stream, and a send that blocks
+        (a slow stream, a busy ``_inject_lock``) must not stop it reading.
+
+        A cue can still land in the microsecond window between ``_speaking``
+        going False and the ``pending()`` check below — ``inject_text`` runs
+        on other threads and reads the guard before it parks. Such a cue
+        waits for the *next* transition, by which time the TTL has almost
+        certainly retired it as ``dropped reason=deferred-expired``. That is
+        the intended, named outcome: the moment really has passed.
+        """
+        if not self._deferred.pending():
+            return
+        gen = self._session_gen  # capture at scheduling time
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                loop.create_task(self._drain_deferred(gen))
+            elif self._loop is not None:
+                asyncio.run_coroutine_threadsafe(self._drain_deferred(gen), self._loop)
+        except Exception as e:  # noqa: BLE001 - a lost cue must not kill the loop
+            logger.warning(f"deferred drain scheduling failed: {e}")
+
+    async def _drain_deferred(self, gen: int) -> None:
+        """Deliver the parked cues, newest text per sense class, oldest first."""
+        if not self._active or self._session_gen != gen:
+            return  # session restarted — the cues belong to a conversation that is gone
+        cues = self._deferred.drain()
+        if not cues:
+            return
+
+        now = self._deferred.now()  # the slot's clock, not this module's
+        delivered = 0
+        for cue in cues:
+            if delivered >= deferred_cues.MAX_DRAIN_PER_TRANSITION:
+                self._deferred.log_overflow(cue, cue.age(now))
+                continue
+            text = self._deferred.render(cue, now)
+            sensory_stage(
+                "inject", "speech", str(uuid.uuid4()),
+                f"drained class={cue.sense_class} age={cue.age(now):.1f}s "
+                f"text={text[:60]!r}",
+            )
+            # The 3s throttle is deliberately NOT consulted: the cue already
+            # waited out a whole utterance, which is what the throttle exists
+            # to enforce. It is re-armed below so the injects that follow the
+            # drain are spaced normally again.
+            await self._send_user_text(text, gen)
+            delivered += 1
+
+        if delivered:
+            self._last_inject_time = time.time()
+            self._note_input_sent()  # liveness watchdog: we pushed input
 
     def send_tool_result(self, tool_use_id: str, result: str) -> None:
         """Send a tool result back to the Nova Sonic conversation."""
