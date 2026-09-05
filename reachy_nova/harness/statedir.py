@@ -98,6 +98,17 @@ def ledger_path() -> Path:
     return state_dir() / "nova-conversation.jsonl"
 
 
+def memory_path() -> Path:
+    """Distilled day-memory — ``<state>/nova-memory.json``.
+
+    See :mod:`reachy_nova.harness.memory_compactor`: the compacted half of
+    c11's memory story (the raw half is :func:`ledger_path`) — topics and
+    important items Nova 2 Lite distils from the ledger, each with a
+    timestamp, truncated to the last 24 h at every compaction.
+    """
+    return state_dir() / "nova-memory.json"
+
+
 def harness_pid_path() -> Path:
     return state_dir() / "nova-harness.pid"
 
