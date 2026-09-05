@@ -468,7 +468,7 @@ def test_queue_overflow_drop_is_named(caplog, chunked):
 
 def test_default_queue_is_bounded():
     speaker = SonicSpeaker(EchoGate())
-    assert speaker.queue_size == 8
+    assert speaker.queue_size == 90
 
 
 # --------------------------------------------------------------------------- #
