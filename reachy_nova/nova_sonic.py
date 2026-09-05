@@ -25,6 +25,7 @@ from aws_sdk_bedrock_runtime.config import Config
 from smithy_aws_core.identity.environment import EnvironmentCredentialsResolver
 
 from . import config
+from .harness.history_blocks import normalise_history
 from .harness import deferred_cues
 from .harness.deferred_cues import DeferredCues
 from .sensory_log import stage as sensory_stage
@@ -43,6 +44,10 @@ INPUT_CHUNK_SIZE = int(INPUT_SAMPLE_RATE * CHUNK_DURATION_MS / 1000)
 # ever comes back, and nothing raises — so it must be detected, not waited on.
 CLOCK_STEP_THRESHOLD_S = 60.0
 DEFAULT_LIVENESS_S = 180.0
+# History-replay circuit breaker: a session that dies this soon after a start
+# that replayed history counts as a replay death; two in a row suspend replay.
+REPLAY_DEATH_WINDOW_S = 10.0
+REPLAY_DEATHS_TO_SUSPEND = 2
 
 
 def _liveness_window() -> float:
@@ -307,6 +312,13 @@ class NovaSonic:
         # new session has not started yet — carried across so the journal line
         # can name the age AND the replay count in one grep-able line.
         self._pending_rotation: float | None = None
+        # History-replay circuit breaker (live incident 2026-09-06): a stream
+        # that dies within REPLAY_DEATH_WINDOW_S of a start that replayed
+        # history, twice in a row, means the history itself is what Bedrock
+        # refuses — replay is suspended until a session lives long enough.
+        self._replay_blocks_last = 0
+        self._replay_deaths = 0
+        self._replay_suspended = False
         self._rotation_age_s: float | None = None
 
         # Tool use tracking
@@ -494,6 +506,32 @@ class NovaSonic:
         if death_mono - self._session_start_mono >= RESTART_HEALTHY_RESET_S:
             self._restart_attempt = 0
 
+    def _note_session_death(self, death_mono: float) -> None:
+        """Feed the history-replay circuit breaker with how this session ended.
+
+        Called on the restart path with the monotonic time of death. A death
+        within :data:`REPLAY_DEATH_WINDOW_S` of a start that replayed at least
+        one history block is a *replay death*; :data:`REPLAY_DEATHS_TO_SUSPEND`
+        of them in a row suspend replay (the next start sends none, with a
+        warning). A session that lived past the window resets the count and
+        lifts the suspension, so a transient refusal costs one clean session,
+        not the memory forever.
+        """
+        age = None if self._session_start_mono is None else death_mono - self._session_start_mono
+        if age is not None and age < REPLAY_DEATH_WINDOW_S and self._replay_blocks_last > 0:
+            self._replay_deaths += 1
+            if self._replay_deaths >= REPLAY_DEATHS_TO_SUSPEND and not self._replay_suspended:
+                self._replay_suspended = True
+                logger.warning(
+                    f"history replay: {self._replay_deaths} sessions died within "
+                    f"{REPLAY_DEATH_WINDOW_S:.0f}s of replaying history — suspending replay"
+                )
+        elif age is not None and age >= REPLAY_DEATH_WINDOW_S:
+            if self._replay_suspended:
+                logger.info("history replay: a session lived — replay re-enabled")
+            self._replay_deaths = 0
+            self._replay_suspended = False
+
     def _compute_restart_delay(self) -> tuple[float, int]:
         """Return ``(delay_seconds, attempt_number)`` for the next restart.
 
@@ -627,20 +665,31 @@ class NovaSonic:
                 )
                 blocks = []
 
-        sent = 0
+        if self._replay_suspended and blocks:
+            logger.warning(
+                f"history replay suspended after {self._replay_deaths} immediate stream "
+                f"deaths — starting clean ({len(blocks)} block(s) withheld)"
+            )
+            blocks = []
+
         for block in blocks:
-            if sent >= self._history_max_blocks:
-                break
-            role = str(block.get("role", "") or "").strip().upper()
-            text = str(block.get("text", "") or "")
-            if role not in HISTORY_ROLES:
+            role = str(block.get("role", "") or "").strip().upper() if isinstance(block, dict) else ""
+            if role and role not in HISTORY_ROLES:
                 logger.warning(
                     f"history block skipped: role={block.get('role')!r} is not one of "
                     f"{'/'.join(HISTORY_ROLES)}"
                 )
-                continue
-            if not text.strip():
-                continue
+        # Defensive shaping at the SENDER: USER first, roles alternating, no
+        # trailing USER — Bedrock kills the whole stream otherwise (live
+        # incident 2026-09-06, see harness/history_blocks.py).
+        blocks = normalise_history(blocks)
+
+        sent = 0
+        for block in blocks:
+            if sent >= self._history_max_blocks:
+                break
+            role = block["role"]
+            text = block["text"]
             content_name = str(uuid.uuid4())
             await self._send({
                 "contentStart": {
@@ -668,6 +717,7 @@ class NovaSonic:
             sent += 1
 
         logger.info(f"history replayed blocks={sent}")
+        self._replay_blocks_last = sent
         return sent
 
     async def _start_session(self) -> None:
@@ -1114,6 +1164,7 @@ class NovaSonic:
                 delay = 0.0
                 logger.warning(f"{reason} — restarting session now")
             else:
+                self._note_session_death(time.monotonic())
                 self._maybe_reset_backoff_for_healthy_session(time.monotonic())
                 delay, attempt = self._compute_restart_delay()
                 logger.warning(

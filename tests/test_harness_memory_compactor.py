@@ -380,19 +380,16 @@ def test_history_returns_context_block_then_recent_exchanges_under_the_cap(tmp_p
     compactor = MemoryCompactor(ledger, path=path, client=FakeBedrock())
     blocks = compactor.history(max_chars=2000)
 
-    assert blocks[0]["role"] == "USER"
+    # Bedrock's shape: USER first, roles alternating, ends on the assistant.
+    assert [b["role"] for b in blocks] == ["USER", "ASSISTANT", "USER", "ASSISTANT"]
     assert blocks[0]["text"].startswith("(earlier today")
-    assert "gardening" in blocks[0]["text"]
-    assert "wants tomato tips" in blocks[0]["text"]
-
-    exchange_texts = [b["text"] for b in blocks[1:]]
-    assert exchange_texts == [
-        "what should I plant",
-        "tomatoes, obviously",
-        "anything else",
-        "basil, if you're feeling ambitious",
-    ][-3:]
-    assert sum(len(b["text"]) for b in blocks) <= 2000
+    assert "gardening" in blocks[0]["text"] and "wants tomato tips" in blocks[0]["text"]
+    # only the last three exchanges are kept, so the context block stands alone
+    assert blocks[0]["text"].endswith("spoken to.)")
+    assert blocks[1]["text"] == "tomatoes, obviously"
+    assert blocks[2]["text"] == "anything else"
+    assert blocks[3]["text"] == "basil, if you're feeling ambitious"
+    assert not any("a pat" in b["text"] for b in blocks)
 
 
 def test_history_drops_oldest_exchanges_to_fit_a_tight_cap(tmp_path):
@@ -416,7 +413,27 @@ def test_history_without_distilled_memory_still_returns_recent_exchanges(tmp_pat
 
     blocks = compactor.history()
 
-    assert blocks == [{"role": "USER", "text": "hello there"}]
+    # Even with nothing distilled the history opens with a USER context block
+    # (a history that opens with the assistant kills the stream); the lone
+    # exchange merges into it.
+    assert len(blocks) == 1
+    assert blocks[0]["role"] == "USER"
+    assert blocks[0]["text"].startswith("(earlier today")
+    assert blocks[0]["text"].endswith("hello there")
+
+
+def test_history_never_opens_with_the_assistant(tmp_path):
+    """The live incident: the ledger's first line was one of Nova's own reactions."""
+    ledger = Ledger(path=tmp_path / "ledger.jsonl")
+    ledger.append("ASSISTANT", "Thank you!", ts=1.0)
+    ledger.append("ASSISTANT", "Lovely.", ts=2.0)
+    compactor = MemoryCompactor(ledger, path=tmp_path / "memory.json", client=FakeBedrock())
+
+    blocks = compactor.history()
+
+    assert blocks and blocks[0]["role"] == "USER"
+    assert [b["role"] for b in blocks] == ["USER", "ASSISTANT"]
+    assert blocks[1]["text"] == "Thank you!\nLovely."
 
 
 # --------------------------------------------------------------------------- #

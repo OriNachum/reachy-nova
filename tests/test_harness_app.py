@@ -869,10 +869,14 @@ def test_the_compactor_reads_the_same_ledger_the_transcripts_write():
     sonic.on_transcript("USER", "is the tap still dripping")
     sonic.on_transcript("ASSISTANT", "constantly")
 
-    assert compactor.history() == [
-        {"role": "USER", "text": "is the tap still dripping"},
-        {"role": "ASSISTANT", "text": "constantly"},
-    ]
+    blocks = compactor.history()
+    # The history opens with the USER context block (a history that opens with
+    # the assistant kills the Bedrock stream — live incident 2026-09-06) and
+    # the first USER line merges into it; then the roles alternate.
+    assert [b["role"] for b in blocks] == ["USER", "ASSISTANT"]
+    assert blocks[0]["text"].startswith("(earlier today")
+    assert blocks[0]["text"].endswith("is the tap still dripping")
+    assert blocks[1]["text"] == "constantly"
 
 
 def test_sonic_sees_the_speakers_idle_state():

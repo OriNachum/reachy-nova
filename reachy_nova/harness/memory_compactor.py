@@ -66,6 +66,7 @@ from typing import Any
 import boto3
 
 from reachy_nova import config, sensory_log
+from reachy_nova.harness.history_blocks import normalise_history
 from reachy_nova.harness import statedir
 
 logger = logging.getLogger(__name__)
@@ -558,7 +559,11 @@ class MemoryCompactor:
         if not topics and not items and not exchanges:
             return []
 
-        blocks: list[dict[str, str]] = []
+        # The context block is ALWAYS first and ALWAYS a USER block, even when
+        # nothing has been distilled yet: Bedrock refuses a history whose
+        # first message is the assistant, and on the robot (2026-09-06) the
+        # ledger's first line was one of Nova's own pat reactions — the
+        # replay opened with it and the stream died on every restart.
         if topics or items:
             topics_text = ", ".join(e["text"] for e in topics) or "nothing in particular"
             items_text = "; ".join(e["text"] for e in items) or "nothing in particular"
@@ -567,10 +572,16 @@ class MemoryCompactor:
                 f"remember: {items_text}. Do not greet or comment on this; "
                 "just carry on when spoken to.)"
             )
-            blocks.append({"role": "USER", "text": context})
+        else:
+            context = (
+                "(earlier today: nothing worth noting yet; the last few "
+                "exchanges follow. Do not greet or comment on this; just "
+                "carry on when spoken to.)"
+            )
+        blocks: list[dict[str, str]] = [{"role": "USER", "text": context}]
         blocks.extend(exchanges)
 
-        return _fit_to_cap(blocks, max_chars)
+        return _fit_to_cap(normalise_history(blocks), max_chars)
 
     def _recent_exchanges(self) -> list[dict[str, str]]:
         records = self.ledger.read()

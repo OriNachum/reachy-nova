@@ -381,7 +381,12 @@ class TestHistoryReplay:
         assert "ledger unreadable" in warnings[0]
 
     def test_blocks_past_the_cap_are_dropped(self, nosleep):
-        many = [{"role": "USER", "text": f"line {i}"} for i in range(12)]
+        # Alternating roles: the sender normalises history (USER first, roles
+        # alternating), so same-role blocks would merge and hide the cap.
+        many = [
+            {"role": "USER" if i % 2 == 0 else "ASSISTANT", "text": f"line {i}"}
+            for i in range(12)
+        ]
         client = _FakeClient()
         sonic = _make_sonic(client, history_provider=lambda: list(many))
 
@@ -392,7 +397,10 @@ class TestHistoryReplay:
         assert [b["content"] for b in blocks] == [f"line {i}" for i in range(8)]
 
     def test_the_cap_is_a_constructor_kwarg(self, nosleep):
-        many = [{"role": "USER", "text": f"line {i}"} for i in range(12)]
+        many = [
+            {"role": "USER" if i % 2 == 0 else "ASSISTANT", "text": f"line {i}"}
+            for i in range(12)
+        ]
         client = _FakeClient()
         sonic = _make_sonic(
             client, history_provider=lambda: list(many), history_max_blocks=3
@@ -817,3 +825,83 @@ class TestEveryRestartReplays:
         text_inputs = [e["textInput"] for e in fresh.sent if "textInput" in e]
         assert len(text_inputs) == 1
         assert text_inputs[0]["content"] == sonic.system_prompt
+
+
+
+# --------------------------------------------------------------------------
+# History shape and the replay circuit breaker (live incident 2026-09-06:
+# "First message in chat history should not be Assistant" killed the stream
+# on every restart for six minutes)
+# --------------------------------------------------------------------------
+
+
+class TestHistoryShapeAndBreaker:
+    def test_a_history_that_opens_with_the_assistant_is_reshaped_before_sending(
+        self, nosleep, caplog
+    ):
+        blocks = [
+            {"role": "ASSISTANT", "text": "Thank you!"},
+            {"role": "USER", "text": "hello"},
+            {"role": "ASSISTANT", "text": "hi"},
+            {"role": "USER", "text": "and then the person's last words"},
+        ]
+        client = _FakeClient()
+        sonic = _make_sonic(client, history_provider=lambda: list(blocks))
+
+        _start_session(sonic)
+
+        sent = _history_blocks(client.streams[0])
+        roles = [
+            e["contentStart"]["role"]
+            for e in client.streams[0].sent
+            if "contentStart" in e and e["contentStart"].get("interactive") is False
+            and e["contentStart"].get("type") == "TEXT"
+            and e["contentStart"].get("role") in ("USER", "ASSISTANT")
+        ]
+        assert roles == ["USER", "ASSISTANT"], "USER first, alternating, no trailing USER"
+        assert [b["content"] for b in sent] == ["hello", "hi"]
+
+    def test_two_immediate_deaths_after_a_replay_suspend_it(self, nosleep, caplog):
+        sonic = _make_sonic(history_provider=lambda: [{"role": "USER", "text": "ctx"}])
+        sonic._session_start_mono = 100.0
+        sonic._replay_blocks_last = 1
+        with caplog.at_level(logging.WARNING, logger="reachy_nova.nova_sonic"):
+            sonic._note_session_death(101.0)
+            assert sonic._replay_suspended is False
+            sonic._session_start_mono = 110.0
+            sonic._note_session_death(111.0)
+        assert sonic._replay_suspended is True
+        assert any("suspending replay" in r.getMessage() for r in caplog.records)
+
+    def test_a_suspended_replay_sends_nothing_and_says_so(self, nosleep, caplog):
+        client = _FakeClient()
+        sonic = _make_sonic(client, history_provider=lambda: [{"role": "USER", "text": "ctx"}])
+        sonic._replay_suspended = True
+        sonic._replay_deaths = 2
+
+        with caplog.at_level(logging.WARNING, logger="reachy_nova.nova_sonic"):
+            _start_session(sonic)
+
+        assert _history_blocks(client.streams[0]) == []
+        assert any("history replay suspended" in r.getMessage() for r in caplog.records)
+
+    def test_a_session_that_lives_lifts_the_suspension(self, nosleep):
+        sonic = _make_sonic()
+        sonic._replay_suspended = True
+        sonic._replay_deaths = 2
+        sonic._session_start_mono = 100.0
+        sonic._replay_blocks_last = 1
+
+        sonic._note_session_death(100.0 + nova_sonic.REPLAY_DEATH_WINDOW_S + 1.0)
+
+        assert sonic._replay_suspended is False
+        assert sonic._replay_deaths == 0
+
+    def test_a_death_without_replay_never_counts(self, nosleep):
+        sonic = _make_sonic()
+        sonic._session_start_mono = 100.0
+        sonic._replay_blocks_last = 0
+        sonic._note_session_death(101.0)
+        sonic._note_session_death(101.0)
+        assert sonic._replay_deaths == 0
+        assert sonic._replay_suspended is False
