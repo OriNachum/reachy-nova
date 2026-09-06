@@ -145,5 +145,6 @@ Ori's confirmation; they are quoted as recorded, not as approved.
 - PR #24 is open with CI green and the first review round answered; merging publishes 0.4.0 to PyPI, after which the robot's checkout goes back to `main`
 - `d4` follow-up: decide whether the compactor's replay context block should carry the mood sentence so Sonic sees it directly
 - upstream reachy-mini-cli: the clip rider has produced no new clip since boot (same `ts` all evening) — the vision leg only ever sees the boot clip; and #162 (streaming speaker feed) remains the gap-free sub-second path
+- observed, no action: one Bedrock-side transient (`Response processing error: System instability detected`, 01:51:29) killed a healthy stream; the harness restarted in 3.3 s with memory replayed. In the same minute the reactor's repeat guard fired (`lite-repeat`) and a purr played through the speaker as a 0.91 s chunk
 - pre-existing, untouched: an awscrt `InvalidStateError` traceback on every Sonic stream close; a wheel install lacks `config/nervous-system/rules.yaml` (plan risk `r9`); the installed metadata version on the device stays 0.3.0 until the next pip reinstall
 - per-person memory needs the runtime to publish the recognised name (plan risk, frame park `v5`)
