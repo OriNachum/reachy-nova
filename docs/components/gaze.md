@@ -231,10 +231,40 @@ if a goal is standing — before joining the worker. The worker's own exit path
 same hygiene behind the same one-shot flag, so a stop mid-conversation costs
 exactly one release either way and a second `stop()` submits nothing.
 
+### Head reflexes under a held head (task t10)
+
+A standing `gaze-hold` goal is not the whole story: the runtime's own
+`orient-to-sound` and `nod` reflexes still compete for the head by recency,
+just like the older `nova-face-noticed` rule did before a face lock existed
+(it nodded on every face sighting — the wrong reflex once something can *hold*
+the head by recency instead). So entering `browsing` also merges
+`BROWSING_INHIBITS = ("orient-to-sound", "nod")` into the runtime's CURRENT
+inhibited set via `set_inhibition` (which **replaces** the whole set — see
+`tools.current_inhibitions()`), remembering exactly which names it added.
+Leaving `browsing` for `wander` re-reads the live set and gives back only
+those names, so a later-wins operator change (say, an inhibition the operator
+added meanwhile) survives the restore. A conversation in between leaves the
+names standing — the face lock re-asserts its own runtime inhibitions on
+every replacement anyway — and returning from conversation to browsing
+re-reads the live set again and re-adds only whatever went missing, since
+`nod` is the harness's own addition and is not guaranteed to survive a lock's
+replacement the way the runtime's own `orient-to-sound` is.
+
+Retiring the old reflex is a one-line call:
+`rules_overlay.retire_rule("nova-face-noticed")` writes a tombstone —
+`{"id": "nova-face-noticed", "enabled": false}` — into the managed block,
+through the same validated/atomic/re-parsed write path `upsert_rule` uses, and
+submits a reload. A tombstone id needs no `nova-` prefix: the point is to be
+able to disable a shipped or operator rule of that id too, not only one of
+nova's own. A second `retire_rule` call for an already-tombstoned id is a
+no-op — nothing written, no reload submitted.
+
 ### Status
 
 `status()` reports `{"layer", "browser_busy", "conversation_live",
-"goal_standing", "lock_held", "lock_attempts", "next_lock_retry_s"}` —
+"goal_standing", "browsing_inhibits", "lock_held", "lock_attempts",
+"next_lock_retry_s"}` — `browsing_inhibits` is the list of
+`BROWSING_INHIBITS` names the stack currently believes it added itself;
 `lock_attempts` and `next_lock_retry_s` are per-conversation and reset at every
 fade; `next_lock_retry_s` is `None` when no retry is pending. No hook and no
 worker tick ever raises — a broken `AttentionState` degrades to "not live", a

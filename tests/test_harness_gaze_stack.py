@@ -104,6 +104,13 @@ class FakeIntents:
     def goals(self) -> list[object]:
         return [p.get("goal") for _s, n, p in self.snapshot() if n == "declare_goal"]
 
+    def declare_ops(self) -> list[tuple[int, str, dict]]:
+        """Only the ``declare_goal`` ops — task t10 added ``set_inhibition``
+        alongside every browsing transition, so tests that pin exactly the
+        goal-declare sequence filter it out rather than counting the raw
+        snapshot."""
+        return [op for op in self.snapshot() if op[1] == "declare_goal"]
+
 
 class FakeAttention:
     """Just the one property :class:`GazeStack` reads off ``AttentionState``."""
@@ -149,9 +156,9 @@ def test_busy_declares_gaze_hold_then_idle_clears():
     try:
         stack.on_browser_state("busy")
         wait_for(lambda: stack.layer == LAYER_BROWSING, message="browsing layer")
-        wait_for(lambda: len(intents.snapshot()) == 1, message="the declare op")
+        wait_for(lambda: len(intents.declare_ops()) == 1, message="the declare op")
 
-        _seq, name, params = intents.snapshot()[0]
+        _seq, name, params = intents.declare_ops()[0]
         assert name == "declare_goal"
         assert params["goal"] == GAZE_HOLD_BEHAVIOR
         assert params["params"]["pitch"] == pytest.approx(10.0)
@@ -160,11 +167,11 @@ def test_busy_declares_gaze_hold_then_idle_clears():
 
         stack.on_browser_state("idle")
         wait_for(lambda: stack.layer == LAYER_WANDER, message="wander layer")
-        wait_for(lambda: len(intents.snapshot()) == 2, message="the clear op")
+        wait_for(lambda: len(intents.declare_ops()) == 2, message="the clear op")
     finally:
         stack.stop()
 
-    ops = intents.snapshot()
+    ops = intents.declare_ops()
     assert [name for _s, name, _p in ops] == ["declare_goal", "declare_goal"]
     assert ops[1][2]["goal"] is None
     assert stack.status()["goal_standing"] is False
@@ -175,13 +182,13 @@ def test_browser_error_clears_the_goal_like_idle():
     stack, _stop = running_stack(intents)
     try:
         stack.on_browser_state("busy")
-        wait_for(lambda: len(intents.snapshot()) == 1, message="the declare op")
+        wait_for(lambda: len(intents.declare_ops()) == 1, message="the declare op")
         stack.on_browser_state("error")
-        wait_for(lambda: len(intents.snapshot()) == 2, message="the clear op")
+        wait_for(lambda: len(intents.declare_ops()) == 2, message="the clear op")
     finally:
         stack.stop()
 
-    assert intents.names() == ["declare_goal", "declare_goal"]
+    assert [n for _s, n, _p in intents.declare_ops()] == ["declare_goal", "declare_goal"]
     assert intents.goals() == [GAZE_HOLD_BEHAVIOR, None]
 
 
@@ -196,15 +203,15 @@ def test_side_alternates_across_two_browses():
     try:
         for expected in (2, 4):
             stack.on_browser_state("busy")
-            wait_for(lambda n=expected - 1: len(intents.snapshot()) == n, message="declare")
+            wait_for(lambda n=expected - 1: len(intents.declare_ops()) == n, message="declare")
             stack.on_browser_state("idle")
-            wait_for(lambda n=expected: len(intents.snapshot()) == n, message="clear")
+            wait_for(lambda n=expected: len(intents.declare_ops()) == n, message="clear")
     finally:
         stack.stop()
 
     yaws = [
         p["params"]["yaw"]
-        for _s, n, p in intents.snapshot()
+        for _s, n, p in intents.declare_ops()
         if n == "declare_goal" and p.get("goal") == GAZE_HOLD_BEHAVIOR
     ]
     assert yaws == [pytest.approx(15.0), pytest.approx(-15.0)]
@@ -221,12 +228,12 @@ def test_clear_for_result_clears_synchronously_and_only_once():
     try:
         stack.on_browser_state("busy")
         wait_for(lambda: stack.status()["goal_standing"] is True, message="goal standing")
-        assert len(intents.snapshot()) == 1
+        assert len(intents.declare_ops()) == 1
 
         # Synchronous: the clear op is already on the fake the instant this
         # returns — no worker tick in between.
         assert stack.clear_for_result() is True
-        ops = intents.snapshot()
+        ops = intents.declare_ops()
         assert len(ops) == 2
         assert ops[1][1] == "declare_goal"
         assert ops[1][2]["goal"] is None
@@ -234,13 +241,15 @@ def test_clear_for_result_clears_synchronously_and_only_once():
 
         # A second call with nothing standing is a no-op.
         assert stack.clear_for_result() is False
-        assert len(intents.snapshot()) == 2
+        assert len(intents.declare_ops()) == 2
 
-        # And the browse ending later must not clear a second time.
+        # And the browse ending later must not clear a second time (the
+        # browsing inhibits ARE still given back on this transition, task
+        # t10, so only the declare_goal count is pinned here).
         stack.on_browser_state("idle")
         wait_for(lambda: stack.layer == LAYER_WANDER, message="wander layer")
         time.sleep(TICK * 5)
-        assert len(intents.snapshot()) == 2
+        assert len(intents.declare_ops()) == 2
     finally:
         stack.stop()
 
@@ -421,13 +430,13 @@ def test_a_raising_op_does_not_kill_the_worker():
     intents.raise_once = RuntimeError("spool exploded")
     try:
         stack.on_browser_state("busy")
-        wait_for(lambda: len(intents.snapshot()) == 1, message="the failed declare")
+        wait_for(lambda: len(intents.declare_ops()) == 1, message="the failed declare")
 
         # The worker survives and keeps serving transitions.
         stack.on_browser_state("idle")
-        wait_for(lambda: len(intents.snapshot()) == 2, message="the clear after the failure")
+        wait_for(lambda: len(intents.declare_ops()) == 2, message="the clear after the failure")
         stack.on_browser_state("busy")
-        wait_for(lambda: len(intents.snapshot()) == 3, message="a later declare")
+        wait_for(lambda: len(intents.declare_ops()) == 3, message="a later declare")
         assert stack.is_alive()
     finally:
         started = time.monotonic()
@@ -442,7 +451,7 @@ def test_degraded_and_refused_results_are_tolerated():
         stack, _stop = running_stack(intents)
         try:
             stack.on_browser_state("busy")
-            wait_for(lambda: len(intents.snapshot()) == 1, message="the declare op")
+            wait_for(lambda: len(intents.declare_ops()) == 1, message="the declare op")
             assert stack.layer == LAYER_BROWSING
         finally:
             stack.stop()

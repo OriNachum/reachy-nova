@@ -27,6 +27,7 @@ from reachy_nova.harness.rules_overlay import (
     RULE_ID_PREFIX,
     RuleRefused,
     list_rules,
+    retire_rule,
     upsert_rule,
 )
 
@@ -90,6 +91,11 @@ class ReloadEngine:
 def upsert(rule, **kwargs):
     kwargs.setdefault("reload_timeout", 0.15)
     return upsert_rule(rule, **kwargs)
+
+
+def retire(rule_id, **kwargs):
+    kwargs.setdefault("reload_timeout", 0.15)
+    return retire_rule(rule_id, **kwargs)
 
 
 # --------------------------------------------------------------------------- #
@@ -375,4 +381,100 @@ def test_an_unchanged_upsert_submits_no_reload(overlay):
     for path in statedir.reload_commands_dir().glob("*.json"):
         path.unlink()
     upsert(RULE)
+    assert list(statedir.reload_commands_dir().glob("*.json")) == []
+
+
+# --------------------------------------------------------------------------- #
+# retire_rule — tombstones (task t10)                                         #
+# --------------------------------------------------------------------------- #
+
+FACE_NOTICED = {
+    "id": "nova-face-noticed",
+    "when": {"field": "face", "op": "is_true"},
+    "run": "nod",
+    "duration_s": 2.0,
+    "cooldown_s": 30.0,
+}
+
+
+def test_retiring_a_rule_in_the_block_leaves_only_id_and_enabled_false(overlay):
+    upsert(FACE_NOTICED)
+    for path in statedir.reload_commands_dir().glob("*.json"):
+        path.unlink()
+    with ReloadEngine() as engine:
+        result = retire(FACE_NOTICED["id"])
+    assert result["changed"] is True
+    assert "confirmed" in result["verdict"]
+    assert len(engine.seen) == 1
+
+    data = tomllib.loads(overlay.read_text(encoding="utf-8"))
+    (entry,) = data["react"]
+    assert entry == {"id": "nova-face-noticed", "enabled": False}
+
+
+def test_retiring_preserves_operator_text_byte_identical(overlay):
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(OPERATOR_HEAD, encoding="utf-8")
+    upsert(FACE_NOTICED)
+    before_head = overlay.read_text(encoding="utf-8")
+    assert before_head.startswith(OPERATOR_HEAD)
+
+    retire(FACE_NOTICED["id"])
+    after = overlay.read_text(encoding="utf-8")
+    assert after.startswith(OPERATOR_HEAD)
+    head, _, rest = after.partition(MANAGED_BEGIN)
+    assert head == before_head[: before_head.index(MANAGED_BEGIN)]
+
+
+def test_a_retired_rule_file_re_parses_under_the_module_validator(overlay):
+    upsert(FACE_NOTICED)
+    retire(FACE_NOTICED["id"])
+    # validate_rules_document is exercised by _install on every write; a
+    # second, independent re-parse here proves the file it left behind is
+    # still valid on its own.
+    data = tomllib.loads(overlay.read_text(encoding="utf-8"))
+    from reachy_nova.harness.rules_overlay import validate_rules_document
+
+    validate_rules_document(data)
+
+
+def test_a_second_retire_of_the_same_id_is_a_no_op(overlay):
+    upsert(FACE_NOTICED)
+    retire(FACE_NOTICED["id"])
+    before = overlay.read_text(encoding="utf-8")
+    before_mtime = overlay.stat().st_mtime_ns
+
+    for path in statedir.reload_commands_dir().glob("*.json"):
+        path.unlink()
+    result = retire(FACE_NOTICED["id"])
+
+    assert result == {"changed": False, "verdict": None}
+    assert overlay.read_text(encoding="utf-8") == before
+    assert overlay.stat().st_mtime_ns == before_mtime
+    assert list(statedir.reload_commands_dir().glob("*.json")) == []
+
+
+def test_retiring_an_id_not_in_the_block_still_writes_the_tombstone(overlay):
+    # No prior upsert: 'nova-face-noticed' is not in the managed block at
+    # all — it may be a SHIPPED or operator rule of that id, and the tombstone
+    # must still disable it.
+    result = retire("nova-face-noticed")
+    assert result["changed"] is True
+    data = tomllib.loads(overlay.read_text(encoding="utf-8"))
+    (entry,) = data["react"]
+    assert entry == {"id": "nova-face-noticed", "enabled": False}
+
+
+def test_retiring_a_non_nova_prefixed_id_is_accepted(overlay):
+    """A tombstone may target an operator's own (unprefixed) rule id."""
+    result = retire("op-face")
+    assert result["changed"] is True
+    data = tomllib.loads(overlay.read_text(encoding="utf-8"))
+    (entry,) = data["react"]
+    assert entry == {"id": "op-face", "enabled": False}
+
+
+def test_retire_with_reload_false_submits_no_reload(overlay):
+    result = retire(FACE_NOTICED["id"], reload=False)
+    assert result == {"changed": True, "verdict": None}
     assert list(statedir.reload_commands_dir().glob("*.json")) == []

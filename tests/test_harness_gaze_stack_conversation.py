@@ -422,15 +422,29 @@ def test_the_browsing_goal_stands_under_the_lock_and_survives_the_release():
         wait_for(lambda: stack.layer == LAYER_BROWSING, message="browsing again")
         time.sleep(TICK * 5)
         # Released, but the goal was never cleared and is never re-declared.
-        assert intents.since(mark) == ["look_at_sound", "lock_face", "release_face"]
+        # (task t10 added set_inhibition ops alongside the browsing
+        # transitions; this test is about the goal/lock seam, so those are
+        # filtered out here rather than pinned.)
+        assert [n for n in intents.since(mark) if n != "set_inhibition"] == [
+            "look_at_sound",
+            "lock_face",
+            "release_face",
+        ]
         assert stack.status()["goal_standing"] is True
 
         # ...and conversation -> wander clears it, once.
         stack.on_browser_state("idle")
         wait_for(lambda: stack.layer == LAYER_WANDER, message="wander layer")
         wait_for(
-            lambda: intents.since(mark)[-1:] == ["declare_goal"], message="the clear"
+            lambda: "declare_goal" in intents.since(mark), message="the clear"
         )
+        time.sleep(TICK * 5)
+        assert [n for n in intents.since(mark) if n != "set_inhibition"] == [
+            "look_at_sound",
+            "lock_face",
+            "release_face",
+            "declare_goal",
+        ]
         assert stack.status()["goal_standing"] is False
     finally:
         stack.stop()

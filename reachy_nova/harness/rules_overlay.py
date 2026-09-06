@@ -220,6 +220,16 @@ def validate_rule(raw: object, *, kind: str = "react", require_prefix: bool = Tr
     """
     if not isinstance(raw, Mapping):
         raise RuleRefused(f"a rule must be an object (got {raw!r})")
+    if set(raw) == {"id", "enabled"} and raw.get("enabled") is False:
+        # A pure tombstone: disables a shipped/operator (or nova-authored)
+        # rule of this id. It deliberately carries none of the required
+        # react/inhibit fields — see retire_rule, the only writer of this
+        # shape.
+        path = f"[[{kind}]]"
+        return {
+            "id": _validate_id(raw["id"], path, require_prefix=require_prefix),
+            "enabled": False,
+        }
     allowed = _REACT_FIELDS if kind == "react" else _INHIBIT_FIELDS
     required = _REACT_REQUIRED if kind == "react" else _INHIBIT_REQUIRED
     path = f"[[{kind}]]"
@@ -507,6 +517,49 @@ def upsert_rule(
 
     _install(target, candidate)
     return True, _reload_verdict(reload_timeout)
+
+
+def retire_rule(
+    rule_id: str,
+    *,
+    reload: bool = True,
+    path: Path | str | None = None,
+    reload_timeout: float = DEFAULT_RELOAD_TIMEOUT,
+) -> dict:
+    """Write (or update) a tombstone for *rule_id*: ``{"id": rule_id, "enabled": false}``.
+
+    Uses the SAME validated, atomic, re-parsed write path as :func:`upsert_rule`
+    — the tombstone is merged into the managed block by id (replacing whatever
+    was there for that id, nova-authored or not), the candidate file is
+    re-validated before ``os.replace``, and — when *reload* is True — a reload
+    command is submitted and its verdict returned, exactly like the existing
+    writer.
+
+    A tombstone id need not carry the ``nova-`` prefix on purpose: the whole
+    point of a tombstone is to be able to disable a SHIPPED or OPERATOR rule
+    of that id, not only one of nova's own.
+
+    Returns ``{"changed": bool, "verdict": str | None}``. A second call for an
+    id already tombstoned is a no-op — ``changed`` is False, nothing is
+    written, and no reload is submitted.
+    """
+    entry = validate_rule({"id": rule_id, "enabled": False}, kind="react", require_prefix=False)
+
+    target = Path(path) if path is not None else statedir.rules_overlay_path()
+    try:
+        current = target.read_text(encoding="utf-8")
+    except OSError:
+        current = ""
+
+    head, managed, tail = _split_overlay(current)
+    merged = _merge_entry(_managed_entries(managed), entry)
+    candidate = _join_overlay(head, _render_managed(merged), tail)
+    if candidate == current:
+        return {"changed": False, "verdict": None}
+
+    _install(target, candidate)
+    verdict = _reload_verdict(reload_timeout) if reload else None
+    return {"changed": True, "verdict": verdict}
 
 
 def _install(target: Path, text: str) -> None:
