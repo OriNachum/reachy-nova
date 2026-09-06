@@ -107,3 +107,72 @@ runtime support degrades honestly (an `"unknown kind"` refusal, or a
 `run_behavior` refusal naming valid behaviors that don't include the gaze
 one-shots yet) rather than silently — but the intended order is runtime
 first, harness second.
+
+## Gaze stack — the posture layer
+
+`reachy_nova/harness/gaze_stack.py` (`GazeStack`) is the one component that
+owns the head between reflexes. Three parts of the harness want it at once —
+the browser leg while a browse is in flight, the conversation layer while
+someone is talking, the runtime's own feel-alive base the rest of the time —
+so the postures are **layered, lowest first**:
+
+| Layer | When | What the harness declares |
+| :--- | :--- | :--- |
+| `wander` | nothing to do | nothing — the runtime's feel-alive base owns the head |
+| `browsing` | the browser is busy | a standing `declare_goal` of `gaze-hold`, `{pitch: 10, yaw: ±15}` |
+| `conversation` | `AttentionState.conversation_live` | the face lock (task t9); the browsing goal is left standing beneath it |
+
+The desired top layer is a **pure function of two inputs**:
+`attention.conversation_live` and "is the browser busy". The aside yaw's sign
+alternates per browse, so two browses in a row don't look identical.
+`gaze-hold` claims only the head channel, so antennas and body yaw keep
+feel-alive's sway underneath it.
+
+### Single writer
+
+Producers only ever set a flag under a short-lived lock and wake an event —
+`on_browser_state(state)` (`"busy"` raises the browsing layer, `"idle"` /
+`"error"` / anything else lowers it), `on_transcript(role, text)` (USER lines
+only), `on_sonic_state(state)` (the rising edge into `speaking`) and
+`on_speaker_idle()` (recorded for t9). ONE worker thread (`nova-gaze`)
+computes the top layer on each wake or `tick_s` timeout and, on a transition,
+issues **only the transition ops**, serially, each waiting out its own
+`IntentTools.execute` round trip. That is what makes the op list on the spool
+causally ordered rather than a race between whichever producer fired last.
+
+Transitions issue the minimum:
+
+- `wander -> browsing` — declare the `gaze-hold` goal.
+- `browsing -> wander` — `declare_goal` with no goal (only if one is standing).
+- `* -> conversation` — take the lock (t9); the browsing goal is **not**
+  cleared, because the lock owns the head by recency and the goal simply
+  resumes when the lock releases.
+- `conversation -> browsing` — release the lock (t9), then re-declare the goal
+  only if it is not still standing.
+- `conversation -> wander` — release the lock (t9) and clear the goal.
+
+Every transition costs exactly one `[SENSE stage=gaze source=nova
+event=layer]` line naming `old -> new reason=...`, and every op one
+`event=op` line carrying `ok=true` / `ok=false` / `ok=unknown` — the third
+shape (on disk, unconfirmed) is named rather than silently read as success.
+A degraded declare still counts as standing; only an explicit refusal does
+not.
+
+### `clear_for_result()` — the one synchronous op
+
+The app calls `clear_for_result()` immediately before injecting a browse
+result, so the head is demonstrably out of the thinking pose *before* Nova
+starts talking about what it found. A promise like that cannot be kept by
+setting a flag and hoping the worker gets there first, so this one runs on
+the **caller's** thread — but through the same op lock the worker uses, so
+"synchronous" never means "concurrent". It returns whether it cleared
+anything, and leaves the layer alone: while the browser is still busy the
+stack stays in `browsing` with nothing standing, so the later `idle`
+transition issues no second clear.
+
+### Status
+
+`status()` reports `{"layer", "browser_busy", "conversation_live",
+"goal_standing"}`. No hook and no worker tick ever raises — a broken
+`AttentionState` degrades to "not live", a failed op is logged and the loop
+continues — and the worker exits within one tick of its stop event.
