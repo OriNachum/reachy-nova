@@ -1284,16 +1284,27 @@ class IntentTools:
 
     # -- the tool entry point ---------------------------------------------- #
 
-    def execute(self, tool_name: str, params: dict) -> str:
+    def execute(self, tool_name: str, params: dict, *, reflex: bool = False) -> str:
         """Run one tool call; return the JSON result payload for the model.
 
         Never raises and never returns nothing: an unknown tool, a malformed
         argument, an engine refusal, a silent engine — each has its own visible
         payload, and each emits exactly one ``[SENSE stage=act source=nova]``
         line naming the outcome.
+
+        *reflex* marks a call the HARNESS makes on its own behalf — the gaze
+        stack's posture, lock, sway and base-layer revive — rather than one
+        the model asked for. The cold-and-nameless refusal
+        (:data:`COLD_REFUSED_TOOLS`) exists to stop the MODEL acting on
+        overheard speech; a reflex is not the model acting on anything, and
+        gating it left the robot rigid and lock-less for as long as people
+        talked near it without naming it (live, 2026-09-06 12:28–12:36 BST:
+        every ``lock_face`` and every ``revive feel-alive`` refused "not
+        addressed"). Everything else — validation, spool, await, logging — is
+        identical for a reflex call.
         """
         try:
-            payload = self._dispatch(tool_name, params)
+            payload = self._dispatch(tool_name, params, reflex=reflex)
         except ToolRefused as err:
             payload = {"ok": False, "error": str(err)}
         except RuleRefused as err:
@@ -1307,14 +1318,18 @@ class IntentTools:
             _log_outcome(tool_name, payload)
         return json.dumps(payload)
 
-    def _dispatch(self, tool_name: str, params: dict) -> dict:
+    def _dispatch(self, tool_name: str, params: dict, *, reflex: bool = False) -> dict:
         if tool_name not in ACTION_SET:
             raise ToolRefused(
                 f"unknown tool {tool_name!r}; available: {', '.join(ACTION_SET)}"
             )
         if not isinstance(params, Mapping):
             raise ToolRefused(f"arguments for {tool_name!r} must be an object (got {params!r})")
-        if tool_name in COLD_REFUSED_TOOLS and _is_cold_and_nameless(self._attention):
+        if (
+            not reflex
+            and tool_name in COLD_REFUSED_TOOLS
+            and _is_cold_and_nameless(self._attention)
+        ):
             raise ToolRefused(NOT_ADDRESSED_REASON)
         if tool_name == THINK:
             return self._think_tool(params)

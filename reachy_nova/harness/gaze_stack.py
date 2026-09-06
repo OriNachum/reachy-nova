@@ -1064,7 +1064,13 @@ class GazeStack:
         failed or came back unparseable.
         """
         try:
-            raw = self._intents.execute(tool_name, params)
+            # A reflex, not a model tool call: the attention gate's
+            # cold-and-nameless refusal does not apply to the body keeping
+            # itself alive or turning toward whoever is speaking (see
+            # IntentTools.execute). Live, 2026-09-06 12:28–12:36 BST: every
+            # lock_face and every revive was refused "not addressed" while
+            # people talked near the robot without naming it.
+            raw = self._intents.execute(tool_name, params, reflex=True)
         except Exception as exc:  # noqa: BLE001 - a broken spool is not fatal here
             sensory_log.stage(
                 STAGE, SOURCE, EVENT_OP, f"{detail} failed error={type(exc).__name__}: {exc}"

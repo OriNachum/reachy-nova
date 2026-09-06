@@ -1052,7 +1052,7 @@ def test_a_lite_planned_gesture_goes_through_the_intents_spool():
     assert isinstance(intents, IntentTools)
 
     calls = []
-    intents.execute = lambda name, params: calls.append((name, params)) or "{}"
+    intents.execute = lambda name, params, **_kw: calls.append((name, params)) or "{}"
     reactor._on_gesture("nod")
 
     assert calls == [("run_behavior", {"name": "nod", "duration": 2.0})]
@@ -1388,7 +1388,7 @@ def test_a_browse_result_clears_the_thinking_pose_before_it_speaks(monkeypatch):
 
     order: list = []
     gaze._intents = SimpleNamespace(
-        execute=lambda name, params: order.append(("op", name, params.get("goal")))
+        execute=lambda name, params, **_kw: order.append(("op", name, params.get("goal")))
         or '{"ok": true}'
     )
     gaze.goal_standing = True  # a browse was in flight

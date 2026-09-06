@@ -265,7 +265,10 @@ every release — the fade, or the runtime's own `motion/lock-released` —
 resets the deadline so the robot wakes the tick after the hold ends.
 `lock_liveness=False` turns this off with the sway;
 `status()["base_revive_until"]` is the deadline of the revive believed
-running, or `None`. This is a workaround for the runtime's promise, not a
+running, or `None`. Every op this layer submits is a *reflex* (`IntentTools.execute(...,
+reflex=True)`): the attention gate's cold-and-nameless refusal is for the
+model, not for the body keeping itself alive or turning toward whoever is
+speaking — see [attention.md](attention.md). This is a workaround for the runtime's promise, not a
 replacement for it; it goes when #183 lands.
 
 ### Start and stop hygiene

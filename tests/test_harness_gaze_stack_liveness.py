@@ -39,12 +39,14 @@ class FakeIntents:
         self._lock = threading.Lock()
         self.ops: list[tuple[int, str, dict]] = []
         self.results = dict(results or {})
+        self.kwargs: list[dict] = []
         self._seq = 0
 
-    def execute(self, tool_name: str, params: dict) -> str:
+    def execute(self, tool_name: str, params: dict, **kwargs) -> str:
         with self._lock:
             self._seq += 1
             self.ops.append((self._seq, tool_name, dict(params)))
+            self.kwargs.append(dict(kwargs))
         return json.dumps(self.results.get(tool_name, {"ok": True}))
 
     def snapshot(self) -> list[tuple[int, str, dict]]:
@@ -353,3 +355,19 @@ def test_current_active_names_degrades_to_empty(state_dir, payload):
     else:
         _write_state(payload)
     assert current_active_names() == []
+
+
+def test_every_gaze_op_is_a_reflex_not_a_model_tool_call():
+    """Live, 2026-09-06 12:28–12:36 BST: the attention gate's cold-and-nameless
+    refusal turned every lock_face and every revive away with "not addressed"
+    while people talked near the robot without naming it. The gate is for the
+    MODEL acting on overheard speech; the stack's ops are the body's own."""
+    intents = FakeIntents()
+    active = ActiveNames([])
+    stack = started(intents, active)
+    try:
+        wait_for(lambda: len(revive_ops(intents)) == 1, message="the revive")
+        assert intents.kwargs, "no ops recorded"
+        assert all(kw.get("reflex") is True for kw in intents.kwargs), intents.kwargs
+    finally:
+        stack.stop()

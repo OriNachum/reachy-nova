@@ -227,6 +227,17 @@ pre-flight `ToolRefused`, nothing submitted to the spool — whenever the model
 is cold and the transcript it is acting on never named the robot
 (`_is_cold_and_nameless(attention)`, `None` attention always answers `False`):
 
+The refusal is for the *model* acting on overheard speech. The harness's own
+reflexes — everything `GazeStack` submits (`look_at_sound`, `lock_face`,
+`release_face`, the browsing `declare_goal` and `set_inhibition`, the
+antenna sway, the base-layer revive) — pass `reflex=True` to
+`IntentTools.execute` and skip the cold-and-nameless check; validation,
+spooling, awaiting and logging are otherwise identical. Live, 2026-09-06
+12:28–12:36 BST, before that keyword existed: people talked near the robot
+without naming it, and every `lock_face` and every `revive feel-alive` was
+refused "not addressed" — a robot that neither turned to the voices nor
+breathed, for as long as the conversation went on.
+
 ```text
 browse, forge, use_skill, author_rule, goto, run_behavior, declare_goal,
 set_mode, set_inhibition, create_rule, enroll_face, lock_face, look_at_face,

@@ -2181,6 +2181,37 @@ def test_cold_and_nameless_run_behavior_is_refused_without_spooling(state_dir, c
     assert spooled() == []
 
 
+def test_cold_and_nameless_reflex_run_behavior_is_not_refused(state_dir, cold_attention):
+    """The gaze stack's own ops (lock, sway, base-layer revive) bypass the
+    cold refusal: it exists for the MODEL acting on overheard speech, and
+    gating the body's reflexes left the robot rigid and lock-less for as long
+    as people talked near it without naming it (live, 2026-09-06 12:28 BST).
+    """
+    cold_attention.note_transcript("what time is it")
+    tools = IntentTools(await_timeout=0.05, attention=cold_attention)
+
+    refused = json.loads(tools.execute("run_behavior", {"name": "nod"}))
+    assert refused["error"] == NOT_ADDRESSED_REASON
+    assert spooled() == []
+
+    result = json.loads(tools.execute("run_behavior", {"name": "nod"}, reflex=True))
+
+    assert "error" not in result or result["error"] != NOT_ADDRESSED_REASON
+    assert len(spooled()) == 1
+    assert spool_payloads()[0]["op"] == "run_behavior"
+
+
+def test_cold_and_nameless_reflex_lock_face_is_not_refused(state_dir, cold_attention):
+    cold_attention.note_transcript("what time is it")
+    tools = IntentTools(await_timeout=0.05, attention=cold_attention)
+
+    result = json.loads(tools.execute("lock_face", {}, reflex=True))
+
+    assert result.get("error") != NOT_ADDRESSED_REASON
+    assert len(spooled()) == 1
+    assert spool_payloads()[0]["op"] == "lock_face"
+
+
 def test_cold_and_nameless_recall_senses_still_executes(state_dir, cold_attention):
     cold_attention.note_transcript("what time is it")
     history = FakeSenseHistory(entries=[])

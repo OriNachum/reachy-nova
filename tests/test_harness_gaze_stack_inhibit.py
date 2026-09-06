@@ -66,7 +66,7 @@ class FakeIntents:
         self.result = result if result is not None else {"ok": True}
         self._seq = 0
 
-    def execute(self, tool_name: str, params: dict) -> str:
+    def execute(self, tool_name: str, params: dict, **kwargs) -> str:
         with self._lock:
             self._seq += 1
             seq = self._seq

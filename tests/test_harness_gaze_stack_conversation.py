@@ -106,7 +106,7 @@ class FakeIntents:
         with self._lock:
             self.results[tool_name] = result
 
-    def execute(self, tool_name: str, params: dict) -> str:
+    def execute(self, tool_name: str, params: dict, **kwargs) -> str:
         with self._lock:
             self._seq += 1
             seq = self._seq

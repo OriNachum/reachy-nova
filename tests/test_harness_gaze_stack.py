@@ -77,7 +77,7 @@ class FakeIntents:
         #: When set, the NEXT call raises this instead of answering.
         self.raise_once: Exception | None = None
 
-    def execute(self, tool_name: str, params: dict) -> str:
+    def execute(self, tool_name: str, params: dict, **kwargs) -> str:
         with self._lock:
             self._seq += 1
             seq = self._seq
