@@ -1239,3 +1239,35 @@ def test_a_long_reply_generated_faster_than_real_time_never_drops_chunks(monkeyp
         stop.set()
         speaker.stop()
     assert speaker.chunks_played == 40, f"only {speaker.chunks_played} of 40 chunks played"
+
+
+
+def test_a_failed_chunk_delete_is_retried_then_abandoned_with_a_name(caplog):
+    """Review thread 2: a transient DELETE failure must not orphan the file."""
+    import logging
+
+    from reachy_nova.harness.gate import EchoGate
+    from reachy_nova.harness.speaking import SonicSpeaker, _MAX_DELETE_ATTEMPTS
+
+    calls = []
+
+    def flaky(base, name):
+        calls.append(name)
+        if len(calls) == 1:
+            raise RuntimeError("daemon hiccup")
+
+    speaker = SonicSpeaker(gate=EchoGate(margin_s=0.0), poster=lambda *a: None, deleter=flaky)
+    speaker._delete_file("nova-1-1.wav")
+    assert speaker.files_deleted == 0 and speaker.delete_failures == 1
+    speaker._reap_due()  # the retry backlog is drained on the next reap
+    assert speaker.files_deleted == 1 and calls == ["nova-1-1.wav", "nova-1-1.wav"]
+
+    always = SonicSpeaker(
+        gate=EchoGate(margin_s=0.0), poster=lambda *a: None, deleter=lambda b, n: (_ for _ in ()).throw(RuntimeError("down"))
+    )
+    with caplog.at_level(logging.INFO, logger="nova.sensory"):
+        always._delete_file("nova-2-1.wav")
+        for _ in range(_MAX_DELETE_ATTEMPTS):
+            always._reap_due()
+    assert always.deletes_abandoned == 1
+    assert any("chunk-delete-abandoned" in r.getMessage() for r in caplog.records)

@@ -75,6 +75,10 @@ REASON_MALFORMED = "lite-malformed"
 #: Not a fallback (nothing is delivered for the evicted cue) — the "latest
 #: wins" queue superseding a still-pending, older request.
 REASON_EVICTED = "lite-evicted"
+#: Too many Lite calls still in flight (hung helpers): fall back at once.
+REASON_BUSY = "lite-busy"
+#: Bound on abandoned-but-running Lite helper threads (PR #24 review).
+DEFAULT_MAX_INFLIGHT = 2
 
 # --------------------------------------------------------------------------- #
 # Reply format                                                                 #
@@ -208,6 +212,10 @@ def _request_body(user_text: str) -> dict:
     }
 
 
+class _LiteBusyError(Exception):
+    """Too many Lite calls are still in flight — do not start another."""
+
+
 class _LiteTimeoutError(Exception):
     """Internal: the helper thread did not finish within ``timeout_s``."""
 
@@ -254,8 +262,14 @@ class LiteReactor:
         on_gesture: Callable[[str], None] | None = None,
         max_queue: int = 4,
         clock: Callable[[], float] = time.monotonic,
+        on_vocalize: Callable[[str], None] | None = None,
+        max_inflight: int = DEFAULT_MAX_INFLIGHT,
     ) -> None:
         self._client = client
+        self._on_vocalize = on_vocalize
+        self.max_inflight = max(1, int(max_inflight))
+        self._inflight = 0
+        self._inflight_lock = threading.Lock()
         self.model_id = model_id or config.lite_model_id()
         self.timeout_s = float(timeout_s)
         self._context_provider = context_provider
@@ -283,7 +297,19 @@ class LiteReactor:
     @property
     def client(self):
         if self._client is None:
-            self._client = boto3.client("bedrock-runtime", region_name=config.region())
+            from botocore.config import Config
+
+            # Request-level timeouts so a hung call ends on its own instead
+            # of living forever on an abandoned helper thread (PR #24 review).
+            self._client = boto3.client(
+                "bedrock-runtime",
+                region_name=config.region(),
+                config=Config(
+                    connect_timeout=2.0,
+                    read_timeout=max(self.timeout_s, 1.0) + 1.0,
+                    retries={"max_attempts": 1},
+                ),
+            )
         return self._client
 
     # -- lifecycle -----------------------------------------------------------
@@ -377,6 +403,9 @@ class LiteReactor:
         context = self._safe_context()
         try:
             raw_text = self._call_lite(item.cue, context)
+        except _LiteBusyError as exc:
+            self._fallback(item, REASON_BUSY, str(exc))
+            return
         except _LiteTimeoutError:
             self._fallback(item, REASON_TIMEOUT)
             return
@@ -414,6 +443,8 @@ class LiteReactor:
         self._safe_deliver(item.deliver, plan_text)
         if plan.gesture != "none" and self._on_gesture is not None:
             self._safe_gesture(plan.gesture)
+        if plan.vocalize != "none" and self._on_vocalize is not None:
+            self._safe_vocalize(plan.vocalize)
 
     def _fallback(self, item: _ReactItem, reason: str, detail: str = "") -> None:
         # Same ordering rule as the success path above: log before deliver.
@@ -438,6 +469,13 @@ class LiteReactor:
         result: dict[str, Any] = {}
         done = threading.Event()
 
+        with self._inflight_lock:
+            if self._inflight >= self.max_inflight:
+                raise _LiteBusyError(
+                    f"{self._inflight} Lite call(s) still in flight (cap {self.max_inflight})"
+                )
+            self._inflight += 1
+
         def _work() -> None:
             try:
                 response = self.client.invoke_model(
@@ -449,6 +487,8 @@ class LiteReactor:
             except Exception as exc:  # noqa: BLE001 - handed back to the waiter
                 result["error"] = exc
             finally:
+                with self._inflight_lock:
+                    self._inflight -= 1
                 done.set()
 
         threading.Thread(target=_work, name="lite-reactor-call", daemon=True).start()
@@ -476,6 +516,12 @@ class LiteReactor:
             deliver(text)
         except Exception as exc:  # noqa: BLE001 - a bad callback must not wedge the worker
             logger.warning("lite reactor deliver callback raised: %s", exc)
+
+    def _safe_vocalize(self, kind: str) -> None:
+        try:
+            self._on_vocalize(kind)  # type: ignore[misc]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("lite reactor on_vocalize callback raised: %s", exc)
 
     def _safe_gesture(self, gesture: str) -> None:
         try:

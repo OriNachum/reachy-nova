@@ -103,11 +103,6 @@ class Ledger:
         when the write itself fails — either way the failure is counted,
         never raised.
         """
-        if self._quiet is not None and self._quiet.active():
-            with self._lock:
-                self.skipped_quiet += 1
-            return False
-
         record: dict[str, Any] = {
             "ts": self._clock() if ts is None else ts,
             "kind": kind,
@@ -117,6 +112,12 @@ class Ledger:
         line = json.dumps(record, separators=(",", ":")) + "\n"
 
         with self._lock:
+            # Decided UNDER the write lock (PR #24 review): a quiet armed
+            # between an earlier check and the write could otherwise leak
+            # one record into a window that promised none.
+            if self._quiet is not None and self._quiet.active():
+                self.skipped_quiet += 1
+                return False
             try:
                 self._path.parent.mkdir(parents=True, exist_ok=True)
                 with open(self._path, "a", encoding="utf-8") as fh:

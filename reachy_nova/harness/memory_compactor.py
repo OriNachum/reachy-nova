@@ -517,8 +517,8 @@ class MemoryCompactor:
         topics = data.get("topics")
         items = data.get("items")
         return {
-            "topics": topics if isinstance(topics, list) else [],
-            "items": items if isinstance(items, list) else [],
+            "topics": _valid_entries(topics),
+            "items": _valid_entries(items),
         }
 
     def _atomic_write(self, payload: dict[str, Any]) -> None:
@@ -591,6 +591,33 @@ class MemoryCompactor:
             if r.get("kind") in ("USER", "ASSISTANT") and str(r.get("text", "")).strip()
         ]
         return exchanges[-self._HISTORY_EXCHANGES :]
+
+
+def _valid_entries(raw: Any) -> list[dict[str, Any]]:
+    """Keep only entries ``history()`` can render: dicts with non-empty text.
+
+    The file may have been hand-edited or written by an older schema; one
+    malformed element used to raise inside ``history()`` on EVERY session
+    start and silently disable replay (PR #24 review). Rejected entries are
+    dropped here, ``ts`` is coerced to a float (0.0 when unusable).
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        text = entry.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        clean = dict(entry)
+        clean["text"] = text.strip()
+        try:
+            clean["ts"] = float(entry.get("ts", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            clean["ts"] = 0.0
+        out.append(clean)
+    return out
 
 
 def _drop_expired(

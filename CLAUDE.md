@@ -79,7 +79,7 @@ Requires `.env` file with AWS credentials (see `.env.sample`):
 ## Key Patterns
 
 - All subsystems take a `stop_event: threading.Event` for graceful shutdown
-- Callbacks are the primary communication pattern between components (not queues, except for browser tasks and forge dispatch)
+- Callbacks are the primary communication pattern between components (not queues, except for the background workers that must never block a caller: browser tasks, forge dispatch, the harness's Lite reactor and memory compactor — each owns one bounded, latest-wins queue behind a callback-shaped API)
 - Audio resampling is done with `np.interp` (simple linear interpolation) — no external resampling library
 - YOLO and face-recognition models are lazy-loaded on first detection frame to avoid startup delay
 - The `ReachyMiniApp` base class provides `self.settings_app` (FastAPI) for API endpoints and `reachy_mini.media` for hardware access

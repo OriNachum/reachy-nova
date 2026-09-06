@@ -636,3 +636,29 @@ class TestForcedRestartIntegration:
 
         assert len(client.streams) == 1, "a quiet room must not be restarted"
         assert _restart_warnings(caplog) == []
+
+
+
+class TestBurstResetsPerSession:
+    def test_a_burst_cannot_span_two_sessions(self, monkeypatch):
+        """Review thread 8: loud chunks from the previous session do not count."""
+        monkeypatch.delenv("NOVA_SONIC_SPEECH_FLOOR", raising=False)
+        feeder = _Feeder(monkeypatch)
+        for _ in range(nova_sonic.SPEECH_BURST_CHUNKS - 1):
+            feeder.sonic.feed_audio(_speech())
+        feeder.sonic._arm_watchdogs(2_000.0, 900.0)  # a fresh session
+        feeder.sonic.feed_audio(_speech())  # one more chunk, not a burst
+        assert feeder.sonic._input_since_response is False
+
+
+class TestInjectStatuses:
+    def test_inject_text_names_its_fate(self, monkeypatch):
+        """Review thread 5: callers can tell sent from dropped from deferred."""
+        feeder = _Feeder(monkeypatch)
+        feeder.sonic._last_inject_time = 0.0
+        assert feeder.sonic.inject_text("(cue)") == "sent"
+        assert feeder.sonic.inject_text("(cue)") == "dropped-throttled"
+        feeder.sonic._speaking = True
+        assert feeder.sonic.inject_text("(cue)", sense_class="pat") == "deferred"
+        feeder.sonic._active = False
+        assert feeder.sonic.inject_text("(cue)") == "dropped-inactive"

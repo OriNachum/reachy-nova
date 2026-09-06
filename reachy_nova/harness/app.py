@@ -46,6 +46,8 @@ say what this process is going to be before it is anything at all.
 from __future__ import annotations
 
 import threading
+
+import numpy as np
 from pathlib import Path
 
 from .. import config
@@ -124,6 +126,10 @@ def render_vision_cue(text: str) -> str:
         end = max(cut.rfind(". "), cut.rfind("; "))
         body = (cut[: end + 1] if end > 60 else cut.rstrip()) 
     return f"(you glance around: {body}) (react briefly if at all)"
+
+
+#: Lite's vocalize vocabulary -> the legacy synthesiser's kinds.
+VOCALIZE_KINDS = {"chirp": "chirp_up", "trill": "trill", "purr": "purr_tone"}
 
 
 def build_system_prompt(persona_text: str) -> str:
@@ -686,11 +692,21 @@ def build_app() -> list[object]:
     # nothing about ledgers or moods. ``sense_class`` is a real keyword, which
     # is what makes NovaBus pass it (it introspects the callable once).
     def _inject(text: str, sense_class: str | None = None) -> None:
-        sonic.inject_text(text, sense_class=sense_class)
-        if ledger is not None:
+        # The ledger records DELIVERED senses only (PR #24 review): a cue
+        # dropped as throttled/inactive never reached the model, and a
+        # deferred one is appended when the drain actually sends it (see
+        # sonic.on_deferred_delivered below). Mood is about what happened to
+        # the body, so it is noted either way.
+        status = sonic.inject_text(text, sense_class=sense_class)
+        if status == "sent" and ledger is not None:
             ledger.append("sense", text, sense_class=sense_class)
         if sense_class in MOOD_SENSE_CLASSES:
             mood.note(sense_class)
+
+    if ledger is not None:
+        sonic.on_deferred_delivered = lambda text, sense_class: ledger.append(
+            "sense", text, sense_class=sense_class
+        )
 
     # Lite reactor context (t11) — what the fast tier gets to reason with:
     # the recent senses, the day's memory, the mood, and the last exchanges.
@@ -767,8 +783,22 @@ def build_app() -> list[object]:
         try:
             from .lite_reactor import LiteReactor
 
+            # Lite plans may ask for a sound (chirp|trill|purr). The harness has no
+            # SDK speaker, so the legacy synthesiser's samples ride the SonicSpeaker
+            # like a reply chunk: 24 kHz, flushed by inactivity, gate-serialised
+            # (PR #24 review: vocalizations were parsed and then silently ignored).
+            def _vocalize(kind: str) -> None:
+                try:
+                    from ..vocalize import synthesize
+
+                    samples = synthesize(VOCALIZE_KINDS[kind], sample_rate=24000)
+                    speaker.on_audio_chunk(np.asarray(samples, dtype=np.float32))
+                except Exception as err:  # noqa: BLE001 - a sound must never cost a reaction
+                    _stage("react", "lite", "vocalize", f"dropped reason=vocalize-failed kind={kind} ({err})")
+
             lite_reactor = LiteReactor(
-                context_provider=_reaction_context, on_gesture=_reaction_gesture
+                context_provider=_reaction_context, on_gesture=_reaction_gesture,
+                on_vocalize=_vocalize,
             )
             components.append(lite_reactor)
         except Exception as err:  # noqa: BLE001
@@ -811,7 +841,7 @@ def build_app() -> list[object]:
     # 30 s unprompted monologue about the scene at every harness start. A
     # glance is a body cue like any other: parenthesised, capped, marked brief.
     def _vision_cue(text: str) -> None:
-        sonic.inject_text(render_vision_cue(text), sense_class="vision")
+        _inject(render_vision_cue(text), sense_class="vision")
 
     # vision leg — Omni is model-config-gated (empty id = preview not enabled)
     # and the bus supplies the retained reachy/state/clip payload it reads.

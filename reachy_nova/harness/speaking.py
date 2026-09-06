@@ -116,6 +116,12 @@ _MIN_SPLIT_TARGET_S = _SPLIT_SEARCH_S + _SPLIT_WINDOW_S
 #: is deleted — cover for ``play_sound``'s trigger latency (29-73 ms measured
 #: on the robot 2026-09-06), not for the echo gate's ear-side margin.
 _DELETE_GRACE_S = 0.25
+#: A failed chunk DELETE is retried on later reaps, up to this many attempts,
+#: then abandoned with a named line (PR #24 review: a transient daemon
+#: failure used to orphan the file AND drop it from the outstanding cap).
+_MAX_DELETE_ATTEMPTS = 3
+#: Bound on the retry backlog — the disk is the thing being protected.
+_RETRY_DELETES_CAP = 32
 
 _INT16_BYTES = 2
 _INT16_MAX = 32767.0
@@ -340,6 +346,10 @@ class SonicSpeaker:
         self.files_deleted = 0
         #: Failed deletes (logged once per run, counted every time).
         self.delete_failures = 0
+        #: Files whose DELETE was abandoned after _MAX_DELETE_ATTEMPTS.
+        self.deletes_abandoned = 0
+        # (filename, next attempt number) — worker-thread only.
+        self._retry_deletes: deque[tuple[str, int]] = deque(maxlen=_RETRY_DELETES_CAP)
         self._delete_drop_logged = False
         #: Chunks dropped by the quiet deadline since it was armed.
         self.quiet_drops = 0
@@ -752,8 +762,9 @@ class SonicSpeaker:
             self._delete_file(stale)
 
     def _reap_due(self) -> None:
-        """Delete every chunk file whose playback window has elapsed."""
-        if not self._outstanding:
+        """Delete every chunk file whose playback window has elapsed, and retry
+        earlier failures — even when nothing new is outstanding."""
+        if not self._outstanding and not self._retry_deletes:
             return
         now = self._clock()
         expired: list[str] = []
@@ -762,8 +773,15 @@ class SonicSpeaker:
                 expired.append(self._outstanding.popleft()[0])
         for filename in expired:
             self._delete_file(filename)
+        # Retry earlier failures (transient daemon/network errors) before
+        # they can pile up on a 90 %-full disk; each gets a bounded number
+        # of attempts, then a named abandonment.
+        retries = list(self._retry_deletes)
+        self._retry_deletes.clear()
+        for filename, attempt in retries:
+            self._delete_file(filename, attempt)
 
-    def _delete_file(self, filename: str) -> None:
+    def _delete_file(self, filename: str, attempt: int = 1) -> None:
         """One best-effort DELETE. A failure is latched, never a lost voice.
 
         The disk filling up is a real outage path, but so is a mouth that
@@ -774,6 +792,17 @@ class SonicSpeaker:
             self.deleter(self.base_url, filename)
         except Exception as err:  # noqa: BLE001 - cleanup is never fatal
             self.delete_failures += 1
+            if attempt < _MAX_DELETE_ATTEMPTS:
+                self._retry_deletes.append((filename, attempt + 1))
+            else:
+                self.deletes_abandoned += 1
+                sensory_log.stage(
+                    STAGE_SPEAK,
+                    SOURCE,
+                    "cleanup",
+                    f"dropped reason=chunk-delete-abandoned file={filename} "
+                    f"attempts={attempt} ({err})",
+                )
             if not self._delete_drop_logged:
                 self._delete_drop_logged = True
                 sensory_log.stage(

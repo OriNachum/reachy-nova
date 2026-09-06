@@ -539,3 +539,22 @@ def test_construction_accepts_all_documented_item_kinds_or_falls_back_to_fact(tm
     now = 42.0
     out = _coerce_entries([{"text": "a thing", "kind": kind}], now, with_kind=True)
     assert out[0]["kind"] in {"request", "preference", "joke", "stop", "fact"}
+
+
+
+def test_malformed_persisted_entries_never_disable_replay(tmp_path):
+    """Review thread 6: one junk element must not raise inside history()."""
+    path = tmp_path / "memory.json"
+    path.write_text(
+        json.dumps({"topics": ["not-a-dict", {"text": ""}, {"text": "gardening", "ts": "bad"}, {"nope": 1}],
+                    "items": [None, {"text": "  wants tips ", "ts": 5.0}]}),
+        encoding="utf-8",
+    )
+    ledger = Ledger(path=tmp_path / "ledger.jsonl")
+    compactor = MemoryCompactor(ledger, path=path, client=FakeBedrock())
+    memory = compactor.memory()
+    assert [e["text"] for e in memory["topics"]] == ["gardening"]
+    assert memory["topics"][0]["ts"] == 0.0
+    assert [e["text"] for e in memory["items"]] == ["wants tips"]
+    blocks = compactor.history()
+    assert blocks and "gardening" in blocks[0]["text"]

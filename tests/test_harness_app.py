@@ -843,7 +843,7 @@ def test_a_bus_inject_reaches_sonic_with_its_class_and_lands_in_the_ledger():
     bus_component = next(c for c in components if isinstance(c, NovaBus))
 
     injected = []
-    sonic.inject_text = lambda text, sense_class=None: injected.append((text, sense_class))
+    sonic.inject_text = lambda text, sense_class=None: (injected.append((text, sense_class)), "sent")[1]
 
     # The bus introspects on_inject ONCE at construction; it must have found a
     # real ``sense_class`` keyword on the wrapper, or the class never rides.
@@ -1036,7 +1036,7 @@ def test_a_real_bus_message_lands_in_the_ledger_through_the_composed_wrapper():
     bus_component = next(c for c in components if isinstance(c, NovaBus))
 
     injected = []
-    sonic.inject_text = lambda text, sense_class=None: injected.append((text, sense_class))
+    sonic.inject_text = lambda text, sense_class=None: (injected.append((text, sense_class)), "sent")[1]
 
     bus_component.on_message(
         None,
@@ -1077,3 +1077,56 @@ def test_vision_descriptions_reach_sonic_as_a_brief_capped_cue():
     assert len(inner) <= VISION_CUE_MAX_CHARS
     assert inner.endswith("."), "cut at a sentence end"
     assert render_vision_cue("  a cat\n on the desk ") == "(you glance around: a cat on the desk) (react briefly if at all)"
+
+
+
+# --------------------------------------------------------------------------- #
+# PR #24 review fixes                                                          #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_ledger_records_only_delivered_senses():
+    """Review thread 5: a throttled/inactive cue never reached the model."""
+    components = _build()
+    sonic = components[0]
+    bus_component = next(c for c in components if isinstance(c, NovaBus))
+    sonic.inject_text = lambda text, sense_class=None: "dropped-throttled"
+    bus_component._on_inject("(someone is petting you)", sense_class="pat")
+    assert _ledger_records() == []
+    sonic.inject_text = lambda text, sense_class=None: "deferred"
+    bus_component._on_inject("(someone is petting you)", sense_class="pat")
+    assert _ledger_records() == [], "a deferred cue is ledgered when the drain sends it, not before"
+    # ...and the drain's hook is what appends it
+    assert sonic.on_deferred_delivered is not None
+    sonic.on_deferred_delivered("(just now, while you were talking: someone petted you)", "pat")
+    records = _ledger_records()
+    assert len(records) == 1 and records[0]["sense_class"] == "pat"
+
+
+def test_vision_cues_go_through_the_ledger_wrapper():
+    """Review thread 7: a glance is a delivered sense like any other."""
+    components = _build()
+    sonic = components[0]
+    seen = []
+    sonic.inject_text = lambda text, force=False, sense_class=None: (seen.append((text, sense_class)), "sent")[1]
+    app_vision = [c for c in components if type(c).__name__ == "VisionLeg"]
+    if not app_vision:
+        pytest.skip("vision leg not built in this environment")
+    app_vision[0]._on_answer("A cat on the desk.")
+    assert seen and seen[0][1] == "vision"
+    records = _ledger_records()
+    assert records and records[-1]["sense_class"] == "vision"
+
+
+def test_lite_vocalizations_play_through_the_speaker():
+    """Review thread 4: a purr is synthesised and rides the speaker like a chunk."""
+    from reachy_nova.harness.lite_reactor import LiteReactor
+
+    components = _build()
+    speaker = components[1]
+    reactor = next(c for c in components if isinstance(c, LiteReactor))
+    assert reactor._on_vocalize is not None
+    fed = []
+    speaker.on_audio_chunk = lambda samples: fed.append(samples)
+    reactor._on_vocalize("purr")
+    assert len(fed) == 1 and fed[0].dtype.name == "float32" and len(fed[0]) > 2400

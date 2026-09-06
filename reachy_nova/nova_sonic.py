@@ -327,6 +327,10 @@ class NovaSonic:
         self._replay_blocks_last = 0
         self._replay_deaths = 0
         self._replay_suspended = False
+        #: Called with (text, sense_class) after a DEFERRED cue is actually
+        #: sent (the drain), so the ledger records delivered senses only
+        #: (PR #24 review): the app wires it to ledger.append.
+        self.on_deferred_delivered: Callable[[str, str | None], None] | None = None
         self._rotation_age_s: float | None = None
 
         # Tool use tracking
@@ -391,6 +395,8 @@ class NovaSonic:
         # Restart-backoff bookkeeping: a fresh session starts unproven.
         self._session_start_mono = mono
         self._session_had_response = False
+        # A speech burst must be earned inside THIS session (PR #24 review).
+        self._energy_recent.clear()
 
     def _note_input_sent(self) -> None:
         """Record that we pushed something (audio or text) into the stream."""
@@ -1299,7 +1305,7 @@ class NovaSonic:
 
     def inject_text(
         self, text: str, force: bool = False, sense_class: str | None = None
-    ) -> None:
+    ) -> str:
         """Inject a text message into the conversation (e.g., vision description).
 
         Args:
@@ -1313,7 +1319,7 @@ class NovaSonic:
                 independent facts.
         """
         if not self._active or not self._loop:
-            return
+            return "dropped-inactive"
 
         # Don't inject while the model is actively generating audio — this can
         # destabilize the Bedrock bidirectional stream and cause it to hang.
@@ -1325,7 +1331,7 @@ class NovaSonic:
                 "inject", "speech", str(uuid.uuid4()),
                 f"deferred class={cue.sense_class} text={text[:60]!r}",
             )
-            return
+            return "deferred"
 
         # Throttle: skip if too soon after last inject to avoid flooding Bedrock
         now = time.time()
@@ -1335,7 +1341,7 @@ class NovaSonic:
                 f"dropped reason=throttled interval={now - self._last_inject_time:.1f}s "
                 f"text={text[:60]!r}",
             )
-            return
+            return "dropped-throttled"
         self._last_inject_time = now
 
         gen = self._session_gen  # capture at scheduling time
@@ -1347,6 +1353,8 @@ class NovaSonic:
             # speech-level mic audio counts — see feed_audio.
         except Exception as e:
             logger.warning(f"inject_text scheduling failed: {e}")
+            return "dropped-scheduling"
+        return "sent"
 
     async def _send_user_text(self, text: str, gen: int) -> None:
         """The one wire path a USER text message takes: start / text / end.
@@ -1460,6 +1468,11 @@ class NovaSonic:
             # to enforce. It is re-armed below so the injects that follow the
             # drain are spaced normally again.
             await self._send_user_text(text, gen)
+            if self.on_deferred_delivered is not None:
+                try:
+                    self.on_deferred_delivered(text, cue.sense_class)
+                except Exception as e:  # noqa: BLE001 - a ledger hiccup must not stop the drain
+                    logger.warning(f"on_deferred_delivered raised: {e}")
             delivered += 1
 
         if delivered:

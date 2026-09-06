@@ -455,3 +455,71 @@ def test_recent_lines_are_fed_back_so_the_same_cue_varies():
     assert "must NOT reuse" in text
     assert "Ah, that feels nice!" in text and "Thank you!" in text
     assert "must NOT reuse" not in _build_user_text("(someone is petting you)", {}, [])
+
+
+
+def test_a_third_call_while_two_hang_falls_back_as_busy_without_a_new_thread():
+    """Review thread 3: abandoned helpers are bounded, not unbounded."""
+    import threading
+    import time as _time
+
+    from reachy_nova.harness.lite_reactor import REASON_BUSY, LiteReactor
+
+    release = threading.Event()
+
+    class Hanging:
+        def invoke_model(self, **kw):
+            release.wait(5.0)
+            raise RuntimeError("never")
+
+    delivered = []
+    r = LiteReactor(client=Hanging(), timeout_s=0.1, max_inflight=2)
+    stop = threading.Event()
+    r.start(stop)
+    try:
+        before = threading.active_count()
+        r.react("(pat)", "t1", delivered.append)
+        r.react("(pat)", "t2", delivered.append)
+        deadline = _time.monotonic() + 3.0
+        while len(delivered) < 2 and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+        assert r._inflight == 2, "two helpers are still hung"
+        r.react("(pat)", "t3", delivered.append)
+        deadline = _time.monotonic() + 3.0
+        while len(delivered) < 3 and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+        assert delivered == ["t1", "t2", "t3"]
+        assert r.fallbacks == 3
+        assert threading.active_count() <= before + 2, "no third helper thread was started"
+    finally:
+        release.set()
+        stop.set()
+        r.stop()
+
+
+def test_a_vocalize_in_the_plan_fires_the_callback():
+    """Review thread 4: vocalize=purr is delivered, not silently dropped."""
+    import threading
+    import time as _time
+
+    from reachy_nova.harness.lite_reactor import LiteReactor
+
+    class Client:
+        def invoke_model(self, **kw):
+            import io, json
+            body = {"output": {"message": {"content": [{"text": "say=none | vocalize=purr | gesture=none"}]}}}
+            return {"body": io.BytesIO(json.dumps(body).encode())}
+
+    sounds, delivered = [], []
+    r = LiteReactor(client=Client(), timeout_s=1.0, on_vocalize=sounds.append)
+    stop = threading.Event()
+    r.start(stop)
+    try:
+        r.react("(pat)", "tmpl", delivered.append)
+        deadline = _time.monotonic() + 3.0
+        while not sounds and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+        assert sounds == ["purr"]
+    finally:
+        stop.set()
+        r.stop()

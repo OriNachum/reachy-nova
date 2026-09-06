@@ -288,3 +288,27 @@ def test_readonly_state_dir_latches_one_drop_and_recovers(tmp_path, caplog):
     recovery_lines = [line for line in ledger_lines(caplog) if "recovered" in line]
     assert len(recovery_lines) == 1
     assert ledger.appended == 1
+
+
+
+def test_the_quiet_decision_is_taken_under_the_write_lock(tmp_path):
+    """Review thread 9: arming quiet cannot race a previously approved append."""
+    from reachy_nova.harness.ledger import Ledger
+
+    class QuietUnderLock:
+        def __init__(self, ledger_ref):
+            self.ledger_ref = ledger_ref
+            self.checked_under_lock = None
+
+        def active(self):
+            self.checked_under_lock = self.ledger_ref[0]._lock.locked()
+            return True
+
+    ref = []
+    quiet = QuietUnderLock(ref)
+    ledger = Ledger(path=tmp_path / "l.jsonl", quiet=quiet)
+    ref.append(ledger)
+    assert ledger.append("USER", "hello") is False
+    assert quiet.checked_under_lock is True
+    assert ledger.skipped_quiet == 1
+    assert not (tmp_path / "l.jsonl").exists()
