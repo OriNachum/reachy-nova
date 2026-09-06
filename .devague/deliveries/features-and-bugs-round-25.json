@@ -2,7 +2,7 @@
   "plan_slug": "features-and-bugs-round-25",
   "schema_version": 2,
   "created": "2026-09-06T07:50:25Z",
-  "updated": "2026-09-06T11:44:22Z",
+  "updated": "2026-09-06T12:34:13Z",
   "deviations": [
     {
       "id": "d1",
@@ -1025,6 +1025,25 @@
       "status": "proposed",
       "superseded": false,
       "seq": 57
+    },
+    {
+      "id": "e49",
+      "obligation_ref": "o27",
+      "test_ref": "robot 13:27-13:31 BST @ af9276c: MQTT snapshot samples, /api/media/status, fuser /dev/video12, journals; runtime restart 13:29:51",
+      "behavior_text": "camera dead again: 239/239 snapshots without a frame (48 Hz free-running tick), every look_at_face/lock_face refused 'no face known' with the person in view, daemon journal silent, user journals rotated after ~35 min (root 91 % full); the harness's eyes watch logged 'restored after=2783.81s' at 13:29:59 once the runtime was restarted (104/104 frames); an unneeded daemon restart followed (script misread the JSON); the runtime's held client then logged a GStreamer 'Internal data stream error' -> released -> re-acquired in 5 s; 102/102 frames, 20 Hz, face recognised once in 5 s",
+      "contract_text": "the camera state at acceptance is recorded from a live sample; item-2 live checks are blocked, never assumed",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "live samples and journals on the device at the named commit",
+      "outcome": "fail",
+      "run": {
+        "timestamp": "2026-09-06T12:29:59Z",
+        "commit": "af9276c"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 58
     }
   ],
   "deltas": [
