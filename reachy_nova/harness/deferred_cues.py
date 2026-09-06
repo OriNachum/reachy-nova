@@ -92,12 +92,22 @@ _LOG_TEXT_CHARS = 60
 
 @dataclass(frozen=True)
 class DeferredCue:
-    """One parked cue: what happened, in which sense class, and when."""
+    """One parked cue: what happened, in which sense class, and when.
+
+    ``must_deliver`` marks a cue that is an *answer* (a finished browse
+    result, a tool outcome) rather than a body cue. The slot itself treats it
+    exactly like any other cue — same latest-wins rules, same TTL — but the
+    flag rides along so the drainer can tell the two apart: a body cue whose
+    send fails, or which drains into a session that has since rotated, is
+    rightly discarded; an answer must go back on Sonic's bounded must-deliver
+    retry queue instead.
+    """
 
     sense_class: str
     text: str
     t: float
     seq: int
+    must_deliver: bool = False
 
     def age(self, now: float) -> float:
         """Seconds since this cue arrived, never negative."""
@@ -141,8 +151,21 @@ class DeferredCues:
 
     # -- writing -------------------------------------------------------
 
-    def put(self, sense_class: str | None, text: str) -> DeferredCue:
+    def put(
+        self,
+        sense_class: str | None,
+        text: str,
+        must_deliver: bool = False,
+    ) -> DeferredCue:
         """Park *text* under *sense_class*, replacing any cue already there.
+
+        Args:
+            sense_class: the rules ``sense:`` value naming the slot.
+            text: what to say once the utterance ends.
+            must_deliver: this cue is an answer, not a body cue — the flag is
+                stored on the cue (it changes nothing here) so a drain that
+                cannot deliver it can return it to the retry queue rather than
+                dropping it. Defaults to ``False``, which is every body cue.
 
         Returns the stored cue, so the caller can name the resolved class in
         its own log line without re-deriving it.
@@ -160,6 +183,7 @@ class DeferredCues:
                 text=text,
                 t=self._clock(),
                 seq=previous.seq if previous is not None else self._seq,
+                must_deliver=must_deliver,
             )
             self._slots[key] = cue
             self._counters["deferred"] += 1

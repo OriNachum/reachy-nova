@@ -411,3 +411,276 @@ class TestQueuedWhileInactive:
         drained = [d for d in _sense_details(caplog) if d.startswith("drained-queued")]
         assert len(drained) == 2
         assert all("age=" in d for d in drained)
+
+
+# ==========================================================================
+# 4. failed and stale sends return the answer to the queue (PR #26 review)
+# ==========================================================================
+
+
+def _queued_sonic(*texts: str) -> NovaSonic:
+    """An inactive NovaSonic with *texts* already on the must-deliver queue."""
+    sonic = NovaSonic(system_prompt="You are Nova.")
+    sonic._active = False
+    sonic._loop = None
+    for text in texts:
+        assert sonic.inject_text(text, sense_class="browse", must_deliver=True) == (
+            "queued-inactive"
+        )
+    return sonic
+
+
+class _ScriptedWire:
+    """A ``_send`` replacement that can be told to fail on a given event type."""
+
+    def __init__(self, fail_on: str | None = None):
+        self.fail_on = fail_on
+        self.sent: list[dict] = []
+
+    async def __call__(self, event: dict) -> None:
+        self.sent.append(event)
+        if self.fail_on and self.fail_on in event:
+            raise ConnectionError("the wire died")
+
+    def texts(self) -> list[str]:
+        return [e["textInput"]["content"] for e in self.sent if "textInput" in e]
+
+
+def _run_send(sonic: NovaSonic, text: str, gen: int, **kwargs) -> bool:
+    async def _go() -> bool:
+        sonic._inject_lock = asyncio.Lock()
+        return await sonic._send_user_text(text, gen, **kwargs)
+
+    return asyncio.run(_go())
+
+
+def _run_drain(sonic: NovaSonic) -> None:
+    async def _go() -> None:
+        sonic._inject_lock = asyncio.Lock()
+        await sonic._drain_must_deliver()
+
+    asyncio.run(_go())
+
+
+class TestFailedSendReturnsTheAnswerToTheQueue:
+    def test_a_failed_must_deliver_send_requeues_the_original_text(self, caplog):
+        sonic = NovaSonic(system_prompt="You are Nova.")
+        sonic._active = True
+        wire = _ScriptedWire(fail_on="textInput")
+        sonic._send = wire  # type: ignore[method-assign]
+
+        with caplog.at_level(logging.INFO, logger="nova.sensory"):
+            ok = _run_send(
+                sonic,
+                "the browse answer",
+                sonic._session_gen,
+                must_deliver=True,
+                sense_class="browse",
+            )
+
+        assert ok is False
+        assert [item.text for item in sonic._must_deliver_queue] == ["the browse answer"]
+        details = _sense_details(caplog)
+        assert any(
+            "dropped reason=send-failed" in d and "requeued=true" in d for d in details
+        ), details
+
+    def test_the_requeued_answer_is_sent_once_with_its_age_on_the_next_drain(self):
+        sonic = NovaSonic(system_prompt="You are Nova.")
+        sonic._active = True
+        sonic._send = _ScriptedWire(fail_on="textInput")  # type: ignore[method-assign]
+        assert (
+            _run_send(sonic, "the browse answer", sonic._session_gen, must_deliver=True)
+            is False
+        )
+
+        good = _ScriptedWire()
+        sonic._send = good  # type: ignore[method-assign]
+        _run_drain(sonic)
+
+        matching = [t for t in good.texts() if "the browse answer" in t]
+        assert len(matching) == 1, good.texts()
+        assert "ago" in matching[0], matching
+        assert not sonic._must_deliver_queue
+
+        # ...and exactly once: a second drain has nothing left to send.
+        _run_drain(sonic)
+        assert len([t for t in good.texts() if "the browse answer" in t]) == 1
+
+    def test_a_plain_send_that_fails_is_unchanged_and_never_queues(self):
+        sonic = NovaSonic(system_prompt="You are Nova.")
+        sonic._active = True
+        sonic._send = _ScriptedWire(fail_on="textInput")  # type: ignore[method-assign]
+
+        assert _run_send(sonic, "a body cue", sonic._session_gen) is False
+        assert not sonic._must_deliver_queue
+
+    def test_a_successful_send_returns_true_and_queues_nothing(self):
+        sonic = NovaSonic(system_prompt="You are Nova.")
+        sonic._active = True
+        sonic._send = _ScriptedWire()  # type: ignore[method-assign]
+
+        assert (
+            _run_send(sonic, "the answer", sonic._session_gen, must_deliver=True) is True
+        )
+        assert not sonic._must_deliver_queue
+
+
+class TestStaleGenerationReturnsTheAnswerToTheQueue:
+    def test_a_must_deliver_send_under_a_rotated_generation_requeues(self, caplog):
+        sonic = NovaSonic(system_prompt="You are Nova.")
+        sonic._active = True
+        wire = _ScriptedWire()
+        sonic._send = wire  # type: ignore[method-assign]
+        gen = sonic._session_gen
+        sonic._session_gen += 1  # the session rotated before the coroutine ran
+
+        with caplog.at_level(logging.INFO, logger="nova.sensory"):
+            ok = _run_send(sonic, "the browse answer", gen, must_deliver=True)
+
+        assert ok is False
+        assert wire.sent == [], "nothing may reach a rotated session"
+        assert [item.text for item in sonic._must_deliver_queue] == ["the browse answer"]
+        details = _sense_details(caplog)
+        assert any(
+            "dropped reason=stale-session" in d and "requeued=true" in d for d in details
+        ), details
+
+    def test_a_plain_send_under_a_rotated_generation_is_still_discarded(self):
+        sonic = NovaSonic(system_prompt="You are Nova.")
+        sonic._active = True
+        wire = _ScriptedWire()
+        sonic._send = wire  # type: ignore[method-assign]
+        gen = sonic._session_gen
+        sonic._session_gen += 1
+
+        assert _run_send(sonic, "a body cue", gen) is False
+        assert wire.sent == []
+        assert not sonic._must_deliver_queue
+
+    def test_the_active_inject_path_carries_the_must_deliver_marker(self):
+        """``inject_text`` still answers "sent", but the coroutine can retry."""
+        with _LiveLoop() as loop:
+            sonic = _live_sonic(loop)
+            wire = _ScriptedWire(fail_on="textInput")
+            sonic._send = wire  # type: ignore[method-assign]
+
+            assert (
+                sonic.inject_text("the browse answer", sense_class="browse", must_deliver=True)
+                == "sent"
+            )
+
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not sonic._must_deliver_queue:
+                time.sleep(0.01)
+            assert [item.text for item in sonic._must_deliver_queue] == ["the browse answer"]
+
+    def test_a_first_attempt_send_carries_the_bare_text(self):
+        """The age annotation is applied on a drain only, never on attempt one."""
+        with _LiveLoop() as loop:
+            sonic = _live_sonic(loop)
+            assert sonic.inject_text("the browse answer", must_deliver=True) == "sent"
+            assert _wait_for_texts(sonic._stream, 1) == ["the browse answer"]
+
+
+class TestDeferredMustDeliverCuesSurviveARotation:
+    def _speaking_sonic(self) -> NovaSonic:
+        sonic = NovaSonic(system_prompt="You are Nova.")
+        sonic._active = True
+        sonic._loop = object()
+        sonic._speaking = True
+        return sonic
+
+    def test_a_deferred_cue_remembers_that_it_must_be_delivered(self):
+        sonic = self._speaking_sonic()
+        sonic.inject_text("the browse answer", sense_class="browse", must_deliver=True)
+        sonic.inject_text("a pat", sense_class="pat")
+
+        cues = {c.sense_class: c for c in sonic._deferred.drain()}
+        assert cues["browse"].must_deliver is True
+        assert cues["pat"].must_deliver is False
+
+    def test_a_deferred_must_deliver_cue_drained_under_a_rotated_gen_requeues(self):
+        sonic = self._speaking_sonic()
+        sonic.inject_text("the browse answer", sense_class="browse", must_deliver=True)
+        sonic.inject_text("a pat", sense_class="pat")
+        wire = _ScriptedWire()
+        sonic._send = wire  # type: ignore[method-assign]
+
+        gen = sonic._session_gen
+
+        async def _go() -> None:
+            sonic._loop = asyncio.get_running_loop()
+            sonic._inject_lock = asyncio.Lock()
+            sonic._session_gen += 1  # rotated before the drain ran
+            await sonic._drain_deferred(gen)
+
+        asyncio.run(_go())
+
+        assert wire.sent == [], "a rotated session takes nothing"
+        assert [item.text for item in sonic._must_deliver_queue] == ["the browse answer"]
+        assert sonic._deferred.pending() == 0, "the plain cue is discarded, not left parked"
+
+    def test_a_deferred_must_deliver_cue_whose_send_fails_requeues(self):
+        sonic = self._speaking_sonic()
+        sonic.inject_text("the browse answer", sense_class="browse", must_deliver=True)
+        sonic._send = _ScriptedWire(fail_on="textInput")  # type: ignore[method-assign]
+
+        gen = sonic._session_gen
+
+        async def _go() -> None:
+            sonic._loop = asyncio.get_running_loop()
+            sonic._inject_lock = asyncio.Lock()
+            await sonic._drain_deferred(gen)
+
+        asyncio.run(_go())
+
+        assert [item.text for item in sonic._must_deliver_queue] == ["the browse answer"], (
+            "the ORIGINAL text goes back on the queue, not the age-rendered one"
+        )
+
+
+class TestDrainCountsOnlyRealDeliveries:
+    def test_a_failing_drain_does_not_rearm_the_throttle(self):
+        sonic = _queued_sonic("the browse answer")
+        sonic._active = True
+        sonic._send = _ScriptedWire(fail_on="textInput")  # type: ignore[method-assign]
+        sonic._last_inject_time = 0.0
+
+        _run_drain(sonic)
+
+        assert sonic._last_inject_time == 0.0, "nothing was delivered, nothing to re-arm"
+        assert [item.text for item in sonic._must_deliver_queue] == ["the browse answer"]
+
+    def test_an_item_that_keeps_failing_is_dropped_as_exhausted(self, caplog):
+        sonic = _queued_sonic("the browse answer")
+        sonic._active = True
+        wire = _ScriptedWire(fail_on="textInput")
+        sonic._send = wire  # type: ignore[method-assign]
+
+        with caplog.at_level(logging.INFO, logger="nova.sensory"):
+            for _ in range(nova_sonic.MUST_DELIVER_MAX_ATTEMPTS):
+                _run_drain(sonic)
+
+        assert not sonic._must_deliver_queue
+        details = _sense_details(caplog)
+        exhausted = [d for d in details if "dropped reason=must-deliver-exhausted" in d]
+        assert len(exhausted) == 1, details
+
+        attempts = len(wire.texts())
+        _run_drain(sonic)
+        assert len(wire.texts()) == attempts, "an exhausted item is never sent again"
+
+    def test_a_recovering_wire_delivers_before_exhaustion(self):
+        sonic = _queued_sonic("the browse answer")
+        sonic._active = True
+        sonic._send = _ScriptedWire(fail_on="textInput")  # type: ignore[method-assign]
+        _run_drain(sonic)
+        _run_drain(sonic)
+
+        good = _ScriptedWire()
+        sonic._send = good  # type: ignore[method-assign]
+        _run_drain(sonic)
+
+        assert len([t for t in good.texts() if "the browse answer" in t]) == 1
+        assert not sonic._must_deliver_queue
