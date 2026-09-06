@@ -1234,6 +1234,26 @@ def test_think_posture_off_leaves_the_browser_state_unwired(monkeypatch):
     assert browser.on_state_change is None
 
 
+def test_face_hold_off_builds_the_stack_with_the_conversation_layer_disabled(monkeypatch):
+    """PR #26 review (comment 3943444439): with only the browse posture on,
+    the stack must not be able to enter the conversation layer at all — the
+    shared attention it still carries would otherwise raise it."""
+    monkeypatch.setenv("NOVA_FACE_HOLD", "0")
+    monkeypatch.setenv("NOVA_THINK_POSTURE", "1")
+    gaze = _gaze(_build())
+    assert gaze is not None
+    assert gaze.status()["conversation_enabled"] is False
+    assert gaze.conversation_live() is False
+
+
+def test_both_gaze_switches_on_enable_the_conversation_layer(monkeypatch):
+    monkeypatch.setenv("NOVA_FACE_HOLD", "1")
+    monkeypatch.setenv("NOVA_THINK_POSTURE", "1")
+    gaze = _gaze(_build())
+    assert gaze is not None
+    assert gaze.status()["conversation_enabled"] is True
+
+
 def test_both_gaze_switches_off_build_no_stack_with_one_named_absence(monkeypatch, caplog):
     monkeypatch.setenv("NOVA_FACE_HOLD", "0")
     monkeypatch.setenv("NOVA_THINK_POSTURE", "0")

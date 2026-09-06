@@ -44,8 +44,12 @@ transition**, never once per sample:
 - The first `True` after `"dead"` latches `"live"` and logs exactly one
   line, with the actual downtime (since the continuous-`False` stretch
   began, not since the 60 s latch fired).
-- A `True` note from `"unknown"` moves to `"live"` silently — the harness has
-  no baseline yet, so the very first frame it ever observes is not "news".
+- The first `True` ever seen (`"unknown"` -> `"live"`) latches `"live"` and
+  logs exactly one `live first_seen` line, so "frames arrived and kept
+  arriving" is distinguishable from "frames never arrived at all" — which
+  both used to look like silence. Later `True` samples log nothing: a healthy
+  camera arrives at ~1 Hz and must not cost a line per second, so the
+  transitions are the record.
 - A later `False` stretch after a restoration latches again only after
   another full `dead_after_s` — the false-streak clock resets on every
   `True`.
@@ -54,9 +58,10 @@ transition**, never once per sample:
 non-positive values all fall back to `DEFAULT_DEAD_AFTER_S` (with a warning),
 never raising and never silently disabling the latch.
 
-## The two log lines
+## The three log lines
 
 ```text
+[SENSE stage=vision source=runtime event=frames] live first_seen
 [SENSE stage=vision source=runtime event=frames] dropped reason=no-frames after=60s
 [SENSE stage=vision source=runtime event=frames] restored after=61.30s
 ```

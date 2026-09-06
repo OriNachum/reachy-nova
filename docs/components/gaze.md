@@ -220,13 +220,20 @@ release.
 
 ### Start and stop hygiene
 
-`start()` submits one `release_face` and one `declare_goal` None **before** the
-worker thread exists, on the caller's thread but under the same op lock: a
-harness that just restarted has no idea what the previous process left standing
-on the runtime, and both ops are idempotent no-ops when nothing is held
-(`release_face` answers `ok: true` "not locked"). `stop()` mirrors it — a
+`start()` returns immediately and the worker submits one `release_face` and one
+`declare_goal` None as its **first action**, under the op lock and before any
+transition op: a harness that just restarted has no idea what the previous
+process left standing on the runtime, and both ops are idempotent no-ops when
+nothing is held (`release_face` answers `ok: true` "not locked"). The hygiene
+runs on the worker rather than the caller because `supervisor._start_components`
+starts components serially on one thread, where two synchronous spool round
+trips against a stalled runtime would delay every later subsystem and the
+heartbeat loop itself. `stop()` mirrors it on the caller's thread — a
 `release_face` only if an `auto`-owned lock is held, a `declare_goal` None only
-if a goal is standing — before joining the worker. The worker's own exit path
+if a goal is standing, and a `set_inhibition` giving back exactly the names in
+`_browsing_added` (the same live-set-respecting restore a transition to
+`wander` does, so stopping mid-browse never leaves `orient-to-sound` and `nod`
+disabled behind us) — before joining the worker. The worker's own exit path
 (for a `stop_event` set from outside, where nobody ever calls `stop()`) runs the
 same hygiene behind the same one-shot flag, so a stop mid-conversation costs
 exactly one release either way and a second `stop()` submits nothing.
@@ -307,15 +314,19 @@ already tells it:
 
 Both off means no `GazeStack` is built at all (one `component absent
 name=gaze reason=switch-off` line); either one on builds it, with only that
-layer's producers wired — `app.py` only calls `gaze.on_sonic_state` /
-`gaze.on_transcript` under `switches.face_hold`, and only wires
+layer's producers wired — and with `NOVA_FACE_HOLD` off the stack is
+constructed `conversation_enabled=False`, which makes `conversation_live()`
+answer `False` whatever attention (or the local fallback clock) says, so the
+CONVERSATION layer is unreachable rather than merely unwired. `app.py` only
+calls `gaze.on_sonic_state` / `gaze.on_transcript` under
+`switches.face_hold`, and only wires
 `browser.on_state_change = gaze.on_browser_state` under
 `switches.think_posture`.
 
 ## Wiring (`app.py`)
 
-`app.py` builds `GazeStack(intents, attention=attention, lock_state=
-lock_state)` whenever either switch is on, and:
+`app.py` builds `GazeStack(intents, attention=attention, lock_state=lock_state,
+conversation_enabled=switches.face_hold)` whenever either switch is on, and:
 
 - with `NOVA_FACE_HOLD` on: wires `sonic.on_state_change` to
   `gaze.on_sonic_state` and the `_on_transcript` callback to

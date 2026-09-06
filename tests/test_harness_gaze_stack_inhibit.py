@@ -113,7 +113,10 @@ def running_stack(intents, **kwargs):
     stack = GazeStack(intents, tick_s=TICK, **kwargs)
     stop = threading.Event()
     stack.start(stop)
-    intents.forget()  # drop the t9 start hygiene ops
+    # The hygiene runs on the WORKER now (PR #26 review), so wait for it
+    # before forgetting it, or it lands in the middle of the ops a test counts.
+    wait_for(lambda: len(intents.snapshot()) >= 2, message="the start hygiene")
+    intents.forget()
     return stack, stop
 
 
@@ -280,3 +283,41 @@ def test_current_inhibitions_is_injectable_and_defaults_to_the_runtime_reader():
     # itself degrades to [] with no state dir wired up in this test).
     stack = GazeStack(intents, tick_s=TICK)
     assert stack._current_inhibitions() == []
+
+
+# --------------------------------------------------------------------------- #
+# Stopping while browsing gives the inhibits back (PR #26, comment 3943444434) #
+# --------------------------------------------------------------------------- #
+
+
+def test_stopping_while_browsing_restores_the_added_inhibits():
+    """Stopping mid-browse must not leave orient-to-sound and nod disabled in
+    the runtime after the harness that disabled them is gone."""
+    intents = FakeIntents()
+    live = FakeLiveSet(["speak"])
+    stack, _stop = running_stack(intents, current_inhibitions=live)
+    stack.on_browser_state("busy")
+    wait_for(lambda: len(intents.inhibit_ops()) == 1, message="the enter op")
+    assert set(stack.status()["browsing_inhibits"]) == set(BROWSING_INHIBITS)
+    # The runtime now reflects our add, plus an operator's own later addition.
+    live.set(["speak", *BROWSING_INHIBITS, "antenna-sway"])
+
+    stack.stop()
+
+    ops = intents.inhibit_ops()
+    assert len(ops) == 2, intents.names()
+    assert set(ops[1][2]["behaviors"]) == {"speak", "antenna-sway"}
+    assert stack.status()["browsing_inhibits"] == []
+    # ...alongside the usual stop hygiene: the standing goal is cleared too.
+    assert intents.names().count("declare_goal") == 2  # the browse declare + the clear
+    assert intents.names()[-2:] == ["declare_goal", "set_inhibition"] or intents.names()[
+        -2:
+    ] == ["set_inhibition", "declare_goal"]
+
+
+def test_stopping_in_wander_submits_no_inhibition_op():
+    intents = FakeIntents()
+    live = FakeLiveSet(["speak"])
+    stack, _stop = running_stack(intents, current_inhibitions=live)
+    stack.stop()
+    assert intents.inhibit_ops() == []

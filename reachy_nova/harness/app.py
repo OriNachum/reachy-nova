@@ -701,8 +701,18 @@ def build_app() -> list[object]:
     # per-switch, so "the stack exists" never means "both layers move the
     # head" — with only one switch on the other layer simply never has a
     # producer to raise it.
+    # ``conversation_enabled`` is the face_hold switch itself, not just the
+    # wiring: the stack carries the shared attention (and has its own fallback
+    # liveness clock), so leaving the layer merely unwired would still let it
+    # enter conversation and issue look_at_sound/lock_face with the hold off
+    # (PR #26 review).
     if switches.face_hold or switches.think_posture:
-        gaze = GazeStack(intents, attention=attention, lock_state=lock_state)
+        gaze = GazeStack(
+            intents,
+            attention=attention,
+            lock_state=lock_state,
+            conversation_enabled=switches.face_hold,
+        )
     else:
         _stage("supervise", "nova", "component", "component absent name=gaze reason=switch-off")
 
