@@ -73,9 +73,33 @@ def register_routes(app, ctx) -> None:
 
     @app.post("/api/browser/task")
     def submit_browser_task(body: BrowserTask):
-        ctx.browser.queue_task(body.instruction, body.url)
-        ctx.state.update(browser_task=body.instruction)
-        return {"status": "queued", "instruction": body.instruction}
+        """Queue a browser task and report the typed outcome (PR #26 review, finding 7).
+
+        Uses ``NovaBrowser.queue_task``'s typed result for both the HTTP
+        response and the shared-state update: a duplicate or disabled
+        result is reported as such (``status`` "duplicate"/"disabled") and
+        never touches ``ctx.state`` — only an actually-queued task does.
+        The legacy ``status`` key is preserved so the existing dashboard JS
+        (``static/main.js``, which only reads ``instruction`` for its own
+        "Queued: ..." line and ignores ``status``) keeps working unchanged.
+        """
+        result = ctx.browser.queue_task(body.instruction, body.url)
+        queued = bool(result.get("queued", False))
+        duplicate = bool(result.get("duplicate", False))
+        if not result.get("ok", False):
+            status = "disabled"
+        elif duplicate:
+            status = "duplicate"
+        else:
+            status = "queued"
+        if queued:
+            ctx.state.update(browser_task=body.instruction)
+        return {
+            "status": status,
+            "instruction": body.instruction,
+            "queued": queued,
+            "duplicate": duplicate,
+        }
 
     @app.post("/api/antenna/mode")
     def set_antenna_mode(body: AntennaMode):

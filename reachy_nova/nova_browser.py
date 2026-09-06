@@ -122,6 +122,28 @@ class NovaBrowser:
         self._last_progress_emit_ts: float | None = None
         # (normalised instruction, enqueue timestamp) for queue_task dedupe.
         self._recent_instructions: list[tuple[str, float]] = []
+        # Guards queue_task's prune/compare/insert/enqueue as one step
+        # (PR #26 review, finding 6) — see queue_task's docstring.
+        self._dedupe_lock = threading.Lock()
+
+    def _begin_task(self, instruction: str) -> None:
+        """Record a task as the currently-running one (PR #26 review, finding 6).
+
+        ``current_task``/``state`` are written under ``self._dedupe_lock``
+        so :meth:`queue_task`'s running-task comparison — read under the
+        same lock — never observes a torn state. The ``on_state_change``
+        callback fires outside the lock, since it can run arbitrary
+        (dashboard-notifying) code and must not be part of the critical
+        section.
+        """
+        with self._dedupe_lock:
+            self.current_task = instruction
+            self.state = "busy"
+        if self.on_state_change:
+            try:
+                self.on_state_change("busy")
+            except Exception:
+                pass
 
     def _set_state(self, state: str) -> None:
         self.state = state
@@ -185,6 +207,19 @@ class NovaBrowser:
         is dropped instead of enqueued — a fresh Sonic session restarted
         mid-flight otherwise re-issues the same browse request.
 
+        Synchronized (PR #26 review, finding 6): pruning
+        ``_recent_instructions``, the running-task comparison, the
+        recent-task comparison, the recent-list insertion, and the queue
+        insertion all happen inside one ``self._dedupe_lock`` critical
+        section. There are two independent callers — the voice tool (via
+        ``skill_executors.py``) and the dashboard API
+        (``api_routes.py``'s ``submit_browser_task``) — and without a
+        shared lock, two concurrent calls with the same instruction could
+        both pass the duplicate check before either recorded it, enqueuing
+        (and later executing) the same browse twice. The critical section
+        stays short: it never holds the lock across the act itself, only
+        across the bookkeeping that decides whether to enqueue.
+
         Args:
             instruction: Natural language instruction for what to do.
             url: Optional URL to navigate to first.
@@ -203,37 +238,38 @@ class NovaBrowser:
             return {"ok": False, "queued": False, "reason": "nova-act-disabled"}
 
         normalized = self._normalize_instruction(instruction)
-        now = self._clock()
-        self._recent_instructions = [
-            (norm, ts)
-            for norm, ts in self._recent_instructions
-            if now - ts < self.DEDUPE_WINDOW_S
-        ]
+        with self._dedupe_lock:
+            now = self._clock()
+            self._recent_instructions = [
+                (norm, ts)
+                for norm, ts in self._recent_instructions
+                if now - ts < self.DEDUPE_WINDOW_S
+            ]
 
-        is_running_duplicate = (
-            self.state == "busy"
-            and self._normalize_instruction(self.current_task) == normalized
-        )
-        is_recent_duplicate = any(
-            norm == normalized for norm, _ts in self._recent_instructions
-        )
-        if is_running_duplicate or is_recent_duplicate:
-            sensory_log.stage(
-                "act",
-                "browser",
-                "queue_task",
-                f"dropped reason=duplicate window=300s instruction={normalized}",
+            is_running_duplicate = (
+                self.state == "busy"
+                and self._normalize_instruction(self.current_task) == normalized
             )
-            return {
-                "ok": True,
-                "queued": False,
-                "duplicate": True,
-                "instruction": instruction,
-                "url": url,
-            }
+            is_recent_duplicate = any(
+                norm == normalized for norm, _ts in self._recent_instructions
+            )
+            if is_running_duplicate or is_recent_duplicate:
+                sensory_log.stage(
+                    "act",
+                    "browser",
+                    "queue_task",
+                    f"dropped reason=duplicate window=300s instruction={normalized}",
+                )
+                return {
+                    "ok": True,
+                    "queued": False,
+                    "duplicate": True,
+                    "instruction": instruction,
+                    "url": url,
+                }
 
-        self._recent_instructions.append((normalized, now))
-        self._task_queue.put({"instruction": instruction, "url": url})
+            self._recent_instructions.append((normalized, now))
+            self._task_queue.put({"instruction": instruction, "url": url})
         return {"ok": True, "queued": True, "instruction": instruction, "url": url}
 
     def execute(self, instruction: str, url: str | None = None) -> str:
@@ -342,8 +378,7 @@ class NovaBrowser:
         url = task.get("url", "https://www.google.com")
         done_event = task.get("_done_event")
         result_holder = task.get("_result_holder")
-        self.current_task = instruction
-        self._set_state("busy")
+        self._begin_task(instruction)
         self._last_progress_emit_ts = None
 
         try:

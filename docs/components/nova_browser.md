@@ -84,6 +84,15 @@ the disabled-flag early return returns `{"ok": False, "queued": False,
 "reason": "nova-act-disabled"}`. The `_act_on_agentcore` NovaAct/
 `browser_session`/`act_get` usage itself is unchanged by any of this.
 
+`queue_task` has two independent callers — the voice tool and the dashboard
+API (`api_routes.py`'s `submit_browser_task`) — so pruning, the
+running/recent duplicate comparisons, the recent-list insertion, and the
+queue insertion all run inside one `self._dedupe_lock` critical section
+(PR #26 review); `submit_browser_task` in turn uses that typed result
+directly for its HTTP response and only calls `ctx.state.update(...)` when
+`queued` is `True`, so a duplicate or disabled request is reported as such
+and never churns the shared dashboard state.
+
 ## Browse result path, end to end
 
 A spoken "look up X" and the answer Nova eventually speaks are separated by
