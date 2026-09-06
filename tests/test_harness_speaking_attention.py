@@ -438,13 +438,14 @@ def test_attention_verdict_is_pure(clock, script, expected):
     first = speaker.attention_verdict()
     second = speaker.attention_verdict()
     assert first == second == expected
-    assert (
+    after = (
         attention.last_transcript_at,
         attention.last_transcript_named,
         attention.last_utterance_at,
         attention.last_inject_at,
         speaker.attention_drops,
-    ) == snapshot
+    )
+    assert after == snapshot
 
 
 def test_attention_verdict_accepts_an_explicit_now(clock):
