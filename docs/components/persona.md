@@ -24,6 +24,14 @@ Sonic voice prompt uses ("a warm, professional, and helpful AI assistant")
 register in original words; it does not name, quote, or role-play the
 character its spirit borrows from — Nova is Nova, never the character.
 
+## Both names
+
+Live, the owner addresses the robot as "Reachy," which Nova 2 Sonic
+transcribes as "Richie" or "Reach"; "Nova" alone was going unanswered. Both
+`config/persona/nova.md` and the embedded `DEFAULT_PERSONA` now carry an
+identical short paragraph saying Nova answers to Nova, Reachy, Richie, and
+Reach (task t4).
+
 ## Files
 
 - `config/persona/nova.md` — the persona text itself: register description
