@@ -1,7 +1,8 @@
 """Feature switches — ``reachy_nova/harness/switches.py`` (task t5).
 
-One resolution point for the four env-selectable behaviours this round adds:
-``NOVA_CHUNKED_PLAYBACK``, ``NOVA_LITE_REACTIONS``, ``NOVA_MEMORY`` (all
+One resolution point for the env-selectable behaviours this round adds:
+``NOVA_CHUNKED_PLAYBACK``, ``NOVA_LITE_REACTIONS``, ``NOVA_MEMORY``,
+``NOVA_FACE_HOLD``, ``NOVA_THINK_POSTURE``, ``NOVA_ATTENTION_GATE`` (all
 default ON) and ``NOVA_PERSONA_PATH`` (default unset/embedded persona). Same
 shape as ``gate.resolve_policy`` — fail OPEN: a bad value never turns a
 switch off and never raises, it resolves to on plus one named warning line.
@@ -35,6 +36,9 @@ def test_switches_defaults_are_all_on_and_no_persona_path() -> None:
     assert s.chunked_playback is True
     assert s.lite_reactions is True
     assert s.memory is True
+    assert s.face_hold is True
+    assert s.think_posture is True
+    assert s.attention_gate is True
     assert s.persona_path is None
 
 
@@ -56,6 +60,9 @@ def test_unset_env_means_every_switch_on_and_no_persona_path() -> None:
     assert s.chunked_playback is True
     assert s.lite_reactions is True
     assert s.memory is True
+    assert s.face_hold is True
+    assert s.think_posture is True
+    assert s.attention_gate is True
     assert s.persona_path is None
 
 
@@ -65,15 +72,30 @@ def test_off_values_turn_a_switch_off_case_and_space_insensitive(raw: str) -> No
         assert resolve({"NOVA_CHUNKED_PLAYBACK": variant}).chunked_playback is False, variant
         assert resolve({"NOVA_LITE_REACTIONS": variant}).lite_reactions is False, variant
         assert resolve({"NOVA_MEMORY": variant}).memory is False, variant
+        assert resolve({"NOVA_FACE_HOLD": variant}).face_hold is False, variant
+        assert resolve({"NOVA_THINK_POSTURE": variant}).think_posture is False, variant
+        assert resolve({"NOVA_ATTENTION_GATE": variant}).attention_gate is False, variant
 
 
 @pytest.mark.parametrize("raw", ["1", "true", "on", "yes"])
 def test_on_values_keep_a_switch_on_with_no_warning(raw: str, caplog) -> None:
     with caplog.at_level(logging.INFO, logger="nova.sensory"):
-        s = resolve({"NOVA_CHUNKED_PLAYBACK": raw, "NOVA_LITE_REACTIONS": raw, "NOVA_MEMORY": raw})
+        s = resolve(
+            {
+                "NOVA_CHUNKED_PLAYBACK": raw,
+                "NOVA_LITE_REACTIONS": raw,
+                "NOVA_MEMORY": raw,
+                "NOVA_FACE_HOLD": raw,
+                "NOVA_THINK_POSTURE": raw,
+                "NOVA_ATTENTION_GATE": raw,
+            }
+        )
     assert s.chunked_playback is True
     assert s.lite_reactions is True
     assert s.memory is True
+    assert s.face_hold is True
+    assert s.think_posture is True
+    assert s.attention_gate is True
     assert not any("unrecognised" in r.getMessage() for r in caplog.records)
 
 
@@ -97,6 +119,29 @@ def test_unrecognised_value_resolves_to_on_plus_one_named_warning(caplog) -> Non
     ), lines
 
 
+@pytest.mark.parametrize(
+    "name,field",
+    [
+        ("NOVA_FACE_HOLD", "face_hold"),
+        ("NOVA_THINK_POSTURE", "think_posture"),
+        ("NOVA_ATTENTION_GATE", "attention_gate"),
+    ],
+)
+def test_the_t12_switches_fail_open_with_one_named_warning(name, field, caplog) -> None:
+    """Garbage in any of the three new switches means ON plus one warning."""
+    with caplog.at_level(logging.INFO, logger="nova.sensory"):
+        s = resolve({name: "sometimes"})
+    assert getattr(s, field) is True, "fail OPEN"
+    lines = [r.getMessage() for r in caplog.records]
+    assert any(
+        "[SENSE stage=supervise source=nova event=switches]" in line
+        and f"unrecognised {name}=sometimes" in line
+        and "using on" in line
+        for line in lines
+    ), lines
+    assert len(lines) == 1
+
+
 def test_unrecognised_value_never_raises() -> None:
     # Fail open must hold even for pathological input, not just "maybe".
     resolve({"NOVA_MEMORY": "\x00binary\x00garbage"})
@@ -110,12 +155,22 @@ def test_each_bad_switch_warns_independently(caplog) -> None:
                 "NOVA_CHUNKED_PLAYBACK": "nope",
                 "NOVA_LITE_REACTIONS": "nope",
                 "NOVA_MEMORY": "nope",
+                "NOVA_FACE_HOLD": "nope",
+                "NOVA_THINK_POSTURE": "nope",
+                "NOVA_ATTENTION_GATE": "nope",
             }
         )
     lines = [r.getMessage() for r in caplog.records]
-    for name in ("NOVA_CHUNKED_PLAYBACK", "NOVA_LITE_REACTIONS", "NOVA_MEMORY"):
+    for name in (
+        "NOVA_CHUNKED_PLAYBACK",
+        "NOVA_LITE_REACTIONS",
+        "NOVA_MEMORY",
+        "NOVA_FACE_HOLD",
+        "NOVA_THINK_POSTURE",
+        "NOVA_ATTENTION_GATE",
+    ):
         assert any(f"unrecognised {name}=nope" in line for line in lines), lines
-    assert len(lines) == 3
+    assert len(lines) == 6
 
 
 def test_persona_path_is_none_unset_and_the_literal_value_when_set() -> None:
@@ -140,7 +195,8 @@ def test_resolve_defaults_to_os_environ(monkeypatch) -> None:
 def test_describe_all_on_default_persona() -> None:
     line = describe(Switches())
     assert line == (
-        "switches chunked_playback=on lite_reactions=on memory=on persona=default"
+        "switches chunked_playback=on lite_reactions=on memory=on face_hold=on "
+        "think_posture=on attention_gate=on persona=default"
     )
 
 
@@ -148,6 +204,9 @@ def test_describe_names_each_switch_off() -> None:
     assert "chunked_playback=off" in describe(Switches(chunked_playback=False))
     assert "lite_reactions=off" in describe(Switches(lite_reactions=False))
     assert "memory=off" in describe(Switches(memory=False))
+    assert "face_hold=off" in describe(Switches(face_hold=False))
+    assert "think_posture=off" in describe(Switches(think_posture=False))
+    assert "attention_gate=off" in describe(Switches(attention_gate=False))
 
 
 def test_describe_shows_the_persona_source_when_set() -> None:
@@ -156,10 +215,21 @@ def test_describe_shows_the_persona_source_when_set() -> None:
 
 
 def test_describe_is_one_line() -> None:
-    line = describe(Switches(chunked_playback=False, lite_reactions=False, memory=False, persona_path="/x.md"))
+    line = describe(
+        Switches(
+            chunked_playback=False,
+            lite_reactions=False,
+            memory=False,
+            face_hold=False,
+            think_posture=False,
+            attention_gate=False,
+            persona_path="/x.md",
+        )
+    )
     assert "\n" not in line
     assert line == (
-        "switches chunked_playback=off lite_reactions=off memory=off persona=file:/x.md"
+        "switches chunked_playback=off lite_reactions=off memory=off face_hold=off "
+        "think_posture=off attention_gate=off persona=file:/x.md"
     )
 
 
@@ -195,3 +265,6 @@ def test_env_var_name_constants() -> None:
     assert switches_mod.LITE_REACTIONS_ENV == "NOVA_LITE_REACTIONS"
     assert switches_mod.MEMORY_ENV == "NOVA_MEMORY"
     assert switches_mod.PERSONA_PATH_ENV == "NOVA_PERSONA_PATH"
+    assert switches_mod.FACE_HOLD_ENV == "NOVA_FACE_HOLD"
+    assert switches_mod.THINK_POSTURE_ENV == "NOVA_THINK_POSTURE"
+    assert switches_mod.ATTENTION_GATE_ENV == "NOVA_ATTENTION_GATE"

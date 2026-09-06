@@ -11,15 +11,26 @@ value means on (today's new default); ``0``/``false``/``off``/``no``
 string — means on plus ONE named warning line, never a raised exception and
 never a feature silently turned off by a mistake.
 
-Four switches:
+Seven switches:
 
 * ``NOVA_CHUNKED_PLAYBACK`` — chunked (vs. whole-utterance) speaker playback.
 * ``NOVA_LITE_REACTIONS`` — the Nova 2 Lite reaction tier (vs. template-only).
 * ``NOVA_MEMORY`` — the conversation ledger + compactor (vs. none).
+* ``NOVA_FACE_HOLD`` — the gaze stack's CONVERSATION layer (the automatic face
+  lock held while someone is actually talking) plus the retirement of the
+  runtime's own face-nod reflex, which that hold replaces.
+* ``NOVA_THINK_POSTURE`` — the gaze stack's BROWSING layer (the thinking pose
+  held while a browse is in flight).
+* ``NOVA_ATTENTION_GATE`` — the cold/warm attention window: the mouth stays
+  shut until the robot is named. Off means every utterance plays, exactly as
+  it did before the round.
 * ``NOVA_PERSONA_PATH`` — not a boolean: an optional override path for the
   persona file; unset/empty means "use the built-in default resolution".
 
-:func:`resolve` reads all four once from a given mapping (``os.environ`` by
+Both gaze switches off means no gaze stack at all (one named absent line);
+either one on builds it, with only that layer's producers wired.
+
+:func:`resolve` reads all seven once from a given mapping (``os.environ`` by
 default); :func:`describe` renders the resolved set as one line;
 :func:`log` emits that line once via :func:`reachy_nova.sensory_log.stage`.
 Wiring these into ``app.py`` — actually gating the ledger, the reactor and the
@@ -39,6 +50,9 @@ from .. import sensory_log
 CHUNKED_PLAYBACK_ENV = "NOVA_CHUNKED_PLAYBACK"
 LITE_REACTIONS_ENV = "NOVA_LITE_REACTIONS"
 MEMORY_ENV = "NOVA_MEMORY"
+FACE_HOLD_ENV = "NOVA_FACE_HOLD"
+THINK_POSTURE_ENV = "NOVA_THINK_POSTURE"
+ATTENTION_GATE_ENV = "NOVA_ATTENTION_GATE"
 PERSONA_PATH_ENV = "NOVA_PERSONA_PATH"
 
 #: Values (after stripping + casefolding) that resolve a switch to off/on.
@@ -57,6 +71,9 @@ class Switches:
     chunked_playback: bool = True
     lite_reactions: bool = True
     memory: bool = True
+    face_hold: bool = True
+    think_posture: bool = True
+    attention_gate: bool = True
     persona_path: str | None = None
 
 
@@ -77,11 +94,12 @@ def _resolve_bool(env: Mapping[str, str], name: str) -> bool:
 
 
 def resolve(env: Mapping[str, str] | None = None) -> Switches:
-    """Resolve all four switches once from *env* (default ``os.environ``).
+    """Resolve all seven switches once from *env* (default ``os.environ``).
 
     Fails OPEN: an unset or empty value means on; a value this module does
     not recognise ALSO means on, plus one named warning line — a typo must
-    never silently disable chunked playback, the Lite tier or memory.
+    never silently disable chunked playback, the Lite tier, memory, the gaze
+    layers or the attention gate.
     """
     source: Mapping[str, str] = env if env is not None else os.environ
     persona_path = source.get(PERSONA_PATH_ENV) or None
@@ -89,6 +107,9 @@ def resolve(env: Mapping[str, str] | None = None) -> Switches:
         chunked_playback=_resolve_bool(source, CHUNKED_PLAYBACK_ENV),
         lite_reactions=_resolve_bool(source, LITE_REACTIONS_ENV),
         memory=_resolve_bool(source, MEMORY_ENV),
+        face_hold=_resolve_bool(source, FACE_HOLD_ENV),
+        think_posture=_resolve_bool(source, THINK_POSTURE_ENV),
+        attention_gate=_resolve_bool(source, ATTENTION_GATE_ENV),
         persona_path=persona_path,
     )
 
@@ -103,7 +124,11 @@ def describe(switches: Switches) -> str:
     return (
         f"switches chunked_playback={_on_off(switches.chunked_playback)} "
         f"lite_reactions={_on_off(switches.lite_reactions)} "
-        f"memory={_on_off(switches.memory)} persona={persona}"
+        f"memory={_on_off(switches.memory)} "
+        f"face_hold={_on_off(switches.face_hold)} "
+        f"think_posture={_on_off(switches.think_posture)} "
+        f"attention_gate={_on_off(switches.attention_gate)} "
+        f"persona={persona}"
     )
 
 
