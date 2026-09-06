@@ -270,3 +270,64 @@ fade; `next_lock_retry_s` is `None` when no retry is pending. No hook and no
 worker tick ever raises — a broken `AttentionState` degrades to "not live", a
 broken `LockState` to "not the model's", a failed op is logged and the loop
 continues — and the worker exits within one tick of its stop event.
+
+### Runtime facts this layer relies on (reachy-mini-cli, `face_lock.py`)
+
+The gaze stack keeps no belief of its own about any of these — they live on
+the runtime side and the harness only reacts to what the engine's result
+already tells it:
+
+- **Presence.** `lock_face` refuses `"no face known"` unless
+  `face_bbox` is present AND fresher than `MAX_FACE_AGE_S = 1.5 s`. That
+  refusal *is* the presence check the retry backoff above is built around.
+- **Its own inhibitions.** A held lock inhibits the runtime's own
+  `feel-alive` and `orient-to-sound` reflexes on its own account — the
+  `BROWSING_INHIBITS` merge above is a *separate* concern (keeping those same
+  reflexes off a `gaze-hold` goal, which the lock does not otherwise cover).
+- **Max hold.** The runtime releases any lock on its own after
+  `MAX_HOLD_S = 1800.0` (30 minutes), regardless of what the harness or the
+  model believes — the ceiling `_stop_hygiene` and the `motion/lock-released`
+  tap both exist to make redundant, never to replace.
+- **Mind-offline release is inert on this device.** The engine also releases
+  a lock after `mind_offline_grace_s` of `mind_online()` reading `False`
+  (`reason: "mind-offline"`) — but on the deployed runtime that presence
+  signal never fires (`"mind presence dropped reason=client-incompatible"` at
+  every start), so this release path never triggers here. That is exactly why
+  `GazeStack.start()`/`.stop()` run their own release/clear hygiene: the
+  runtime cannot be relied on to notice a crashed harness and give the head
+  back on its own, and without the harness-side hygiene a crash would leave
+  the head locked until `MAX_HOLD_S`.
+
+## Configuration
+
+| Env | Default | Meaning |
+| --- | --- | --- |
+| `NOVA_FACE_HOLD` | on | kill switch (`harness/switches.py`) — the gaze stack's CONVERSATION layer, plus retiring `nova-face-noticed` (see below). Off restores the pre-round nod-on-every-face reflex and no automatic hold. |
+| `NOVA_THINK_POSTURE` | on | kill switch — the gaze stack's BROWSING layer (the standing `gaze-hold` while a browse is in flight). |
+
+Both off means no `GazeStack` is built at all (one `component absent
+name=gaze reason=switch-off` line); either one on builds it, with only that
+layer's producers wired — `app.py` only calls `gaze.on_sonic_state` /
+`gaze.on_transcript` under `switches.face_hold`, and only wires
+`browser.on_state_change = gaze.on_browser_state` under
+`switches.think_posture`.
+
+## Wiring (`app.py`)
+
+`app.py` builds `GazeStack(intents, attention=attention, lock_state=
+lock_state)` whenever either switch is on, and:
+
+- with `NOVA_FACE_HOLD` on: wires `sonic.on_state_change` to
+  `gaze.on_sonic_state` and the `_on_transcript` callback to
+  `gaze.on_transcript`; the runtime bus's `motion/lock-released` tap calls
+  `gaze.on_lock_released(reason)`; and — since the automatic hold now owns
+  the face-noticed cue — `retire_face_nod_rule()` tombstones
+  `nova-face-noticed` at startup instead of `ensure_face_rule()` installing
+  it (see [Retiring the old reflex](#head-reflexes-under-a-held-head-task-t10)
+  above).
+- with `NOVA_THINK_POSTURE` on: wires `browser.on_state_change =
+  gaze.on_browser_state`.
+- the browse result path calls `gaze.clear_for_result()` — see
+  [nova_browser.md](nova_browser.md)'s "Browse result path, end to end".
+- `gaze.start(stop_event)` / `gaze.stop()` run alongside the other
+  supervisor units.

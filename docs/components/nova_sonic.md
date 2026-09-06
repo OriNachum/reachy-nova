@@ -179,6 +179,9 @@ progress inject and the journal logged it away three times as
 A plain (non-must-deliver) inject keeps every previous behaviour, including
 `dropped-inactive` and `dropped-throttled`.
 
+See [nova_browser.md](nova_browser.md)'s "Browse result path, end to end" for
+the full chain a browse answer travels through before it reaches this path.
+
 ## Usage Example
 
 ```python

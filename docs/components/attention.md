@@ -192,11 +192,34 @@ counts `ledger.attention_skips` instead. `app.py` passes
 lines. USER lines are real speech and are never dropped this way — the robot
 should remember being talked near, just not remember answering.
 
+## Cold refusal of effectful tools
+
+The gate is not only at the speaker. `IntentTools.execute`
+(`reachy_nova/harness/tools.py`) refuses `COLD_REFUSED_TOOLS` outright — a
+pre-flight `ToolRefused`, nothing submitted to the spool — whenever the model
+is cold and the transcript it is acting on never named the robot
+(`_is_cold_and_nameless(attention)`, `None` attention always answers `False`):
+
+```text
+browse, forge, use_skill, author_rule, goto, run_behavior, declare_goal,
+set_mode, set_inhibition, create_rule, enroll_face, lock_face, look_at_face,
+look_at_sound, think
+```
+
+Every one of them moves the body, spends an AgentCore session, or edits
+durable state; none is worth letting ambient talk trigger. The refusal reason
+is `NOT_ADDRESSED_REASON = "not addressed — the robot was not spoken to by
+name"`. Deliberately excluded: `recall_senses` (read-only), `stay_silent` /
+`end_silence` and the voice-level trio (shaping how Nova sounds, not what she
+does), and `release_face` (giving something back is always safe) — none of
+those acts on someone's behalf who never addressed the robot.
+
 ## Configuration
 
 | Env | Default | Meaning |
 | --- | --- | --- |
 | `NOVA_ATTENTION_WINDOW_S` | `45.0` | warm-window length, in seconds |
+| `NOVA_ATTENTION_GATE` | on | kill switch (`harness/switches.py`) — off means every utterance plays and every tool call is allowed, exactly as before this window existed |
 
 Parsed defensively like `lock_state.default_drop_grace_s`: unset, empty,
 unparseable, `NaN` or negative all resolve to the default — a typo must
@@ -222,8 +245,27 @@ mystery.
 
 ## Wiring
 
-This module is pure state and wires itself to nothing. `SonicSpeaker`
-consumes it through `attention=` (see [Voice gate](#voice-gate) above);
-`app.py` owns the wiring — `note_transcript` + `recheck_attention` on every
-user transcript, `note_inject` on every inject, and the ledger's `dropped=`
-for ASSISTANT lines — and the gaze stack reads `conversation_live`.
+This module is pure state and wires itself to nothing. `app.py` builds
+exactly one `AttentionState` (quiet-wired) when `switches.attention_gate` is
+on and threads it through everything that needs it:
+
+- `SonicSpeaker(attention=...)` — the [voice gate](#voice-gate) above.
+- `IntentTools(attention=...)` — the [cold tool refusal](#cold-refusal-of-effectful-tools)
+  above.
+- `GazeStack(attention=...)` — reads `conversation_live` to decide the
+  conversation layer (see [gaze.md](gaze.md)).
+- `_on_transcript`: `attention.note_transcript(text)` then
+  `speaker.recheck_attention()`, in that order, on every USER/ASSISTANT
+  transcript.
+- every inject callback (bus cues, browse progress/result, deferred drains):
+  `attention.note_inject()`.
+
+With `NOVA_ATTENTION_GATE` off, `attention` is `None` everywhere above — the
+speaker allows every utterance, `IntentTools` refuses nothing, and `GazeStack`
+falls back to its OWN local "conversation live" clock instead of reading this
+module at all: `on_transcript`/`on_sonic_state` feed a private
+`_live_until = now + FALLBACK_LIVE_S` (45 s, the same length as
+`DEFAULT_WINDOW_S` on purpose, so a degraded wiring behaves like the real
+thing rather than a different policy). So `NOVA_FACE_HOLD` with the gate off
+still holds a conversation-shaped gaze — it just no longer knows whether
+anyone *named* the robot, only whether anyone is talking.
