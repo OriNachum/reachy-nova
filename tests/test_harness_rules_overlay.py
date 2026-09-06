@@ -478,3 +478,110 @@ def test_retire_with_reload_false_submits_no_reload(overlay):
     result = retire(FACE_NOTICED["id"], reload=False)
     assert result == {"changed": True, "verdict": None}
     assert list(statedir.reload_commands_dir().glob("*.json")) == []
+
+
+# --------------------------------------------------------------------------- #
+# The runtime's ``names`` table and ``name_mentioned`` field (#27, rmc #177)  #
+# --------------------------------------------------------------------------- #
+#
+# reachy-mini-cli #177 lets the box overlay carry a top-level ``names = [...]``
+# table (additions to the shipped names) and a one-tick ``name_mentioned``
+# sense field. This module carries its own copies of the runtime's schema sets
+# and validates the WHOLE overlay before every managed-block write, so both
+# copies must know the new key and field or an operator's names table makes
+# every later nova write fail (issue #27).
+
+
+def _head_with_names(line: str) -> str:
+    """OPERATOR_HEAD with *line* as a top-level key, before any array of tables."""
+    marker = 'active_mode = "calm"\n'
+    assert marker in OPERATOR_HEAD
+    return OPERATOR_HEAD.replace(marker, marker + line + "\n", 1)
+
+
+def test_an_operator_names_table_is_accepted_and_preserved(overlay):
+    from reachy_nova.harness.rules_overlay import NAMES_TABLE
+
+    head = _head_with_names('names = ["nova", "Noah"]')
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(head, encoding="utf-8")
+    changed, _verdict = upsert(RULE)
+    assert changed is True
+    text = overlay.read_text(encoding="utf-8")
+    assert text.startswith(head)
+    assert tomllib.loads(text)[NAMES_TABLE] == ["nova", "Noah"]
+    assert list_rules() == ("nova-pat-nod",)
+
+
+def test_an_operator_rule_keyed_on_name_mentioned_is_accepted(overlay):
+    head = _head_with_names("").replace(
+        'when = { field = "face", op = "is_true" }',
+        'when = { field = "name_mentioned", op = "is_true" }',
+    )
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(head, encoding="utf-8")
+    changed, _verdict = upsert(RULE)
+    assert changed is True
+    assert overlay.read_text(encoding="utf-8").startswith(head)
+
+
+def test_nova_may_author_a_rule_keyed_on_name_mentioned(overlay):
+    rule = {
+        **RULE,
+        "id": "nova-named",
+        "when": {"field": "name_mentioned", "op": "is_true"},
+    }
+    changed, _verdict = upsert(rule)
+    assert changed is True
+    (entry,) = tomllib.loads(overlay.read_text(encoding="utf-8"))["react"]
+    assert entry["when"] == {"field": "name_mentioned", "op": "is_true"}
+
+
+@pytest.mark.parametrize(
+    ("line", "hint"),
+    [
+        ('names = "nova"', "must be a list of strings"),
+        ("names = [1]", "names[0]: every name must be a string"),
+        ("names = [true]", "names[0]: every name must be a string"),
+        ('names = ["nova", "no va"]', "names[1]: name 'no va' must be letters only"),
+        ('names = ["n0va"]', "names[0]: name 'n0va' must be letters only"),
+        ('names = [""]', "names[0]: name '' must be letters only"),
+        ('names = ["no"]', "names[0]: name 'no' is shorter than the 3-character minimum"),
+        (
+            'names = ["aaa", "bbb", "ccc", "ddd", "eee", "fff", "ggg", "hhh", "iii"]',
+            "'names' has 9 entries, over the 8-entry limit",
+        ),
+    ],
+)
+def test_a_bad_operator_names_table_refuses_the_write_untouched(overlay, line, hint):
+    head = _head_with_names(line)
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(head, encoding="utf-8")
+    with pytest.raises(RuleRefused) as excinfo:
+        upsert(RULE)
+    assert hint in str(excinfo.value)
+    assert overlay.read_text(encoding="utf-8") == head
+    assert list(overlay.parent.glob("*.tmp.*")) == []
+
+
+def test_validate_names_normalises_like_the_runtime():
+    from reachy_nova.harness.rules_overlay import validate_names
+
+    assert validate_names(None) == ()
+    assert validate_names([]) == ()
+    assert validate_names(["Nova", " nova ", "NOAH", "noah"]) == ("nova", "noah")
+
+
+def test_the_names_bounds_are_the_runtimes():
+    from reachy_nova.harness.rules_overlay import (
+        MAX_CONFIGURED_NAMES,
+        MIN_NAME_LENGTH,
+        NAMES_TABLE,
+        SENSE_FIELDS,
+    )
+
+    # Pinned to reachy/behavior/rules.py on the reachy-mini-cli #177 branch.
+    assert NAMES_TABLE == "names"
+    assert MAX_CONFIGURED_NAMES == 8
+    assert MIN_NAME_LENGTH == 3
+    assert "name_mentioned" in SENSE_FIELDS

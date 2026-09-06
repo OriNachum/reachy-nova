@@ -45,6 +45,19 @@ to the fuzzy matcher, because `"reach"` is a *truncation* of `"reachy"` and
 the matcher's prefix guard exists precisely to reject those: if we want it,
 we have to say so.
 
+The runtime keeps its own, separate name list and deliberately never learns
+`"nova"` (operator decision on reachy-mini-cli #175): reachy-mini-cli #177
+instead lets the box overlay carry a top-level `names = [...]` table of
+additions (letters only, three characters or more, at most eight) and adds a
+one-tick `name_mentioned` sense field. `harness/rules_overlay.py` mirrors
+both in its schema copies (`NAMES_TABLE`, `MAX_CONFIGURED_NAMES`,
+`MIN_NAME_LENGTH`, `validate_names`, `"name_mentioned"` in `SENSE_FIELDS`)
+so an operator's names table or a rule keyed on the field never makes a
+later nova write fail (issue #27). Writing `names = ["nova"]` into the
+operator head and reloading is the step that follows once #177 is on the
+robot; until then the table must not be written on a box the current runtime
+runs, because that runtime refuses the whole file.
+
 `is_name_match(text, names=DEFAULT_NAMES)` restates — deliberately does not
 import — the idea in the runtime's `reachy/speech/name_match.py`. The
 harness must not grow a dependency on the runtime's Python package, and the

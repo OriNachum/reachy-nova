@@ -428,7 +428,12 @@ schema, then hands it to the **rules overlay**, the only code allowed to touch
 `rules.toml`. It validates before touching the file, writes the *whole*
 candidate to a temp sibling with operator bytes carried through verbatim,
 re‑parses and re‑validates it, atomically replaces, then submits a reload and
-**reports the verdict**. A `REJECTED` reload means the old rules are still live
+**reports the verdict**. The validator carries its own copies of the
+runtime's schema sets — including the runtime's optional top-level `names`
+table and its `name_mentioned` sense field (reachy-mini-cli #177 and
+issue #27) — so an operator's own entries outside the managed block are
+validated the way the runtime would validate them, never refused for being
+newer than this copy. A `REJECTED` reload means the old rules are still live
 and the tool answers `ok: false` — the robot never believes it has a reflex it
 does not have.
 
