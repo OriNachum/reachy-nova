@@ -1,0 +1,770 @@
+{
+  "plan_slug": "features-and-bugs-round-25",
+  "schema_version": 2,
+  "created": "2026-09-06T07:50:25Z",
+  "updated": "2026-09-06T08:56:32Z",
+  "deviations": [
+    {
+      "id": "d1",
+      "what": "t17 deployed the runtime to the robot (wireless-motor-enable @ 74629d3, restarted 07:49:56Z) without the pip reinstall the acceptance criterion names",
+      "task_ref": "t17",
+      "reason": "the device runs an editable install so the checkout's code is what runs; the root disk is 91 % full with 1.3 GB free and pip on the CM4 takes minutes; the only effect is the installed metadata version reading 0.51.1 while the code is 0.52.0 \u2014 the same trade as last round's approved d5; pip can run detached later",
+      "affects": [],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable",
+      "seq": 1
+    },
+    {
+      "id": "d2",
+      "what": "review round on PR #26: nine fixes in three worktrees (agent/fbr25-rv-{browser,sonic,gaze}) merged as e958bb1, 7f49f30, 6619e82, plus five Sonar new-code fixes in 4719ad7; one pushback (comment 3943444422)",
+      "task_ref": "t14",
+      "reason": "human gate 3 (PR #26) produced ten valid Qodo findings the plan's tests had not exercised: two ways a must-deliver answer could still be lost, a dedupe race, the dashboard API ignoring the typed duplicate result, gaze start hygiene blocking the supervisor thread, stop hygiene leaving inhibits behind, the conversation layer reachable with NOVA_FACE_HOLD=0, eyes broker parsing outside its fail-open boundary, no first-live frames line; each fix is small, covered by new tests (suite 2041 -> 2070) and merged through the same TDD gate; the queue-vs-callbacks finding was answered as a pushback citing the DeferredCues precedent",
+      "affects": [],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable",
+      "seq": 37
+    }
+  ],
+  "evidence": [
+    {
+      "id": "e1",
+      "obligation_ref": "o1",
+      "test_ref": "tests/test_sonic_inject_must_deliver.py (13 tests)",
+      "behavior_text": "must-deliver inject 0 ms after a throttled progress inject returns sent; parked under class browse while speaking; plain injects still throttled",
+      "contract_text": "h1: a unit test drives on_result 0 ms after a progress inject and asserts the result reaches Sonic",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b: 2041 passed, 1 skipped (-n auto)",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 2
+    },
+    {
+      "id": "e2",
+      "obligation_ref": "o2",
+      "test_ref": "tests/test_nova_browser_progress.py",
+      "behavior_text": "four progress messages inside one second yield at most one Status: cue per phase; Done never reaches on_progress; 10 s rate limit",
+      "contract_text": "h2: at most one status cue per task phase reaches Sonic, worded as status",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 3
+    },
+    {
+      "id": "e3",
+      "obligation_ref": "o3",
+      "test_ref": "scratchpad audit-t14.txt step 3: git diff main -- reachy_nova/nova_browser.py",
+      "behavior_text": "no browser_session/NovaAct/act_get line changed",
+      "contract_text": "h3: the diff to nova_browser.py touches progress, result delivery and dedupe only",
+      "evidence_type": "manual",
+      "strength": "fidelity",
+      "strength_basis": "diff inspected at 8827b56; act path lines absent from the diff",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:24:41Z",
+        "commit": "8827b56"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 4
+    },
+    {
+      "id": "e4",
+      "obligation_ref": "o4",
+      "test_ref": "tests/test_harness_gaze_stack_conversation.py (25 tests)",
+      "behavior_text": "transcript -> look_at_sound then lock_face; refusals retry at 3/6/12/24/30 s; lock held across a 10 s gap; release on window close",
+      "contract_text": "h4: lock_face within 2 s of the first transcript, survives a 10 s gap, release within window + 2 s",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 5
+    },
+    {
+      "id": "e5",
+      "obligation_ref": "o4",
+      "test_ref": "robot journal reachy-nova-harness pid 15925, 2026-09-06 09:31:17-09:32:03 BST",
+      "behavior_text": "on Nova's opening utterance the stack entered conversation, look_at_sound ok=true, lock_face refused 'no face known' at +0/+3/+9/+22 s, fade at +46 s with 'lock never held: refusals=4'; no lock could be held because the camera delivers no frames",
+      "contract_text": "h4 live half",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "live journal lines quoted; the hold-and-release half is blocked by the dead camera (#176)",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:32:03Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 6
+    },
+    {
+      "id": "e6",
+      "obligation_ref": "o5",
+      "test_ref": "tests/test_harness_gaze_stack_conversation.py::test module source lacks face-presence tokens + refusal summary tests",
+      "behavior_text": "no face_seen/face_bbox/has_face attribute; one 'no face known' line per conversation",
+      "contract_text": "h5: no face-presence belief in the harness; a refused lock logs once per retry window",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 7
+    },
+    {
+      "id": "e7",
+      "obligation_ref": "o5",
+      "test_ref": "robot journal 09:31:18 and 09:32:03 BST",
+      "behavior_text": "exactly one 'no face known \u2014 retrying with backoff' and one 'lock never held: refusals=4' line for four refused attempts",
+      "contract_text": "h5 live half",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "live journal lines quoted",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:32:03Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 8
+    },
+    {
+      "id": "e8",
+      "obligation_ref": "o6",
+      "test_ref": "tests/test_harness_lock_state.py (29) + tests/test_harness_gaze_stack_conversation.py model-lock tests",
+      "behavior_text": "owner auto|model; model lock left standing at fade; motion/lock-released clears both",
+      "contract_text": "h6",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 9
+    },
+    {
+      "id": "e9",
+      "obligation_ref": "o7",
+      "test_ref": "git -C reachy-mini-cli diff --stat origin/main..feat/reachy-nova-25-names-select-face",
+      "behavior_text": "only face_sense.py select_face (+ sense.py docstring), the name-list files, wakeword.py, tests, CHANGELOG, pyproject, uv.lock change",
+      "contract_text": "h7: no gain, cadence or TTL constant changes beyond select_face",
+      "evidence_type": "manual",
+      "strength": "fidelity",
+      "strength_basis": "diff --stat inspected in audit-t14.txt",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:24:41Z",
+        "commit": "ca64951"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 10
+    },
+    {
+      "id": "e10",
+      "obligation_ref": "o8",
+      "test_ref": "tests/test_harness_persona.py (72)",
+      "behavior_text": "file and embedded persona contain Nova, Reachy, Richie; identical paragraph; under 2000 chars",
+      "contract_text": "h8 unit half (the five cold 'Nova' requests are the live half, pending)",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 11
+    },
+    {
+      "id": "e11",
+      "obligation_ref": "o9",
+      "test_ref": "reachy-mini-cli tests/test_name_match.py (96) + test_engagement.py + test_behavior_transcript_sense.py + test_sleep_wakeword.py + test_embody_attention.py",
+      "behavior_text": "'Nova, come here', 'hey nova' match; now/no/know/nah/novel/November/nowhere/not now do not; DEFAULT_NAMES contain nova; wake default accepts both phrases",
+      "contract_text": "h9",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "runtime suite 5668 passed, 7 skipped, 1 pre-existing gateway failure at b3fd068",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T07:40:00Z",
+        "commit": "b3fd068"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 12
+    },
+    {
+      "id": "e12",
+      "obligation_ref": "o10",
+      "test_ref": "tests/test_harness_tools.py think tests",
+      "behavior_text": "think builds run_behavior thoughtful with yaw \u00b110 and duration 3, alternates sides, spec published",
+      "contract_text": "h10 unit half (Sonic calling think live is pending)",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 13
+    },
+    {
+      "id": "e13",
+      "obligation_ref": "o11",
+      "test_ref": "tests/test_harness_gaze_stack.py (13)",
+      "behavior_text": "busy -> declare_goal gaze-hold pitch 10 |yaw| 15; idle/error -> declare_goal None; sides alternate",
+      "contract_text": "h11 unit half (state.json ownership during a live browse is pending)",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 14
+    },
+    {
+      "id": "e14",
+      "obligation_ref": "o12",
+      "test_ref": "tests/test_harness_app.py browse-result order test",
+      "behavior_text": "declare_goal None is submitted before inject_text(must_deliver=True, sense_class='browse')",
+      "contract_text": "h12 unit half",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 15
+    },
+    {
+      "id": "e15",
+      "obligation_ref": "o13",
+      "test_ref": "robot journals + git",
+      "behavior_text": "robot harness checkout moved to main @ 19dde0c at 08:25Z before the round deploy; pyproject 0.5.0 at d5f044b; runtime on wireless-motor-enable @ 74629d3 restarted 07:49:56Z; reachy-mini-cli PR #178 open",
+      "contract_text": "h13",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "commands and journal lines recorded in the session",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:31:07Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 16
+    },
+    {
+      "id": "e16",
+      "obligation_ref": "o14",
+      "test_ref": "tests/test_harness_boundary.py (19)",
+      "behavior_text": "no SDK client, no forbidden imports in the harness",
+      "contract_text": "h14 boundary half",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "19 passed at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 17
+    },
+    {
+      "id": "e17",
+      "obligation_ref": "o14",
+      "test_ref": "robot journal 09:31:09 BST switches line + audit-t14.txt greps",
+      "behavior_text": "switches chunked_playback=on lite_reactions=on memory=on face_hold=on think_posture=on attention_gate=on persona=...; no legacy imports; daemon paths unchanged",
+      "contract_text": "h14 live half",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "journal line quoted; grep output in audit-t14.txt",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:31:09Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 18
+    },
+    {
+      "id": "e18",
+      "obligation_ref": "o15",
+      "test_ref": "tests/test_nova_browser_dedupe.py",
+      "behavior_text": "same normalised instruction twice within 300 s runs once and the second returns {ok:true, queued:false, duplicate:true}",
+      "contract_text": "h15 unit half (one AgentCore session per spoken request is the live half, pending)",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 19
+    },
+    {
+      "id": "e19",
+      "obligation_ref": "o16",
+      "test_ref": "tests/test_harness_gaze_stack.py + tests/test_harness_gaze_stack_inhibit.py + tests/test_harness_gaze_stack_conversation.py",
+      "behavior_text": "layer transitions issue only transition ops; conversation leaves a standing goal; fade with browser busy releases only; idle clears",
+      "contract_text": "h16",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 20
+    },
+    {
+      "id": "e20",
+      "obligation_ref": "o16",
+      "test_ref": "robot journal 09:31:17 and 09:32:03 BST",
+      "behavior_text": "layer wander -> conversation -> wander with reasons; no browsing layer exercised (no browse yet)",
+      "contract_text": "h16 live half (browsing transitions pending a live browse)",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "journal lines quoted",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:32:03Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 21
+    },
+    {
+      "id": "e21",
+      "obligation_ref": "o17",
+      "test_ref": "reachy-mini-cli tests/test_behavior_face_selection.py",
+      "behavior_text": "smaller recognised face beats a bigger unknown; equal status -> biggest; single unknown still yields a bbox",
+      "contract_text": "h17",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "targeted 91 passed, 2 skipped; full runtime suite at b3fd068",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T07:40:00Z",
+        "commit": "b3fd068"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 22
+    },
+    {
+      "id": "e22",
+      "obligation_ref": "o18",
+      "test_ref": "tests/test_harness_attention.py (59) + tests/test_harness_speaking_attention.py (16)",
+      "behavior_text": "cold+nameless -> reply dropped with one line and no daemon post; name opens; nameless-while-warm renews; 45 s closes; quiet forces cold; inject grace plays",
+      "contract_text": "h23 unit half (five cold nameless / five 'Nova' sentences live are pending)",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 23
+    },
+    {
+      "id": "e23",
+      "obligation_ref": "o19",
+      "test_ref": "tests/test_harness_ledger.py attention tests",
+      "behavior_text": "append(dropped=True) writes no line, returns False, increments attention_skips",
+      "contract_text": "h24",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 24
+    },
+    {
+      "id": "e24",
+      "obligation_ref": "o20",
+      "test_ref": "tests/test_harness_gaze_stack_inhibit.py + tests/test_harness_rules_overlay.py retire tests",
+      "behavior_text": "browsing adds orient-to-sound and nod to the live set and restores on exit; retire_rule writes an enabled=false tombstone, idempotent",
+      "contract_text": "h26 unit half",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 25
+    },
+    {
+      "id": "e25",
+      "obligation_ref": "o20",
+      "test_ref": "device rules.toml managed block + harness journal 09:31:10 BST",
+      "behavior_text": "nova-face-noticed present with enabled = false and no other fields; 'face-nod retired ... changed=True verdict=reload confirmed'",
+      "contract_text": "h26 live half (a loud sound not moving the head off a gaze-hold is pending a live browse)",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "overlay read over ssh; journal line quoted",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:31:10Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 26
+    },
+    {
+      "id": "e26",
+      "obligation_ref": "o21",
+      "test_ref": "tests/test_harness_gaze_stack_conversation.py start/stop hygiene tests",
+      "behavior_text": "start() and stop() each submit release_face and declare_goal None exactly once; model locks left alone on stop",
+      "contract_text": "h27",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 27
+    },
+    {
+      "id": "e27",
+      "obligation_ref": "o21",
+      "test_ref": "robot journals 09:31:14 BST (harness and runtime)",
+      "behavior_text": "start-hygiene release ok=true ('not locked') then start-hygiene clear goal ok=true, applied by the runtime",
+      "contract_text": "h27 live half",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "both journals quoted",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:31:14Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 28
+    },
+    {
+      "id": "e28",
+      "obligation_ref": "o22",
+      "test_ref": "tests/test_harness_gaze_stack_conversation.py backoff and ok:null tests",
+      "behavior_text": "retry intervals 3, 6, 12, 24, 30, 30; one summary line; ok:null keeps the belief unknown and retries",
+      "contract_text": "h28",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 29
+    },
+    {
+      "id": "e29",
+      "obligation_ref": "o22",
+      "test_ref": "runtime journal 09:31:17/21/27/39 BST",
+      "behavior_text": "lock_face dropped 'no face known' at +0, +4, +10, +22 s: the 3/6/12 s schedule plus spool latency",
+      "contract_text": "h28 live half",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "runtime intent lines quoted",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:31:39Z",
+        "commit": "74629d3"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 30
+    },
+    {
+      "id": "e30",
+      "obligation_ref": "o23",
+      "test_ref": "tests/test_harness_gaze_stack.py concurrency test",
+      "behavior_text": "events from three threads for 2 s produce a strictly serial, causally ordered op sequence",
+      "contract_text": "h29",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 31
+    },
+    {
+      "id": "e31",
+      "obligation_ref": "o24",
+      "test_ref": "tests/test_harness_eyes.py",
+      "behavior_text": "60 s of false snapshots -> one dropped line; true -> one restored line; broker unreachable -> unknown with one line",
+      "contract_text": "h30 unit half",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 32
+    },
+    {
+      "id": "e32",
+      "obligation_ref": "o24",
+      "test_ref": "robot journal 09:32:15 BST",
+      "behavior_text": "'[SENSE stage=vision source=runtime event=frames] dropped reason=no-frames after=60s' 61 s after the component started at 09:31:14",
+      "contract_text": "h30 live half: the no-frames line within 90 s of start",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "journal line quoted",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:32:15Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 33
+    },
+    {
+      "id": "e33",
+      "obligation_ref": "o25",
+      "test_ref": "tests/test_sonic_inject_must_deliver.py queued-inactive tests",
+      "behavior_text": "inject_text answers queued-inactive while inactive and the text is sent once with its age after the next session starts; plain injects stay dropped-inactive",
+      "contract_text": "h31 unit half (a result landing during a live rotation is pending)",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 34
+    },
+    {
+      "id": "e34",
+      "obligation_ref": "o26",
+      "test_ref": "tests/test_harness_tools.py cold refusal tests",
+      "behavior_text": "cold + nameless: browse raises ToolRefused 'not addressed' and queue_task is never called; recall_senses allowed; warm queues",
+      "contract_text": "h32",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "suite green at d5f044b",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:29:00Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 35
+    },
+    {
+      "id": "e35",
+      "obligation_ref": "o27",
+      "test_ref": "MQTT sample 2026-09-06 08:31:38Z on the robot",
+      "behavior_text": "501 snapshots in 10 s, frame_available true in 0, face_bbox in 0, face in 0; reachy-mini-cli #176 open; item-2 live checks recorded as blocked",
+      "contract_text": "h33",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "sample counts recorded with timestamp; #176 cited",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T08:31:38Z",
+        "commit": "d5f044b"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 36
+    }
+  ],
+  "deltas": [
+    {
+      "id": "b1",
+      "kind": "amended",
+      "behavior_text": "the nova-face-noticed rule is installed only when NOVA_FACE_HOLD is off and tombstoned only when it is on (t12 first installed then retired it on every boot: two overlay writes and two reloads per start); commit 8827b56",
+      "caused_by": [
+        "c34"
+      ],
+      "evidence_refs": [
+        "e24"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false
+    },
+    {
+      "id": "b2",
+      "kind": "added",
+      "behavior_text": "Nova's own opening utterance at every Sonic session start counts as conversation activity, so the gaze stack turns toward the last sound and tries the face lock at every boot (observed 09:31:17 BST); by design of c7 (Nova speaking is conversation), noted as a wart to revisit",
+      "caused_by": [
+        "c7"
+      ],
+      "evidence_refs": [
+        "e5"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false
+    },
+    {
+      "id": "b3",
+      "kind": "amended",
+      "behavior_text": "an unconfirmed release_face (ok:null or ok:false) still clears the gaze stack's lock_held without marking LockState, so a stale 'held' belief cannot suppress later attempts while LockState keeps its only-ok:true rule (t9 decision)",
+      "caused_by": [
+        "c36"
+      ],
+      "evidence_refs": [
+        "e28"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false
+    },
+    {
+      "id": "b4",
+      "kind": "amended",
+      "behavior_text": "browser progress cues for 'Navigating to ...' and 'Starting a cloud browser session...' are log lines only, not injects: the two narrated phases are start and working (t2 decision)",
+      "caused_by": [
+        "c3"
+      ],
+      "evidence_refs": [
+        "e2"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false
+    },
+    {
+      "id": "b5",
+      "kind": "added",
+      "behavior_text": "an out-of-process 'reachy_nova.harness status' reports eyes: unknown by design (the belief lives in the harness process); the live journal carries the no-frames/restored lines",
+      "caused_by": [
+        "c38"
+      ],
+      "evidence_refs": [
+        "e32"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false
+    }
+  ],
+  "supersessions": []
+}

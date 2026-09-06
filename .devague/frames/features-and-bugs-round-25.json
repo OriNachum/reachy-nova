@@ -4,7 +4,7 @@
   "schema_version": 6,
   "status": "exported",
   "created": "2026-09-06T05:50:27Z",
-  "updated": "2026-09-06T06:27:50Z",
+  "updated": "2026-09-06T08:35:13Z",
   "claims": [
     {
       "id": "c1",
@@ -1113,5 +1113,249 @@
     }
   ],
   "lapses": [],
-  "obligations": []
+  "obligations": [
+    {
+      "id": "o1",
+      "claim_id": "c2",
+      "seam": "nova_sonic.inject_text must_deliver",
+      "behavior": "a browse result inject skips the 3 s throttle, parks under its own class while speaking, and is sent",
+      "source_text": "A browse result always reaches the conversation: NovaBrowser.on_result delivery bypasses the 3 s inject throttle in nova_sonic.inject_text (a tool result the model itself asked for is not a flood) and carries its own sense class so a result parked while Nova speaks cannot be overwritten by an unclassed cue. Robot journal 2026-09-06 06:23:05, 06:24:21 and 06:24:56: all three results were 'dropped reason=throttled interval=0.0s' because NovaBrowser._execute_task emits the 'Done! Reading results...' progress inject microseconds before on_result.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o2",
+      "claim_id": "c3",
+      "seam": "NovaBrowser progress narration",
+      "behavior": "at most one status-worded cue per phase, 10 s rate limit, Done becomes a log line",
+      "source_text": "Browse progress narration is rate-limited and phrased as status, not as a request: NovaBrowser emits 'Opening browser...', 'Starting a cloud browser session...' and 'Working on: ...' as separate injects inside one second (journal 06:24:21 shows two of the three dropped as throttled), so progress collapses to at most one cue per task phase, worded so a fresh Sonic session cannot read it as an instruction (issue #8's boomerang).",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o3",
+      "claim_id": "c5",
+      "seam": "nova_browser.py act path",
+      "behavior": "the AgentCore act path is byte-unchanged by the round",
+      "source_text": "nova_browser.py's act path is not changed: act_get plus parsed_response on the AgentCore surface already produces the answer text (the dropped injects carried real answers, truncated in the log as 'Th', 'AW', 'Se'); this round fixes delivery, not the browser.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o4",
+      "claim_id": "c7",
+      "seam": "gaze stack conversation layer",
+      "behavior": "first transcript or utterance -> look_at_sound then lock_face, retried with backoff, held through gaps, released on fade",
+      "source_text": "Conversation-driven gaze lock (q1): the first USER transcript of a conversation makes the harness submit look_at_sound (the runtime's one-shot toward the last sound direction) and then lock_face; while the conversation is live, a refused lock ('no face known') is retried every few seconds until a face is seen; once held, the lock persists through Nova's replies and the listening gaps, and release_face is submitted only when the conversation fades. Conversation activity = a USER transcript or Nova speaking (Sonic 'speaking' edge through SonicSpeaker.idle); all spool calls run off Sonic's response thread.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o5",
+      "claim_id": "c8",
+      "seam": "gaze stack face presence",
+      "behavior": "no face belief in the harness; the engine refusal is the check; one summary line per conversation",
+      "source_text": "The runtime's own refusal is the face-presence check: lock_face is refused 'no face known' when Sense.face_bbox is absent or older than MAX_FACE_AGE_S = 1.5 s (reachy-mini-cli reachy/behavior/face_lock.py), so the harness keeps no face belief of its own; a refusal is a quiet no-op logged at most once per utterance.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o6",
+      "claim_id": "c9",
+      "seam": "LockState owner",
+      "behavior": "auto vs model owner; auto release never touches a model lock",
+      "source_text": "The auto-hold never releases a lock the model asked for: LockState gains an owner (auto vs requested); the playback-end release fires only for a lock the harness took itself, a model-requested lock_face is left standing, and a motion/lock-released bus event still clears the belief either way.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o7",
+      "claim_id": "c11",
+      "seam": "reachy-mini-cli face-lock constants",
+      "behavior": "only select_face and the name lists change on the runtime",
+      "source_text": "Aim quality is issue #22 (runtime gains YAW_GAIN 20 / PITCH_GAIN 12, 0.5 s detection cadence, a lock that steps rather than tracks) and is not fixed in this round; the hold is exactly as good as face-lock is today.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o8",
+      "claim_id": "c14",
+      "seam": "persona names",
+      "behavior": "the persona names Nova and Reachy and the Richie/Reach mishearings",
+      "source_text": "Nova answers when addressed as 'Nova' or 'Reachy': the persona (config/persona/nova.md plus the harness/persona.py embedded default) states both names and that 'Reachy' often arrives as 'Richie' or 'Reach' (harness journal 06:25:50 to 06:34:35 today). Ori reports 'Nova, ...' gets nothing today and expects the Nova model to hear its own name well; the acceptance test measures the real transcription (h8).",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o9",
+      "claim_id": "c16",
+      "seam": "reachy-mini-cli name lists",
+      "behavior": "nova is a canonical name with n-family collision guards; wake phrase accepts hey nova",
+      "source_text": "The runtime's canonical names gain 'nova' where the name is matched: reachy/speech/engagement.py and reachy/behavior/transcript_sense.py DEFAULT_NAMES, reachy/speech/name_match.py defaults, and the sleep wake phrase default, with collision-table entries for the new initial ('no', 'never', 'over', 'nova' vs 'no va'); shipped on the robot's wireless-motor-enable branch and on main via PR (q4).",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o10",
+      "claim_id": "c17",
+      "seam": "think alias tool",
+      "behavior": "think runs the runtime's thoughtful behaviour with an alternating side",
+      "source_text": "A think emote exists as one call: the runtime library already ships 'thoughtful' (ease into a tilted gazing-aside hold: pitch 8 up, yaw 10 aside, roll 5, 3 s default; reachy/behavior/library.py) and 'gaze-hold' (yaw 18, signed pitch 10, 5 s default); the harness publishes a 'think' alias tool, same shape as look_at_face, that runs thoughtful with a side (left or right, alternating by default) so the model can reach for it by the name it would guess.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o11",
+      "claim_id": "c18",
+      "seam": "gaze stack browsing layer",
+      "behavior": "busy -> declare_goal gaze-hold up and aside; idle/error -> declare_goal None",
+      "source_text": "While a browse is in flight the liveness looks up: NovaBrowser.on_state_change (busy / idle / error, present but unwired in harness/app.py today) drives a standing declare_goal of gaze-hold with an upward pitch and an aside yaw at 'busy', and clears it (declare_goal with no goal) at result or error; declare_goal re-admits every tick and clears in one call (reachy/behavior/intents.py 'Standing goal semantics'), and gaze-hold claims only the head channel, so antennas and body yaw keep feel-alive's sway.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o12",
+      "claim_id": "c20",
+      "seam": "browse result ordering",
+      "behavior": "the standing goal is cleared before the must-deliver result inject",
+      "source_text": "+pitch is up (reachy/behavior/face_lock.py: '+pitch is up'), so thoughtful's default already looks up and the aside yaw sign picks left or right; the think posture yields to a face hold and to the result because arbitration is by (class, recency) with both behaviours stoppable: a later lock_face owns the head and the standing goal resumes on release, so the goal is cleared before the result is injected.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o13",
+      "claim_id": "c21",
+      "seam": "deploy order and version",
+      "behavior": "robot on main before the round deploy; 0.5.0; runtime on wireless-motor-enable and PR to main",
+      "source_text": "Deploy order and version: the robot's harness checkout is still spec/fast-witty-remembering-nova @ fc2178b while main holds PR #24 (19dde0c, v0.4.0), so the round starts by moving the robot to main; the PR bumps pyproject to 0.5.0 (PyPI refuses a repeat version); any runtime change goes through wireless-motor-enable (24 commits ahead of main) per the device ops notes.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o14",
+      "claim_id": "c22",
+      "seam": "harness boundary and switches",
+      "behavior": "no SDK client, no new daemon paths, three fail-open switches in the start-up line",
+      "source_text": "Harness invariants hold: no reachy_mini SDK client, no new daemon paths, tests/test_harness_boundary.py stays green; each new behaviour gets a fail-open env kill switch in harness/switches.py (NOVA_FACE_HOLD, NOVA_THINK_POSTURE) named in the start-up switches line; the legacy main.py path (gestures.py 'pondering', wake_word.py Parakeet, face_recognition.py) is untouched.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o15",
+      "claim_id": "c24",
+      "seam": "NovaBrowser.queue_task dedupe",
+      "behavior": "a duplicate instruction within 300 s is dropped with a typed duplicate result",
+      "source_text": "Issue #8 in scope (q6): NovaBrowser.queue_task drops a task whose normalised instruction matches the running or queued one within a 5-minute window and returns a typed {ok: true, queued: false, duplicate: true} so the browse tool can tell Nova she is already on it; one spoken request never opens two AgentCore sessions.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o16",
+      "claim_id": "c25",
+      "seam": "gaze stack layering",
+      "behavior": "wander < browsing < conversation with only transition ops, single writer",
+      "source_text": "Postures are layered, lowest first: wandering (the runtime's feel-alive base) < browsing-thinking (a standing declare_goal of gaze-hold up-and-aside while NovaBrowser is busy) < conversation (look_at_sound then lock_face, held until the conversation fades). One harness component owns the standing goal and the automatic lock, computes the top layer from (conversation live, browser busy) and issues only the transition intents: a conversation takes the head from browsing, browsing resumes on fade if the browse is still running, and wandering resumes when both end (q5).",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o17",
+      "claim_id": "c26",
+      "seam": "reachy-mini-cli select_face",
+      "behavior": "recognised first, biggest among equals; a single unknown face still yields a bbox",
+      "source_text": "When several faces are in frame the runtime prefers an enrolled (recognised) face for face_bbox: reachy/behavior/face_sense.py select_face today picks the biggest face and lets recognition break only a near tie; it changes to recognised-first, biggest among equals (q2). reachy-mini-cli change on wireless-motor-enable and main.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o18",
+      "claim_id": "c28",
+      "seam": "attention window at the speaker",
+      "behavior": "cold nameless replies dropped like quiet; a name opens 45 s; injects and utterances renew",
+      "source_text": "Cold/warm attention window (q7): Nova is cold until a USER transcript names her ('nova', 'reachy', and the mishearings 'richie', 'reach', 'noah', matched with the runtime's is_name_match rules restated locally, cite-don't-import); a name opens a warm window of NOVA_ATTENTION_WINDOW_S (default 45 s, the runtime's Limits.attention_window_s) that every further USER transcript or Nova utterance renews. While cold, a Nova utterance generated in reply to a nameless transcript is dropped at the speaker exactly as a timed-quiet drop is (speaking.py's quiet gate: no playback, no gate arm, one named senselog line), while an utterance that follows a body cue or a tool result (an inject) within the same few seconds still plays. The mic feed to Sonic stays ungated so the name is always heard and barge-in keeps working. Kill switch NOVA_ATTENTION_GATE (default on).",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o19",
+      "claim_id": "c32",
+      "seam": "ledger hygiene",
+      "behavior": "a gate-dropped reply is not appended to the ledger",
+      "source_text": "Challenge / adjacent-systems (harness/ledger.py, memory_compactor.py): a reply dropped by the attention gate is excluded from the ledger and so from the day's memory, the same way quiet-window utterances already are (Ledger's quiet-aware append) \u2014 otherwise the compactor distils lines nobody heard and the history replay tells the next session Nova said things she never said aloud.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o20",
+      "claim_id": "c34",
+      "seam": "head reflexes under a held head",
+      "behavior": "browsing inhibits orient-to-sound and nod; nova-face-noticed tombstoned",
+      "source_text": "Challenge / adjacent-systems (device rules.toml + default_rules.toml + arbitration.py): while the harness holds the head for browsing or conversation, the runtime's own head reflexes are kept off it \u2014 the nova-managed rule nova-face-noticed (face -> nod, 2 s, in the device overlay) and the shipped look-toward-sound (orient-to-sound, 12 s) would take the head from a stoppable gaze-hold by recency. The browsing layer inhibits orient-to-sound and nod through set_inhibition merged with the current set (tools.py's later-wins merge), the face lock already inhibits feel-alive and orient-to-sound, and nova-face-noticed is retired from the overlay (tombstoned through rules_overlay, enabled=false): a nod at every recognised face is the wrong reflex once the lock exists.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o21",
+      "claim_id": "c35",
+      "seam": "gaze stack hygiene",
+      "behavior": "release_face and declare_goal None on start and on stop",
+      "source_text": "Challenge / lifecycle (supervisor.py stop_event; runtime face_lock.py mind-offline release): the harness releases what it holds \u2014 on stop_event the gaze stack submits release_face (when owner is auto) and declare_goal None, and on start it submits both once (idempotent; 'not locked' is ok:true) \u2014 because the runtime's mind-offline release is inert on this device ('mind presence dropped reason=client-incompatible' at every runtime start), so a crashed harness would otherwise leave the head locked until the 1800 s max-hold.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o22",
+      "claim_id": "c36",
+      "seam": "lock retry policy",
+      "behavior": "backoff 3/6/12/24/30 s, one summary line, ok:null retried as unknown",
+      "source_text": "Challenge / failure-mode (dead camera, refused locks): lock_face retries inside a conversation back off 3, 6, 12 s up to 30 s, a conversation that never sees a face logs one 'no face known' summary line rather than one per retry, and a degraded spool answer (ok: null, the 1 s await timeout the flapping engine heartbeat produces) counts as unknown and is retried, never as locked.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o23",
+      "claim_id": "c37",
+      "seam": "gaze stack single writer",
+      "behavior": "three producer threads, one serial op sequence",
+      "source_text": "Challenge / concurrency (three producer threads): the gaze stack is single-writer \u2014 Sonic's response thread (transcript, speaking edge), the speaker worker (idle) and the browser worker (state) only set flags under a lock; one worker thread computes the target layer and issues spool ops serially, waiting out each 1 s await before the next, so lock, release and goal calls can never interleave or reorder.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o24",
+      "claim_id": "c38",
+      "seam": "eyes liveness",
+      "behavior": "one latched no-frames line after 60 s without frames, one restored line, eyes in status",
+      "source_text": "Challenge / observability (runtime reports 'available' for a camera that has produced no frame since boot): the harness names a dead camera \u2014 it samples reachy/events/sense/snapshot at about 1 Hz and after 60 s of frame_available=false logs one latched '[SENSE stage=vision source=runtime event=frames] dropped reason=no-frames' line (and one 'restored' line when frames return), and supervisor.status() carries eyes: live|dead|unknown. Without this, item 2 fails silently in exactly the way this pass found it.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o25",
+      "claim_id": "c39",
+      "seam": "must-deliver restart queue",
+      "behavior": "a must-deliver inject during the session gap is queued and sent once with its age",
+      "source_text": "Challenge / adjacent-systems (nova_sonic.py session restart and rotation): a must-deliver inject (a browse result) arriving while Sonic is between sessions \u2014 inject_text answers 'dropped-inactive' during the 1-3 s restart or rotation gap \u2014 is queued and sent with its age once the next session is listening; today it would be lost exactly like the throttled one.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o26",
+      "claim_id": "c40",
+      "seam": "cold refusal of effectful tools",
+      "behavior": "effectful tools refused 'not addressed' while cold and nameless; read-only tools allowed",
+      "source_text": "Challenge / security-and-cost lens (tools.py IntentTools.execute): while cold, tool calls Sonic makes in reply to a nameless transcript are refused with the named reason 'not addressed' for the effectful tools (browse, forge, use_skill, author_rule, goto, run_behavior, declare_goal, set_mode, set_inhibition, create_rule, enroll_face, lock_face) so ambient talk cannot start an AgentCore session or move the body; read-only and quiet tools (recall_senses, stay_silent, end_silence, raise/lower/set voice, release_face) stay allowed.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o27",
+      "claim_id": "c41",
+      "seam": "camera gate",
+      "behavior": "the camera state at acceptance is recorded from a live sample; item-2 live checks are blocked, never assumed",
+      "source_text": "Challenge / reversibility-and-ops (runtime restart 07:13 BST 2026-09-06): a runtime restart is not a camera recovery on this device \u2014 the receive pipeline fails at media acquisition with 'GStreamer pipeline error (gst-core-error-quark code=4): state change failed' and frame_available stays false (435/435, then 171/171 snapshots) while /dev/video0-1 are held by the daemon's processes; item 2's live acceptance is blocked on the runtime/daemon media path (reachy-mini-cli issue filed), and the harness side of item 2 ships behind NOVA_FACE_HOLD regardless, verified by unit tests against a fake spool until the camera returns.",
+      "origin": "llm",
+      "status": "proposed"
+    }
+  ]
 }
