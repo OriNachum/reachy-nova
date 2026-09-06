@@ -19,7 +19,7 @@ worktree, every merge gated by the full suite before and after, the runtime
 half deployed to the robot mid-run, the harness deployed at the end, a
 review round on the PR folded back through the same gate, and a live half
 with the operator at the desk after a device-level camera fix, which
-produced three more harness fixes and one prerequisite for the runtime's
+produced four more harness fixes and one prerequisite for the runtime's
 configurable-names work (#27).
 
 ## Planned Work
@@ -59,22 +59,22 @@ Quoted verbatim from the `devague summary` skeleton:
 | `t6` | delivered | speaker verdict on the speaking edge, late-transcript preempt, `Ledger.append(dropped=)`; `dfbcddd` → `04d82b5` |
 | `t7` | delivered | `think` alias, typed duplicate passthrough, model-owned locks, cold refusal of effectful tools; `49e2596` → `49979fb` |
 | `t8` | delivered | `harness/gaze_stack.py` core; `cb75099` → `5d92414`; review: start hygiene moved onto the worker (`0d6c577` → `6619e82`) |
-| `t9` | delivered | conversation layer with backoff, owner, fade release, start/stop hygiene; `cf04c47` → `6a9d652`; live fix `61bde6f` (`d5`): the layer opens only on someone else speaking, and `antenna-sway` (amp 10, period 5, re-issued) keeps the antennas alive under the automatic lock (`lock_liveness`) |
+| `t9` | delivered | conversation layer with backoff, owner, fade release, start/stop hygiene; `cf04c47` → `6a9d652`; live fix `61bde6f` (`d5`): the layer opens only on someone else speaking, and `antenna-sway` (amp 10, period 5, re-issued) keeps the antennas alive under the automatic lock (`lock_liveness`); live fix `9aab323` (`d8`): the runtime's own `feel-alive` base layer, evicted by every lock and never re-seeded (reachy-mini-cli #183), is revived by the stack as a bounded passive `run_behavior` whenever the active list lacks it |
 | `t10` | delivered | browsing inhibits merged with the live set, `retire_rule` tombstone; `253c843` → `20699b6`; review: stop hygiene also restores the inhibits; live: `motion/face-lost` demoted to `voice: none` (`d3`) |
 | `t11` | delivered | `harness/eyes.py` + `eyes` in status; `f286b63` → `47ee560`; review: first-live line, fail-open broker parsing; live: the no-frames / restored pair logged across the camera fix and across a runtime restart |
 | `t12` | delivered | three switches, all wiring; `f21cbaa` → `8f6d724`; main-agent follow-up `8827b56` (install the face-nod rule only when the hold is off); review: `conversation_enabled=switches.face_hold` |
-| `t13` | delivered | docs (attention, gaze, eyes, browser, sonic, architecture, CLAUDE.md), version 0.5.0; `0334397` → `d5f044b`; plus `67d5d75` (names-table paragraph in attention.md, architecture 6.3) |
-| `t14` | delivered | audit at `8827b56` and re-run at `6619e82`: boundary 19, no legacy imports, act path unchanged, daemon paths unchanged; suite 2096 at `67d5d75` |
+| `t13` | delivered | docs (attention, gaze, eyes, browser, sonic, architecture, CLAUDE.md), version 0.5.0; `0334397` → `d5f044b`; plus `67d5d75` (names-table paragraph in attention.md, architecture 6.3) and `9aab323` (base-layer revive in gaze.md, CLAUDE.md) |
+| `t14` | delivered | audit at `8827b56` and re-run at `6619e82`: boundary 19, no legacy imports, act path unchanged, daemon paths unchanged; suite 2114 at `9aab323` |
 | `t15` | partial | "nova" reached the runtime's name lists in the first form of reachy-mini-cli PR #178 (`a8535a2` → `b3fd068`), then the operator ruled on #175 that the runtime hardcodes no peer's name: the commit was dropped from #178 and reverted on the device branch. The runtime agent now builds a configurable `names` overlay table plus a `name_mentioned` sense field in reachy-mini-cli #177; its prerequisite on this repo (#27) landed as `67d5d75` — the overlay validator accepts both (`d6`). The harness's own `names = ["nova"]` write waits for #177 on the device |
 | `t16` | delivered | `select_face` recognised-first (#175); `70e1905` → `c8e2575`; merged upstream as reachy-mini-cli 0.52.0 (#178) |
 | `t17` | delivered | v0.52.0 (`ca64951`), reachy-mini-cli PR #178 (merged to main `f2515e0`), device branch `74629d3` → `cb1ab7c` (0.52.1 with #180's detection knobs), robot restarted — without the pip reinstall (`d1`); the device-branch merge and #180 predate the every-agent-owns-its-repo rule and are the runtime agent's to keep or drop |
-| `t18` | delivered | robot moved to main (`19dde0c`, 08:25Z), then the round branch (`d5f044b` 08:31Z → `6619e82` → `ed198f5` → `61bde6f` 10:18Z → `67d5d75` 10:43Z); switches and persona lines read from the journal at every step |
+| `t18` | delivered | robot moved to main (`19dde0c`, 08:25Z), then the round branch (`d5f044b` 08:31Z → `6619e82` → `ed198f5` → `61bde6f` 10:18Z → `67d5d75` 10:43Z → `9aab323` 11:05Z); switches and persona lines read from the journal at every step |
 | `t19` | delivered | camera sampled at 08:31:38Z: 0 of 501 snapshots carried a frame; reachy-mini-cli #176 filed. Then root-caused and fixed on the device (see Mid-work Decisions): every snapshot has carried a frame since 09:48Z (69/69, 67/67, 230/230, 191/191), eyes watch logged `restored after=251s` |
-| `t20` | partial | item 2 proven live with Ori in view: 10:48–10:53 local lock 3.3 s after entry, held 42 s, released on fade, re-locked in 0.3 s; 11:30:33 local "noah look at me" → window opened by name, `look_at_sound`, lock confirmed on the first attempt 0.2 s later, antennas swaying under the lock, released on fade; cold nameless speech ("oh", "hello hello") dropped with no audio. Operator verdicts: "look at me works, but very slow, and not my face on center", "It feels rigid now. No liveness." (fixed, `d5`), "It follows me in a delay", "not focusing on me on center of the camera" — both remaining verdicts are the runtime's aim (reachy-mini-cli #181) and detection cadence (#179/#180). Still not run: the spoken browse (once, then deduped), the five-by-five name count, the browsing posture, a guest, the tone verdict |
+| `t20` | partial | item 2 proven live with Ori in view: 10:48–10:53 local lock 3.3 s after entry, held 42 s, released on fade, re-locked in 0.3 s; 11:30:33 local "noah look at me" → window opened by name, `look_at_sound`, lock confirmed on the first attempt 0.2 s later, antennas swaying under the lock, released on fade; cold nameless speech ("oh", "hello hello") dropped with no audio. Operator verdicts: "look at me works, but very slow, and not my face on center", "It feels rigid now. No liveness." (fixed, `d5`), "It follows me in a delay", "not focusing on me on center of the camera" — both the runtime's aim (reachy-mini-cli #181) and detection cadence (#179/#180); "Is reachy deployed? I don't see it moving" (11:51) — the runtime's base layer evicted by the lock and never re-seeded (#183), revived by the harness from `9aab323` (`d8`, proven live 12:06: evicted by name, back in 2 s, head and antennas moving). Still not run: the spoken browse (once, then deduped), the five-by-five name count, the browsing posture, a guest, the tone verdict |
 
 ## Mid-work Decisions
 
-All seven deviation records are **proposed** (`--origin llm`) and await Ori's
+All eight deviation records are **proposed** (`--origin llm`) and await Ori's
 confirmation; quoted as recorded.
 
 - `d1` — t17 deployed the runtime without the pip reinstall the acceptance
@@ -115,6 +115,17 @@ confirmation; quoted as recorded.
   1.0 s measures 27.7 Hz, 11 overruns/min, no flaps. #180 and the device-branch
   merge `cb1ab7c` predate the every-agent-owns-its-repo rule and are the
   runtime agent's to keep or drop
+- `d8` — Ori, 11:51 BST: "Is reachy deployed? I don't see it moving." The
+  runtime's face lock inhibits its own `feel-alive` base layer, its intents
+  driver evicts an inhibited behaviour every tick, and nothing re-seeds the
+  base layer once the inhibition clears (`engine.py` seeds it once at start;
+  `_sustain_goal` re-admits goals only) — after the first lock of a session
+  the robot is still for good (`state.json` `active: []`, head parked). Filed
+  as reachy-mini-cli #183; a runtime restart restored it until the next
+  lock. Harness workaround `9aab323`: `_tick_base_layer()` re-issues
+  `feel-alive` as one bounded passive `run_behavior` (300 s) whenever the
+  runtime's active list lacks it and nothing inhibits it, never under a held
+  automatic lock, rate-limited, reset by every release
 - not covered by a record — the dead camera had two stacked causes, both
   outside this repo and both fixed on the device (`s27`, `s28`,
   reachy-mini-cli #176): WirePlumber's libcamera/v4l2 monitors held the whole
@@ -162,29 +173,32 @@ confirmation; quoted as recorded.
 | `t9` (`d5`) | the plan's c7 counted Nova speaking as conversation, so the automatic lock held almost always and inhibited the runtime's feel-alive ("rigid, no liveness"); the layer now opens only on someone else speaking, and the antennas sway under the automatic lock | acceptable |
 | `t15` (`d6`) | the operator ruled the runtime hardcodes no peer's name; the change moved to a configurable names table the runtime agent builds in reachy-mini-cli #177, with this repo's overlay validator as the prerequisite (#27, `67d5d75`); the `names = ["nova"]` write waits for #177 on the device | needs-follow-up |
 | `t20` (`d7`) | the CM4 tick fell to ~7 Hz under full-frame detection every 0.5 s; the fix is a device drop-in over reachy-mini-cli #180's knobs, settled at 1.0 s / 640 px after measuring both | acceptable |
+| `t9` (`d8`) | the plan assumed the runtime's idle layer survives a lock; it does not (reachy-mini-cli #183), so the stack now revives it — a workaround that goes when the runtime re-seeds its own base layer | needs-follow-up |
 | `t20` | the spoken browse, the five-by-five name count, the browsing posture, a guest and the tone verdict are still unmeasured; the head's aim (settles a third of the way, #181) and tracking cadence (#179/#180, box TTL) are runtime-side | needs-follow-up |
 
 ## Evidence
 
-- tests: `uv run pytest -n auto` at `67d5d75` — 2096 passed, 1 skipped (baseline before the round: 1810; after the plan's waves at `d5f044b`: 2041; after the review round at `6619e82`: 2070; after the live fixes at `61bde6f`: 2083)
+- tests: `uv run pytest -n auto` at `9aab323` — 2114 passed, 1 skipped (baseline before the round: 1810; after the plan's waves at `d5f044b`: 2041; after the review round at `6619e82`: 2070; after the live fixes at `61bde6f`: 2083; after #27 at `67d5d75`: 2096)
 - tests: `tests/test_harness_boundary.py` — 19 passed at `8827b56` and `6619e82`
-- tests: per-obligation node ids filed as plan evidence `e1`–`e44` against obligations `o1`–`o28` (`devague evidence --list`), all proposed
+- tests: per-obligation node ids filed as plan evidence `e1`–`e46` against obligations `o1`–`o28` (`devague evidence --list`), all proposed
 - runtime tests: reachy-mini-cli `uv run pytest -n auto` at `b3fd068` — 5668 passed, 7 skipped, 1 failed (`tests/test_vision_scene_integration.py::test_integration_scene_default_model_resolves_via_senses_role`, a live-gateway test that fails identically on `origin/main`)
 - audit: `scratchpad/audit-t14.txt` (session) — no legacy imports under `reachy_nova/harness/`, `nova_browser.py` act path byte-unchanged, daemon paths `/api/media/{play_sound,sounds,sounds/upload,stop_sound}` and `/api/volume/{current,set}` only
 - lint: `markdownlint-cli2` on the touched docs — 0 new findings (pre-existing table-row MD013 in `gaze.md`/`attention.md`, list-style findings in `nova_browser.md`)
-- commits: `a144528..67d5d75` on `spec/features-and-bugs-round-25` (spec+plan, 20 task merges, 1 follow-up, 5 Sonar fixes, 3 review-fix merges, 3 live-fix commits, 1 liveness merge, 1 prerequisite for #177)
+- commits: `a144528..9aab323` on `spec/features-and-bugs-round-25` (spec+plan, 20 task merges, 1 follow-up, 5 Sonar fixes, 3 review-fix merges, 3 live-fix commits, 1 liveness merge, 1 prerequisite for #177, 1 base-layer revive)
 - runtime commits: `c8e2575..ca64951` on `feat/reachy-nova-25-names-select-face` (PR #178, merged as 0.52.0); device branch `wireless-motor-enable` @ `cb1ab7c` (0.52.1, #180)
-- PRs / issues: OriNachum/reachy-nova#26 (this round), #25 (closed by it), #8 (closed by it), #27 (filed by the runtime agent, landed `67d5d75`); agentculture/reachy-mini-cli#178 (runtime PR, merged), #175 (enrolled-face preference), #176 (camera pipeline failure, two causes), #177 (configurable names, the runtime agent's), #179 (detect only in the still period), #180 (detection knobs), #181 (open-loop aim)
+- PRs / issues: OriNachum/reachy-nova#26 (this round), #25 (closed by it), #8 (closed by it), #27 (filed by the runtime agent, landed `67d5d75`); agentculture/reachy-mini-cli#178 (runtime PR, merged), #175 (enrolled-face preference), #176 (camera pipeline failure, two causes), #177 (configurable names, the runtime agent's), #179 (detect only in the still period), #180 (detection knobs), #181 (open-loop aim), #183 (base layer never re-seeded after a lock)
 - robot journal, harness pid 15925 (round branch `d5f044b`, 09:31 local): `switches ... face_hold=on think_posture=on attention_gate=on`; `persona ... chars=1615`; `face-nod retired id=nova-face-noticed changed=True verdict=reload confirmed`; `start-hygiene release ok=true` / `start-hygiene clear goal ok=true`; `layer wander -> conversation` at 09:31:17, `look at sound ok=true`, `lock face attempt=1..4 ... error=no face known`, `layer conversation -> wander` at 09:32:03 with `lock never held: refusals=4`; `[SENSE stage=vision source=runtime event=frames] dropped reason=no-frames after=60s` at 09:32:15
 - robot journal, runtime pid 12726 (v0.52.0): `release_face ... 'released': False`, `declare_goal ... 'goal': None`, `run_behavior ... look-at-sound`, `lock_face ... dropped reason=no face known` at 09:31:17/21/27/39
 - robot journals 10:48:57–10:53:26 local (harness pid 17745, runtime): `look_at_face` confirmed; `layer wander -> conversation`; `lock_face` refused then `confirmed {"ok":true,"locked":true,"id":"face-lock:lock:1"}` (`locked after=3.3s attempts=2`); `release_face ... reason=requested` at fade; `locked after=0.3s attempts=1` on the next utterance; seven `motion/face-lost` injects; `heard 'nova, look at me.'` → `event=window] opened by=nova`; two `dropped reason=not-addressed`
 - robot journals 11:26–11:35 local (harness pid 24999 @ `61bde6f`, runtime 0.52.1 with detect 1.0 s / 640 px): `locked after=45.9s attempts=5` then `liveness sway ok=true` at 11:26:41 (runtime: `antenna-sway` applied on the antennas channel under `face-lock:lock:2`, `inhibited: ['feel-alive', 'orient-to-sound']`); `heard 'noah look at me'` → `event=window] opened by=noah` → `look at sound ok=true` → `lock face attempt=1 reason=enter ok=true` → `locked after=0.2s attempts=1` → `liveness sway ok=true`, all at 11:30:33; `motion/face-lost` `absent_s=3.019` and `absent_s=3.026` at 11:31; `heard 'oh'` at 11:34:26 → `dropped reason=not-addressed` (`utterance dropped count=5`); no `event=window] opened` attributed to Nova's own voice since `61bde6f` (`e40`, `e41`)
 - robot journal 11:43:30 local (harness @ `67d5d75`): switches line unchanged, `persona ... chars=1796`, `face-nod retired ... changed=False`, start hygiene ok (`e44`)
+- robot 11:51 local: `state.json` `active: []`, `ownership` all `None`, `intents.inhibitions: []`, daemon `control_mode: enabled`, head yaw −1° pitch 2° frozen across three reads; runtime journal 11:35:13 `lock_face ... 'inhibited': ['feel-alive', 'orient-to-sound']` → `set_inhibition event=feel-alive dropped reason=inhibited` → 11:35:31 `release_face ... 'inhibitions': []` and no `feel-alive` line after; runtime restart 11:53:01 → `active: [('feel-alive', base=True)]`, head wandering (`d8`, #183)
+- robot 12:05:34–12:06:18 local (harness @ `9aab323`): base alive after the restart → no revive line; `reachy behavior stop feel-alive` at 12:06:10 → `[SENSE stage=gaze source=nova event=op] revive feel-alive ok=true` at 12:06:12 → runtime `run_behavior ... 'id': 'intent:run:feel-alive:2', 'class': 'passive'` → `active: [('feel-alive', False, 'intent:run:feel-alive:2', 297 s)]`, head yaw 4.5 → 1.7 → −0.2, pitch 7.2 → 12.3 → 3.5 over 4 s (`e46`)
 - MQTT samples on the robot: 08:31:38Z 501 snapshots, 0 with a frame; after the camera fix 69/69 (09:48Z), 67/67, 230/230 (10:27Z, 23.0 Hz, `face` named in 1), 191/191 (10:29Z); tick 9.9 Hz at detect 0.5 s with 41 overruns/min and heartbeat flaps every ~10 s (10:34Z); 27.7 Hz at 1.0 s with 11 overruns/min and no flaps (10:36Z) (`e42`)
 - camera intrinsics from the daemon (`GET /api/camera/specs`): K fx ≈ 2002, cx ≈ 1906 on the 3840-wide sensor → ≈ 87° horizontal field of view; against the face-lock's 20° yaw gain per half-frame the aim settles at ≈ 0.31 of the face angle (#181)
 - device overlay `~/.local/state/reachy/behavior/rules.toml`: `id = "nova-face-noticed"` / `enabled = false` in the nova-managed block; device drop-in `~/.config/systemd/user/reachy-runtime.service.d/override.conf`: `REACHY_FACE_DETECT_INTERVAL=1.0`, `REACHY_FACE_DETECT_MAX_WIDTH=640`
-- deviations: `devague deviate --list` — `d1`–`d7`, all proposed; deltas `b1`–`b10`, obligations `o1`–`o28`, evidence `e1`–`e44`, all proposed
-- PR #26 review: 10 Qodo threads, 10 answered, 10 resolved; Sonar quality gate passed, 1 open finding (S3415) left for the operator; CI green at `61bde6f`, running at `67d5d75`
+- deviations: `devague deviate --list` — `d1`–`d8`, all proposed; deltas `b1`–`b11`, obligations `o1`–`o28`, evidence `e1`–`e46`, all proposed
+- PR #26 review: 10 Qodo threads, 10 answered, 10 resolved; Sonar quality gate passed, 1 open finding (S3415) left for the operator; CI green at `61bde6f` and `76186d0`, running at `9aab323`
 
 ## Delivery Claims
 
@@ -199,6 +213,7 @@ confirmation; quoted as recorded.
 | a conversation turns the head toward the voice and retries the face lock with backoff, one summary per conversation | high | journal 09:31:17–09:32:03 (four refusals at +0/+3/+9/+22 s, fade at +46 s) · `tests/test_harness_gaze_stack_conversation.py` |
 | the face lock is held through a conversation and released on fade | high | journal 10:48:58–10:49:45: lock 3.3 s after entry, held 42 s, released on fade, re-locked in 0.3 s · 11:30:33: locked on the first attempt 0.2 s after the name · `e36`, `e40` |
 | Nova's own voice never opens a conversation, and the antennas stay alive under the automatic lock | high | `61bde6f` tests · journal `liveness sway ok=true` at 11:26:41 and 11:30:33 with `antenna-sway` applied by the runtime under the lock · no window opened by Nova's own line since 10:18Z · `e40` |
+| the robot stays alive after a lock evicts the runtime's idle layer | high | `tests/test_harness_gaze_stack_liveness.py` (14 tests) · live 12:06:10–12:06:18: evicted by name, revived in 2 s, head and antennas moving · `e45`, `e46` |
 | the head lands on the face quickly and centred | unverified | Ori: "It follows me in a delay", "not focusing on me on center of the camera" — the runtime's open-loop aim (settles at ≈ 0.31 of the face angle, reachy-mini-cli #181) and detection cadence (#179/#180) — not claimed done |
 | the head looks up and aside while browsing, antennas alive, and yields to a conversation | medium | `tests/test_harness_gaze_stack.py`, `tests/test_harness_gaze_stack_inhibit.py` · no browse has run live since the deploy |
 | the face-nod rule is retired on the device | high | overlay read over ssh · journal `face-nod retired ... reload confirmed` |
@@ -209,16 +224,16 @@ confirmation; quoted as recorded.
 | the runtime prefers an enrolled face | high | reachy-mini-cli face-selection suite · PR #178 merged as 0.52.0 · robot on `cb1ab7c` |
 | the runtime answers to "nova" | unverified | the change moved to reachy-mini-cli #177 (in build by the runtime agent); the current runtime does not — not claimed done |
 | the overlay validator accepts the runtime's names table and a `name_mentioned` predicate, and refuses a malformed table untouched | high | `tests/test_harness_rules_overlay.py` (13 tests) at `67d5d75` · `e43` · bounds pinned to the runtime's `rules.py` on its #177 branch |
-| version 0.5.0 with a green suite | high | `pyproject.toml` · 2096 passed at `67d5d75` |
+| version 0.5.0 with a green suite | high | `pyproject.toml` · 2114 passed at `9aab323` |
 | it feels right to talk to (tone and behaviour) | unverified | the operator's verdict is pending — not claimed done |
 
 ## Remaining Work / Follow-up
 
-- `t20` — the operator's live acceptance on `67d5d75`: five cold nameless sentences (expect silence and `dropped reason=not-addressed` lines), "Nova, how are you" then a nameless follow-up (both answered), the same with "Reachy", a spoken browse (posture up, result spoken once) repeated within a minute (one session), a guest by name, and the tone verdict; then update the unverified rows above. Owner: Ori + operator.
+- `t20` — the operator's live acceptance on `9aab323`: five cold nameless sentences (expect silence and `dropped reason=not-addressed` lines), "Nova, how are you" then a nameless follow-up (both answered), the same with "Reachy", a spoken browse (posture up, result spoken once) repeated within a minute (one session), a guest by name, and the tone verdict; then update the unverified rows above. Owner: Ori + operator.
 - item 2's quality — the hold works and lands on the first attempt; the head is slow to arrive and settles off-centre: reachy-mini-cli #181 (closed-loop aim through the camera FOV), #179 (detect only in the still grace period), #180 (detection interval / frame width; the 1.5 s box TTL should track the interval, `b8`). Runtime work, the runtime agent's
 - the runtime's "nova" name — reachy-mini-cli #177 (the runtime agent); once it is on the device branch, this harness writes `names = ["nova"]` into the overlay's operator head and submits a reload at start (same mechanics as the face-nod tombstone), behind `NOVA_ATTENTION_GATE`; c16 is delivered when that round-trips on the robot
 - the camera's two causes need durable fixes outside this repo: the WirePlumber config belongs in the OS image or the runtime's `service` setup, and the daemon should not let a second SDK client release media held by the runtime (both on reachy-mini-cli #176)
-- confirm or reject deviations `d1`–`d7`, obligations `o1`–`o28`, evidence `e1`–`e44`, deltas `b1`–`b10` (all proposed)
+- confirm or reject deviations `d1`–`d8`, obligations `o1`–`o28`, evidence `e1`–`e46`, deltas `b1`–`b11` (all proposed)
 - Sonar S3415 on `tests/test_harness_speaking_attention.py:150` — accept as a false positive in the Sonar UI, or ask for the two `in` assertions to be reshaped
 - PR #26 is open with all ten review threads resolved; the operator wants everything right on the robot before it merges; merging publishes 0.5.0 to PyPI, after which the robot's checkout goes back to `main`
-- follow-ups noted, not built: a trailing-name grace for fragmented transcripts (park `v4`); multi-angle enrolment (park `v5`, #127); a wandering "thinking" runtime library entry instead of the static gaze-hold (decision `c19`); the runtime's lock still inhibits feel-alive wholesale (the antenna sway is the harness's workaround, `d5`); observations: the cognition feed logs every assistant line twice (pre-existing), one ASR-hallucinated "refusal" transcript (10:49:59), memory replay carrying odd topics
+- follow-ups noted, not built: a trailing-name grace for fragmented transcripts (park `v4`); multi-angle enrolment (park `v5`, #127); a wandering "thinking" runtime library entry instead of the static gaze-hold (decision `c19`); the runtime's lock still inhibits feel-alive wholesale and never re-seeds it (the antenna sway and the base-layer revive are the harness's workarounds, `d5`, `d8`; reachy-mini-cli #183 is the fix); observations: the cognition feed logs every assistant line twice (pre-existing), one ASR-hallucinated "refusal" transcript (10:49:59), memory replay carrying odd topics

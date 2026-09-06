@@ -2,7 +2,7 @@
   "plan_slug": "features-and-bugs-round-25",
   "schema_version": 2,
   "created": "2026-09-06T07:50:25Z",
-  "updated": "2026-09-06T10:45:33Z",
+  "updated": "2026-09-06T11:06:53Z",
   "deviations": [
     {
       "id": "d1",
@@ -84,6 +84,19 @@
       "status": "proposed",
       "classification": "acceptable",
       "seq": 46
+    },
+    {
+      "id": "d8",
+      "what": "t9's automatic face lock leaves the robot still for good once released: the runtime's face lock inhibits its own feel-alive base layer, its intents driver evicts an inhibited behaviour every tick, and nothing re-seeds the base layer once the inhibition clears (reachy-mini-cli #183, filed). Harness workaround, commit 9aab323: GazeStack._tick_base_layer re-issues feel-alive as one bounded passive run_behavior (300 s) whenever the runtime's active list lacks it and nothing inhibits it, never under a held auto lock, rate-limited, reset by every release; tools.current_active_names reads state.json's active list",
+      "task_ref": "t9",
+      "reason": "Ori, 11:51 BST: 'Is reachy deployed? I don't see it moving' \u2014 state.json active [] after the 11:35 lock/release; a runtime restart restored it until the next lock; the fix belongs to the runtime, the workaround keeps the robot alive meanwhile",
+      "affects": [
+        "t20"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "needs-follow-up",
+      "seq": 52
     }
   ],
   "evidence": [
@@ -922,6 +935,44 @@
       "status": "proposed",
       "superseded": false,
       "seq": 51
+    },
+    {
+      "id": "e45",
+      "obligation_ref": "o4",
+      "test_ref": "tests/test_harness_gaze_stack_liveness.py (14 tests: live base left alone; missing base revived once, bounded 300 s; stale list re-issued at the 15 s margin; refusal retried after 30 s; unreadable list rate-limited; inhibited never; lock_liveness off never; not under the held lock but right after the fade; runtime lock-released revives at once; browsing too; injectable default; the state.json reader)",
+      "behavior_text": "feel-alive is re-issued as a bounded passive run_behavior exactly when the runtime's active list lacks it and nothing inhibits it, ordered after the release, rate-limited, disabled with lock_liveness",
+      "contract_text": "held through gaps, released on fade \u2014 and the robot stays alive after the release",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "14 tests red before the change, green after; full suite 2114 passed; the three existing gaze suites pin a healthy base layer",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T11:04:00Z",
+        "commit": "9aab323"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 53
+    },
+    {
+      "id": "e46",
+      "obligation_ref": "o4",
+      "test_ref": "robot, 12:06:10-12:06:18 BST @ 9aab323: 'reachy behavior stop feel-alive' evicts the base layer by name; harness journal; state.json active; daemon head pose",
+      "behavior_text": "two seconds after the eviction the harness logged 'revive feel-alive ok=true', the runtime admitted intent:run:feel-alive:2 (class passive, 297 s remaining), and the head and antennas moved again (yaw 4.5 -> 1.7 -> -0.2, pitch 7.2 -> 12.3 -> 3.5 over 4 s); with the base alive after the 12:05 restart the revive stayed silent",
+      "contract_text": "the robot stays alive after a lock evicts the runtime's base layer",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "live eviction on the device with journal, state and daemon reads at the named commit",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T11:06:12Z",
+        "commit": "9aab323"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 54
     }
   ],
   "deltas": [
@@ -1060,6 +1111,21 @@
       ],
       "evidence_refs": [
         "e43"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false
+    },
+    {
+      "id": "b11",
+      "kind": "added",
+      "behavior_text": "the harness keeps the runtime's feel-alive base layer alive: whenever the runtime's active list lacks it and nothing inhibits it, one bounded passive run_behavior feel-alive (300 s) is re-issued, in every layer, never under a held auto lock, reset by every release \u2014 a workaround for reachy-mini-cli #183",
+      "caused_by": [
+        "c7"
+      ],
+      "evidence_refs": [
+        "e45",
+        "e46"
       ],
       "origin": "llm",
       "status": "proposed",
