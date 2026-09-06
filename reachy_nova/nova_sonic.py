@@ -173,6 +173,14 @@ RESTART_JITTER_FRACTION = 0.10
 # conversation plus the base backoff. So the harness replaces the session
 # itself, a little early and at a moment when nothing is in flight.
 DEFAULT_ROTATE_S = 420.0
+# Bedrock drops a Nova 2 Sonic stream that carries no INTERACTIVE content
+# (speech or text) for 295 s — silent audio bytes do not count ("Please ensure
+# gaps between audio bytes and interactive content are less than 295 seconds",
+# robot 2026-09-06, three drops at exactly 296 s of quiet). A quiet session is
+# therefore rotated cleanly a little before that, at an idle moment.
+DEFAULT_IDLE_ROTATE_S = 270.0
+#: The substring of Bedrock's own idle-cutoff message.
+IDLE_CUTOFF_MARKER = "gaps between audio bytes and interactive content"
 # ...and if nothing is ever idle, rotate anyway rather than let Bedrock do it
 # for us at 480 s. This is the last quiet exit before the ceiling.
 DEFAULT_ROTATE_DEADLINE_S = 470.0
@@ -180,6 +188,23 @@ DEFAULT_ROTATE_DEADLINE_S = 470.0
 DEFAULT_HISTORY_MAX_BLOCKS = 8
 # Roles the Nova 2 input-events page accepts for replayed history content.
 HISTORY_ROLES = ("USER", "ASSISTANT")
+
+
+def _idle_rotate_s() -> float:
+    """Seconds without interactive content before an idle rotation (``NOVA_SONIC_IDLE_ROTATE_S``).
+
+    Parsed like ``_rotate_interval_s``; ``0`` or negative disables it.
+    """
+    import os
+
+    raw = os.environ.get("NOVA_SONIC_IDLE_ROTATE_S", "")
+    if raw.strip() == "":
+        return DEFAULT_IDLE_ROTATE_S
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_IDLE_ROTATE_S
+    return value if value > 0 else 0.0
 
 
 def _rotate_interval_s() -> float:
@@ -332,6 +357,11 @@ class NovaSonic:
         #: (PR #24 review): the app wires it to ledger.append.
         self.on_deferred_delivered: Callable[[str, str | None], None] | None = None
         self._rotation_age_s: float | None = None
+        # Monotonic time of the last INTERACTIVE content we sent (a speech
+        # burst, a text inject, a tool result, the history replay).
+        self._last_interactive_mono: float | None = None
+        # Why the last stream death happened, as Bedrock phrased it.
+        self._last_stream_error: str = ""
 
         # Tool use tracking
         self._current_tool_use: dict | None = None
@@ -397,10 +427,16 @@ class NovaSonic:
         self._session_had_response = False
         # A speech burst must be earned inside THIS session (PR #24 review).
         self._energy_recent.clear()
+        self._last_interactive_mono = mono
 
     def _note_input_sent(self) -> None:
         """Record that we pushed something (audio or text) into the stream."""
         self._input_since_response = True
+        self._last_interactive_mono = time.monotonic()
+
+    def _note_interactive_sent(self) -> None:
+        """Interactive content for Bedrock's idle clock, NOT liveness input."""
+        self._last_interactive_mono = time.monotonic()
 
     def _note_response_event(self, mono: float | None = None) -> None:
         """Record a sign of life from Bedrock — resets the liveness deadline."""
@@ -496,6 +532,16 @@ class NovaSonic:
         if interval <= 0 or self._session_start_mono is None:
             return None
         age = mono - self._session_start_mono
+        # Idle rotation: nothing interactive has been sent for a while and
+        # Bedrock will cut the stream at 295 s anyway — swap it cleanly now.
+        idle_s = _idle_rotate_s()
+        if (
+            idle_s > 0
+            and self._last_interactive_mono is not None
+            and mono - self._last_interactive_mono >= idle_s
+            and self._session_is_idle()
+        ):
+            return age
         if age < interval:
             return None
         if age >= _rotate_deadline_s():
@@ -990,6 +1036,7 @@ class NovaSonic:
                             logger.warning(f"Transient stream error (#{consecutive_errors}): {e}")
                             await asyncio.sleep(0.05)
                             continue
+                        self._last_stream_error = str(e)
                         logger.error(f"Response processing error: {e}")
                     break
         except Exception as e:
@@ -1177,6 +1224,13 @@ class NovaSonic:
                 # skip the delay entirely, this restart is urgent.
                 delay = 0.0
                 logger.warning(f"{reason} — restarting session now")
+            elif IDLE_CUTOFF_MARKER in self._last_stream_error:
+                # Bedrock's own idle cutoff: the stream was healthy, the room
+                # was quiet. A fresh stream works at once — no backoff.
+                delay = 0.0
+                self._restart_attempt = 0
+                self._last_stream_error = ""
+                logger.warning("Bedrock idle cutoff (no interactive content for 295 s) — restarting now")
             else:
                 self._note_session_death(time.monotonic())
                 self._maybe_reset_backoff_for_healthy_session(time.monotonic())
@@ -1348,6 +1402,7 @@ class NovaSonic:
 
         try:
             asyncio.run_coroutine_threadsafe(self._send_user_text(text, gen), self._loop)
+            self._note_interactive_sent()
             # NOT liveness input: a quiet body cue or a tool result legitimately
             # gets no answer from the model (robot, 2026-09-06). Only sustained
             # speech-level mic audio counts — see feed_audio.
@@ -1477,6 +1532,7 @@ class NovaSonic:
 
         if delivered:
             self._last_inject_time = time.time()
+            self._note_interactive_sent()
             # NOT liveness input: a quiet body cue or a tool result legitimately
             # gets no answer from the model (robot, 2026-09-06). Only sustained
             # speech-level mic audio counts — see feed_audio.
@@ -1531,6 +1587,7 @@ class NovaSonic:
 
         try:
             asyncio.run_coroutine_threadsafe(_send_result(), self._loop)
+            self._note_interactive_sent()
             # NOT liveness input: a quiet body cue or a tool result legitimately
             # gets no answer from the model (robot, 2026-09-06). Only sustained
             # speech-level mic audio counts — see feed_audio.

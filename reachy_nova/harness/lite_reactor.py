@@ -77,6 +77,8 @@ REASON_MALFORMED = "lite-malformed"
 REASON_EVICTED = "lite-evicted"
 #: Too many Lite calls still in flight (hung helpers): fall back at once.
 REASON_BUSY = "lite-busy"
+#: Lite repeated one of its own recent lines despite being told not to.
+REASON_REPEAT = "lite-repeat"
 #: Bound on abandoned-but-running Lite helper threads (PR #24 review).
 DEFAULT_MAX_INFLIGHT = 2
 
@@ -414,11 +416,17 @@ class LiteReactor:
             return
 
         plan = parse_plan(raw_text)
-        if plan is not None and plan.say:
-            self._recent_says.append(plan.say)
         if plan is None:
             self._fallback(item, REASON_MALFORMED, f"reply={raw_text!r}")
             return
+        if plan.say and plan.say.strip().lower() in {r.strip().lower() for r in self._recent_says}:
+            # The prompt asked for a different angle and Lite ignored it
+            # (robot, 2026-09-06: "Thank you!" twice in four pats). The
+            # template lets the voice model improvise instead of parroting.
+            self._fallback(item, REASON_REPEAT, f"say={plan.say!r}")
+            return
+        if plan.say:
+            self._recent_says.append(plan.say)
 
         latency_ms = (self._clock() - start) * 1000.0
         if plan.say is not None:

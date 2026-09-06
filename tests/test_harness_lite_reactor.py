@@ -523,3 +523,34 @@ def test_a_vocalize_in_the_plan_fires_the_callback():
     finally:
         stop.set()
         r.stop()
+
+
+def test_an_exact_repeat_of_a_recent_line_falls_back_to_the_template():
+    """Robot 2026-09-06 01:19/01:25: 'Thank you!' twice in four pats despite the prompt."""
+    import threading
+    import time as _time
+
+    from reachy_nova.harness.lite_reactor import REASON_REPEAT, LiteReactor
+
+    class Client:
+        def invoke_model(self, **kw):
+            import io, json
+            body = {"output": {"message": {"content": [{"text": "say=Thank you! | vocalize=none | gesture=none"}]}}}
+            return {"body": io.BytesIO(json.dumps(body).encode())}
+
+    delivered = []
+    r = LiteReactor(client=Client(), timeout_s=1.0)
+    stop = threading.Event()
+    r.start(stop)
+    try:
+        r.react("(pat)", "tmpl", delivered.append)
+        r.react("(pat)", "tmpl", delivered.append)
+        deadline = _time.monotonic() + 3.0
+        while len(delivered) < 2 and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+        assert delivered[0].startswith("(") and "Thank you!" in delivered[0]
+        assert delivered[1] == "tmpl", "the repeat is replaced by the template"
+        assert r.fallbacks == 1
+    finally:
+        stop.set()
+        r.stop()

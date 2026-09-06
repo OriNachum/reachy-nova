@@ -260,6 +260,9 @@ def _no_ambient_rotation_env(monkeypatch):
         "NOVA_SONIC_LIVENESS_S",
         "NOVA_SONIC_ENDPOINTING",
     ):
+        # Idle rotation (Bedrock's 295 s interactive cutoff) is pinned OFF here so
+        # the age-based cases keep their meaning; TestIdleRotation enables it.
+        monkeypatch.setenv("NOVA_SONIC_IDLE_ROTATE_S", "0")
         monkeypatch.delenv(name, raising=False)
 
 
@@ -905,3 +908,50 @@ class TestHistoryShapeAndBreaker:
         sonic._note_session_death(101.0)
         assert sonic._replay_deaths == 0
         assert sonic._replay_suspended is False
+
+
+class TestIdleRotation:
+    """Bedrock cuts a stream with no interactive content for 295 s; rotate first."""
+
+    def test_a_quiet_idle_session_rotates_at_the_idle_interval(self, nosleep, monkeypatch):
+        monkeypatch.setenv("NOVA_SONIC_ROTATE_S", "420")
+        monkeypatch.setenv("NOVA_SONIC_IDLE_ROTATE_S", "270")
+        sonic = _make_sonic()
+        sonic._arm_watchdogs(1_000.0, 100.0)
+        sonic.state = "listening"
+        assert sonic._rotation_due(100.0 + 269.0) is None
+        assert sonic._rotation_due(100.0 + 271.0) is not None, "idle for 271 s -> rotate now"
+
+    def test_interactive_content_defers_the_idle_rotation(self, nosleep, monkeypatch):
+        monkeypatch.setenv("NOVA_SONIC_ROTATE_S", "420")
+        monkeypatch.setenv("NOVA_SONIC_IDLE_ROTATE_S", "270")
+        sonic = _make_sonic()
+        sonic._arm_watchdogs(1_000.0, 100.0)
+        sonic.state = "listening"
+        monkeypatch.setattr(nova_sonic.time, "monotonic", lambda: 100.0 + 200.0)
+        sonic._note_interactive_sent()  # an inject at t+200
+        assert sonic._rotation_due(100.0 + 300.0) is None, "only 100 s since the inject"
+        assert sonic._rotation_due(100.0 + 471.0) is not None, "past the idle interval again (and the age deadline)"
+
+    def test_idle_rotation_waits_for_an_idle_moment(self, nosleep, monkeypatch):
+        monkeypatch.setenv("NOVA_SONIC_ROTATE_S", "420")
+        monkeypatch.setenv("NOVA_SONIC_IDLE_ROTATE_S", "270")
+        sonic = _make_sonic()
+        sonic._arm_watchdogs(1_000.0, 100.0)
+        sonic.state = "listening"
+        sonic._speaking = True
+        assert sonic._rotation_due(100.0 + 280.0) is None
+
+    def test_idle_rotation_can_be_disabled(self, nosleep, monkeypatch):
+        monkeypatch.setenv("NOVA_SONIC_ROTATE_S", "420")
+        monkeypatch.setenv("NOVA_SONIC_IDLE_ROTATE_S", "0")
+        sonic = _make_sonic()
+        sonic._arm_watchdogs(1_000.0, 100.0)
+        sonic.state = "listening"
+        assert sonic._rotation_due(100.0 + 300.0) is None
+
+    def test_the_bedrock_idle_cutoff_is_recognised(self):
+        assert nova_sonic.IDLE_CUTOFF_MARKER in (
+            "Timed out waiting for audio bytes or interactive content. Please ensure gaps "
+            "between audio bytes and interactive content are less than 295 seconds."
+        )
