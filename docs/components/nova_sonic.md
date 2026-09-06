@@ -175,9 +175,32 @@ progress inject and the journal logged it away three times as
   any cue. Callers should pass a distinctive `sense_class` (the browse caller
   passes `browse`) so the latest-wins slot cannot let an unrelated cue
   overwrite the answer.
+- **A failed or stale send goes back on the queue.** Reaching a live session
+  is not the same as reaching the wire, and `inject_text` returns `"sent"` as
+  soon as the send is *scheduled* — its caller is a callback that cannot wait.
+  `_send_user_text` therefore returns a real verdict: `True` only when
+  `contentStart`, `textInput` and `contentEnd` all left without raising under
+  a matching session generation. When it returns `False` for a must-deliver
+  text — the session rotated between scheduling and running, or the transport
+  raised — the **original, un-annotated** text goes back on the same bounded
+  FIFO with one `dropped reason=stale-session|send-failed requeued=true`
+  senselog line, and the drain counts only `True` results as delivered. The
+  marker follows the text down every path, including the speaking-deferred
+  one: `DeferredCue.must_deliver` is what lets a parked answer whose drain
+  lands under a rotated generation re-queue while a parked body cue is
+  discarded as before. The age annotation is applied at send time only, so a
+  retried answer is annotated once, with the age it actually has.
+- **Exhausted, not endless.** Each item carries an `attempts` counter, bumped
+  on every re-queue and capped at `MUST_DELIVER_MAX_ATTEMPTS = 5`: an answer a
+  permanently broken wire keeps refusing is dropped after its fifth attempt
+  with one `dropped reason=must-deliver-exhausted attempts=5` line, rather than
+  being retried at every session start forever. "Exhausted" means exactly
+  that — five wire attempts spent, the answer given up on and named in the
+  journal.
 
 A plain (non-must-deliver) inject keeps every previous behaviour, including
-`dropped-inactive` and `dropped-throttled`.
+`dropped-inactive`, `dropped-throttled`, and a discarded (never queued) text
+when its send fails or its generation has rotated.
 
 See [nova_browser.md](nova_browser.md)'s "Browse result path, end to end" for
 the full chain a browse answer travels through before it reaches this path.

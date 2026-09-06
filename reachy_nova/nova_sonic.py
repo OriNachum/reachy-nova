@@ -201,23 +201,48 @@ HISTORY_ROLES = ("USER", "ASSISTANT")
 # newest answer is the one still worth hearing.
 MUST_DELIVER_QUEUE_MAX = 8
 
+# How many times one must-deliver answer may be attempted on the wire before
+# it is given up on. A stale generation or a failed send puts the answer back
+# on the queue instead of losing it — but a permanently broken wire would then
+# retry the same text at every session start forever, so the item is dropped
+# with one named ``dropped reason=must-deliver-exhausted`` line once it has
+# burned this many attempts. Five covers the realistic case (a rotation, a
+# reconnect, a transient send error) without spinning.
+MUST_DELIVER_MAX_ATTEMPTS = 5
+
 
 @dataclass(frozen=True)
 class MustDeliverItem:
-    """One must-deliver inject that arrived with no live session to take it.
+    """One must-deliver inject waiting for a session that can take it.
 
     ``t`` is a monotonic stamp, so the drain can tell the mind how late the
     answer is ("this arrived 4s ago") rather than presenting a stale browse
-    result as if it had just landed.
+    result as if it had just landed. The stamp is kept across a retry — the
+    queue always holds the ORIGINAL text, and the age annotation is applied at
+    send time only, so a re-queued answer is never annotated twice.
+
+    ``attempts`` counts wire attempts already spent on this text (0 for one
+    that has never been sent). It is bumped on every re-queue and capped at
+    :data:`MUST_DELIVER_MAX_ATTEMPTS`.
     """
 
     text: str
     sense_class: str | None
     t: float
+    attempts: int = 0
 
     def age(self, now: float) -> float:
         """Seconds since this item was queued, never negative."""
         return max(0.0, now - self.t)
+
+    def retried(self) -> "MustDeliverItem":
+        """The same answer, one attempt further in — same text, same stamp."""
+        return MustDeliverItem(
+            text=self.text,
+            sense_class=self.sense_class,
+            t=self.t,
+            attempts=self.attempts + 1,
+        )
 
 
 def _warn_unsupported_history_roles(blocks: list) -> None:
@@ -1467,7 +1492,7 @@ class NovaSonic:
         # The cue is parked rather than lost: _on_speaking_ended() delivers it
         # (with its age in the text) the moment the utterance finishes.
         if self._speaking and not force:
-            cue = self._deferred.put(sense_class, text)
+            cue = self._deferred.put(sense_class, text, must_deliver=must_deliver)
             sensory_stage(
                 "inject", "speech", str(uuid.uuid4()),
                 f"deferred class={cue.sense_class} text={text[:60]!r}",
@@ -1491,7 +1516,16 @@ class NovaSonic:
         gen = self._session_gen  # capture at scheduling time
 
         try:
-            asyncio.run_coroutine_threadsafe(self._send_user_text(text, gen), self._loop)
+            # "sent" below means "handed to the loop" — the caller is a
+            # callback that cannot wait for the wire. must_deliver rides along
+            # so the coroutine can put the answer on the retry queue if the
+            # generation has rotated by the time it runs, or the send raises.
+            asyncio.run_coroutine_threadsafe(
+                self._send_user_text(
+                    text, gen, must_deliver=must_deliver, sense_class=sense_class
+                ),
+                self._loop,
+            )
             self._note_interactive_sent()
             # NOT liveness input: a quiet body cue or a tool result legitimately
             # gets no answer from the model (robot, 2026-09-06). Only sustained
@@ -1501,13 +1535,47 @@ class NovaSonic:
             return "dropped-scheduling"
         return "sent"
 
-    async def _send_user_text(self, text: str, gen: int) -> None:
+    async def _send_user_text(
+        self,
+        text: str,
+        gen: int,
+        *,
+        must_deliver: bool = False,
+        sense_class: str | None = None,
+        retry_item: MustDeliverItem | None = None,
+    ) -> bool:
         """The one wire path a USER text message takes: start / text / end.
 
-        Shared by ``inject_text`` and the deferred-cue drain so a parked cue
-        reaches Bedrock through *exactly* the same events, under the same
-        ``_inject_lock`` serialisation and the same stale-session check — the
-        deferral changes when a cue is sent, never how.
+        Shared by ``inject_text``, the deferred-cue drain and the must-deliver
+        retry drain so every text reaches Bedrock through *exactly* the same
+        events, under the same ``_inject_lock`` serialisation and the same
+        stale-session check — a deferral changes when a text is sent, never how.
+
+        Args:
+            text: exactly what goes on the wire (already age-annotated, if the
+                caller is a drain).
+            gen: the session generation captured when this send was scheduled.
+                A send is discarded rather than delivered into a session the
+                caller never spoke to.
+            must_deliver: this text is an *answer*, not a body cue. A stale
+                generation or a failed send then puts it back on the bounded
+                retry queue (one ``dropped ... requeued=true`` senselog line)
+                instead of losing it — which is the whole point: scheduling a
+                coroutine is not delivery, and ``inject_text`` has already
+                returned ``"sent"`` to a caller that cannot wait.
+            sense_class: the rules ``sense:`` value, carried onto the queued
+                item so a retry is parked under the same class.
+            retry_item: the queue item this send came from, when it came from
+                one. Re-queuing *it* (rather than a fresh item built from
+                ``text``) is what keeps the ORIGINAL, un-annotated text and the
+                original arrival stamp on the queue, and what advances the
+                attempt counter towards
+                :data:`MUST_DELIVER_MAX_ATTEMPTS`.
+
+        Returns:
+            ``True`` only when ``contentStart``, ``textInput`` and
+            ``contentEnd`` all reached the wire without raising under a
+            matching generation; ``False`` otherwise.
         """
         lock = self._inject_lock
         if lock is None:
@@ -1518,7 +1586,12 @@ class NovaSonic:
         content_name = str(uuid.uuid4())
         async with lock:
             if not self._active or self._session_gen != gen:
-                return  # session restarted — discard stale inject
+                # Session restarted — this text belongs to a conversation that
+                # is gone. A body cue is discarded (as it always was); an
+                # answer goes back on the retry queue for the next session.
+                self._retry_or_drop("stale-session", text, must_deliver, sense_class, retry_item)
+                return False
+            ok = True
             try:
                 await self._send({
                     "contentStart": {
@@ -1539,6 +1612,7 @@ class NovaSonic:
                 })
             except Exception as e:
                 logger.warning(f"inject_text send failed: {e}")
+                ok = False
             finally:
                 try:
                     await self._send({
@@ -1547,8 +1621,45 @@ class NovaSonic:
                             "contentName": content_name,
                         }
                     })
-                except Exception:
-                    pass
+                except Exception as e:  # noqa: BLE001 - a half-sent text is not delivered
+                    logger.warning(f"inject_text contentEnd failed: {e}")
+                    ok = False
+            if not ok:
+                self._retry_or_drop("send-failed", text, must_deliver, sense_class, retry_item)
+            return ok
+
+    def _retry_or_drop(
+        self,
+        reason: str,
+        text: str,
+        must_deliver: bool,
+        sense_class: str | None,
+        retry_item: MustDeliverItem | None,
+    ) -> None:
+        """Put a failed must-deliver answer back on the queue, or give up on it.
+
+        A plain (non-must-deliver) text is a body cue: it is discarded here
+        exactly as it always was, with no line of its own — the caller's own
+        ``dropped``/warning line already named it.
+        """
+        if not must_deliver:
+            return
+        item = (retry_item or MustDeliverItem(
+            text=text, sense_class=sense_class, t=time.monotonic()
+        )).retried()
+        if item.attempts >= MUST_DELIVER_MAX_ATTEMPTS:
+            sensory_stage(
+                "inject", "speech", str(uuid.uuid4()),
+                f"dropped reason=must-deliver-exhausted attempts={item.attempts} "
+                f"text={item.text[:60]!r}",
+            )
+            return
+        depth = self._enqueue_must_deliver(item)
+        sensory_stage(
+            "inject", "speech", str(uuid.uuid4()),
+            f"dropped reason={reason} requeued=true attempts={item.attempts} "
+            f"depth={depth} text={item.text[:60]!r}",
+        )
 
     # ------------------------------------------------------------------
     # Must-deliver retry queue (a session gap is not a drop)
@@ -1564,24 +1675,35 @@ class NovaSonic:
         is evicted, with one named senselog line, because a newer answer is
         the one still worth saying.
         """
+        depth = self._enqueue_must_deliver(
+            MustDeliverItem(text=text, sense_class=sense_class, t=time.monotonic())
+        )
+        sensory_stage(
+            "inject", "speech", str(uuid.uuid4()),
+            f"queued reason=inactive depth={depth} text={text[:60]!r}",
+        )
+        return "queued-inactive"
+
+    def _enqueue_must_deliver(self, item: MustDeliverItem) -> int:
+        """Append *item* to the bounded queue; returns the resulting depth.
+
+        The single place the bound is enforced, shared by the first queueing
+        (``_queue_must_deliver``) and by every retry (``_retry_or_drop``): when
+        the queue is full the OLDEST entry is evicted, with one named senselog
+        line, because the newest answer is the one still worth saying.
+        """
         with self._must_deliver_lock:
             evicted = None
             if len(self._must_deliver_queue) >= MUST_DELIVER_QUEUE_MAX:
                 evicted = self._must_deliver_queue.popleft()
-            self._must_deliver_queue.append(
-                MustDeliverItem(text=text, sense_class=sense_class, t=time.monotonic())
-            )
+            self._must_deliver_queue.append(item)
             depth = len(self._must_deliver_queue)
         if evicted is not None:
             sensory_stage(
                 "inject", "speech", str(uuid.uuid4()),
                 f"dropped reason=must-deliver-overflow text={evicted.text[:60]!r}",
             )
-        sensory_stage(
-            "inject", "speech", str(uuid.uuid4()),
-            f"queued reason=inactive depth={depth} text={text[:60]!r}",
-        )
-        return "queued-inactive"
+        return depth
 
     async def _drain_must_deliver(self) -> None:
         """Deliver everything queued during the session gap, oldest first.
@@ -1594,7 +1716,13 @@ class NovaSonic:
 
         The 3 s throttle is deliberately not consulted (the item already
         waited out a whole session restart); it is re-armed afterwards so
-        the injects that follow are spaced normally again.
+        the injects that follow are spaced normally again — but only if
+        something was really delivered: an item counts as delivered only when
+        ``_send_user_text`` returns ``True``. A stale generation or a failed
+        send has already put the answer back on the queue for the next start,
+        and ``MustDeliverItem.attempts`` (capped at
+        :data:`MUST_DELIVER_MAX_ATTEMPTS`) is what stops a permanently broken
+        wire from retrying the same text forever.
         """
         with self._must_deliver_lock:
             items = list(self._must_deliver_queue)
@@ -1621,8 +1749,17 @@ class NovaSonic:
                 "inject", "speech", str(uuid.uuid4()),
                 f"drained-queued age={age:.1f}s text={text[:60]!r}",
             )
-            await self._send_user_text(text, gen)
-            delivered += 1
+            # The ORIGINAL item — not the age-annotated text — is what goes
+            # back on the queue if this send fails, so a retry is annotated
+            # once, at its own send time, with its own age.
+            if await self._send_user_text(
+                text,
+                gen,
+                must_deliver=True,
+                sense_class=item.sense_class,
+                retry_item=item,
+            ):
+                delivered += 1
 
         if delivered:
             self._last_inject_time = time.time()
@@ -1666,10 +1803,34 @@ class NovaSonic:
         except Exception as e:  # noqa: BLE001 - a lost cue must not kill the loop
             logger.warning(f"deferred drain scheduling failed: {e}")
 
+    def _as_must_deliver_item(self, cue: deferred_cues.DeferredCue) -> MustDeliverItem:
+        """A retry-queue item for a parked answer, keeping the age it earned.
+
+        The deferred slot runs on its own (injectable) clock, so the cue's
+        stamp cannot be reused directly; its *age* can, which is what the
+        drain's "this arrived Ns ago" annotation is made of.
+        """
+        return MustDeliverItem(
+            text=cue.text,
+            sense_class=cue.sense_class,
+            t=time.monotonic() - cue.age(self._deferred.now()),
+        )
+
     async def _drain_deferred(self, gen: int) -> None:
         """Deliver the parked cues, newest text per sense class, oldest first."""
         if not self._active or self._session_gen != gen:
-            return  # session restarted — the cues belong to a conversation that is gone
+            # Session restarted — the cues belong to a conversation that is
+            # gone. A body cue is discarded (delivering it into a session that
+            # never heard the utterance it interrupted would be a reaction to
+            # nothing); a parked *answer* goes onto the must-deliver retry
+            # queue instead, which is the whole point of the marker.
+            for cue in self._deferred.drain():
+                if cue.must_deliver:
+                    self._retry_or_drop(
+                        "stale-session", cue.text, True, cue.sense_class,
+                        self._as_must_deliver_item(cue),
+                    )
+            return
         cues = self._deferred.drain()
         if not cues:
             return
@@ -1690,7 +1851,19 @@ class NovaSonic:
             # waited out a whole utterance, which is what the throttle exists
             # to enforce. It is re-armed below so the injects that follow the
             # drain are spaced normally again.
-            await self._send_user_text(text, gen)
+            #
+            # A parked *answer* keeps its marker across the deferral: if the
+            # session rotated, or this send raises, it goes onto the
+            # must-deliver retry queue — carrying the cue's ORIGINAL text, so
+            # the age annotation is applied once, at whichever send finally
+            # reaches the wire.
+            await self._send_user_text(
+                text,
+                gen,
+                must_deliver=cue.must_deliver,
+                sense_class=cue.sense_class,
+                retry_item=self._as_must_deliver_item(cue) if cue.must_deliver else None,
+            )
             if self.on_deferred_delivered is not None:
                 try:
                     self.on_deferred_delivered(text, cue.sense_class)
