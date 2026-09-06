@@ -4,7 +4,7 @@
   "schema_version": 6,
   "status": "exported",
   "created": "2026-09-06T05:50:27Z",
-  "updated": "2026-09-06T08:35:13Z",
+  "updated": "2026-09-06T09:52:19Z",
   "claims": [
     {
       "id": "c1",
@@ -869,6 +869,15 @@
       "resolved": false,
       "resolution": "",
       "resolution_claim_id": null
+    },
+    {
+      "id": "v7",
+      "text": "Camera capture only in the still 'grace period' (Ori, 2026-09-06): run the runtime's face detection only when the robot is not self-moving, the way the mic's moving-floor gate already admits audio only when the head is still \u2014 cuts the CM4 load that dropped the tick rate from ~50 Hz to ~7 Hz once frames flowed, and avoids motion-blurred detections. Runtime (reachy-mini-cli) work; a tracking lock needs the gate to allow detection during small slews or a short settle window, or the lock's held-target/face-lost timers must absorb the pauses.",
+      "kind": "follow_up",
+      "claim_id": null,
+      "resolved": false,
+      "resolution": "",
+      "resolution_claim_id": null
     }
   ],
   "scope_entries": [
@@ -1109,6 +1118,23 @@
       "finding": "textOutput role=USER is handled before audioOutput sets _speaking, which the gate relies on (assumption c33); transcripts arrive fragmented and sometimes with the name after the request, which the gate cannot serve retroactively (park v4).",
       "seeds": [
         "c33"
+      ]
+    },
+    {
+      "id": "s27",
+      "surface": "robot: fuser /dev/video0, /proc/<pid>/fd of pipewire (973) and wireplumber (979), dpkg -l, apt history (read-only, 2026-09-06 ~10:10 local)",
+      "finding": "The camera is not dead \u2014 it is TAKEN: PipeWire's session manager (WirePlumber 0.5.8 + libspa-0.2-libcamera 1.4.2, both from the OS image of 2026-01-14) holds /dev/media0-1 and /dev/video0,1,13-16 since boot, so the daemon's libcamera pipeline fails at acquisition; the daemon process holds no video fd; no package changed since it worked on 2026-08-26 \u2014 a boot race. Supersedes the #138 (mid-run EOS) diagnosis in v1's resolution. Fix: disable WirePlumber's libcamera/v4l2 monitors and re-acquire media; posted on reachy-mini-cli #176.",
+      "seeds": [
+        "c41"
+      ]
+    },
+    {
+      "id": "s28",
+      "surface": "robot + spark: daemon journal 'Releasing media hardware' vs /ws/sdk connections from the workstation; spark's ~/.config/systemd/user/reachy-{embody,bus-feed,runtime}.service (read-only inspection, then stopped/disabled on spark) \u2014 2026-09-06 ~09:47Z",
+      "finding": "Second stacked cause of the dead camera: spark's operator-local 'reachy agent embody --media-profile robot' unit crash-looped and reconnected to the wireless daemon every ~6 s; each connection made the daemon release its media hardware two seconds after the runtime configured its stream, so the runtime's video receive pipeline hit EOS ('Internal data stream error'). With WirePlumber's camera monitors disabled and the spark units stopped, the daemon holds the camera, 69/69 snapshots carry a frame, and the harness eyes watch logged 'restored after=251s'. Item-2 live checks are unblocked.",
+      "seeds": [
+        "c41",
+        "c38"
       ]
     }
   ],

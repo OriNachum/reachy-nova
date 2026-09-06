@@ -2,7 +2,7 @@
   "plan_slug": "features-and-bugs-round-25",
   "schema_version": 2,
   "created": "2026-09-06T07:50:25Z",
-  "updated": "2026-09-06T08:56:32Z",
+  "updated": "2026-09-06T09:57:36Z",
   "deviations": [
     {
       "id": "d1",
@@ -25,6 +25,17 @@
       "status": "proposed",
       "classification": "acceptable",
       "seq": 37
+    },
+    {
+      "id": "d3",
+      "what": "t20 live acceptance surfaced two harness-side fixes applied on the round branch after the review round",
+      "task_ref": "t20",
+      "reason": "two behaviours only visible with the camera live and a person at the desk: replies opened with '(look-at-face)' / 'release_face' spoken as words (persona now forbids spoken tool names and self-written parentheses, both copies, test-pinned), and the runtime's face-lost notice fired every 20-40 s at the ~7 Hz tick under face detection, each one a spoken 'they wandered off' while the person sat there (motion/face-lost demoted to voice: none until reachy-mini-cli #179)",
+      "affects": [],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable",
+      "seq": 42
     }
   ],
   "evidence": [
@@ -692,6 +703,82 @@
       "status": "proposed",
       "superseded": false,
       "seq": 36
+    },
+    {
+      "id": "e36",
+      "obligation_ref": "o4",
+      "test_ref": "robot journals (harness pid 17745 + runtime) 2026-09-06 10:48:57-10:49:45 local, Ori in view",
+      "behavior_text": "conversation entered at 10:48:58 -> look_at_sound ok; lock_face refused 'no face known' at +0 s then CONFIRMED at +3.3 s (attempt 2, 'locked after=3.3s'); lock held through the exchange; conversation fade at 10:49:43 -> release_face confirmed reason=requested within the same second; Nova spoke again at 10:49:44 -> re-locked in 0.3 s",
+      "contract_text": "h4 live half: lock within 2 s of the first transcript, survives a gap, release within window + 2 s",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "both journals quoted; the first lock landed 3.3 s (not 2 s) after entry because the first attempt preceded the first detection \u2014 the retry schedule did its job; Ori's verdict: 'look at me works, but very slow, and not my face on center'",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T09:49:45Z",
+        "commit": "6619e82"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 38
+    },
+    {
+      "id": "e37",
+      "obligation_ref": "o8",
+      "test_ref": "harness journal 10:52:04 local",
+      "behavior_text": "heard 'nova, look at me.' -> '[SENSE stage=attention source=nova event=window] opened by=nova'",
+      "contract_text": "h8: 'Nova, ...' from cold gets a reply (the window opened; the reply itself is covered by the feed lines)",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "journal line quoted; the five-by-five count of h8 was not run",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T09:52:04Z",
+        "commit": "6619e82"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 39
+    },
+    {
+      "id": "e38",
+      "obligation_ref": "o27",
+      "test_ref": "robot MQTT samples 09:47:46Z (69/69 frames) and 09:5x (67/67 frames), harness eyes 'restored after=251.41s' at 10:47:54 local, daemon journal",
+      "behavior_text": "camera restored after (1) WirePlumber's libcamera/v4l2 monitors were disabled and (2) spark's crash-looping embody unit stopped; item-2 live checks were then run with Ori in view",
+      "contract_text": "h33: the camera state at acceptance is recorded from a live sample and item-2 checks are marked blocked or run",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "live samples and journal lines quoted; reachy-mini-cli #176 carries the write-up",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T09:48:17Z",
+        "commit": "6619e82"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 40
+    },
+    {
+      "id": "e39",
+      "obligation_ref": "o18",
+      "test_ref": "harness journal 10:44-10:56 local, Ori at the desk",
+      "behavior_text": "three USER transcripts in twelve minutes: 'hmm' (cold, nameless) and one ASR-hallucinated refusal sentence produced two 'dropped reason=not-addressed' drops with no audio; 'nova, look at me.' opened the window ('event=window opened by=nova') and was answered",
+      "contract_text": "h23 live half: cold nameless speech produces no audio; 'Nova, ...' from cold gets a spoken reply",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "journal lines quoted; the five-by-five count was not run",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T09:52:04Z",
+        "commit": "6619e82"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 41
     }
   ],
   "deltas": [
@@ -760,6 +847,34 @@
       ],
       "evidence_refs": [
         "e32"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false
+    },
+    {
+      "id": "b6",
+      "kind": "added",
+      "behavior_text": "the runtime's face-lost notices reach Sonic every 20-40 s while a lock is held on a moving person (seven 'motion/face-lost' injects in three minutes, 10:50:33-10:53:26) \u2014 noisy with the 6.7 Hz tick and 0.5 s detection cadence; and the gaze stack re-submits lock_face ('already locked', ok:true) after an engine-heartbeat flap under that load",
+      "caused_by": [
+        "c7"
+      ],
+      "evidence_refs": [
+        "e36"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false
+    },
+    {
+      "id": "b7",
+      "kind": "amended",
+      "behavior_text": "the runtime's own lock-release event reaches the gaze stack with reason=None ('runtime dropped the lock reason=None') although the runtime published reason=requested \u2014 the bus tap reads the reason from the wrong level of the event payload; cosmetic, the belief still clears",
+      "caused_by": [
+        "c35"
+      ],
+      "evidence_refs": [
+        "e36"
       ],
       "origin": "llm",
       "status": "proposed",
