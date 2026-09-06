@@ -166,10 +166,13 @@ confirmation; quoted as recorded.
   log lines only; an out-of-process `status` reports `eyes: unknown`
 - the runtime's `CHANGELOG` bump script left an empty 0.52.0 section above
   t15's Unreleased entry; folded by hand in `ca64951`
-- the Sonar finding S3415 (assertion argument order in
-  `tests/test_harness_speaking_attention.py`) is left open: every equality
-  in that file is actual-first, so it reads as a false positive for the
-  operator to accept in the Sonar UI
+- the two Sonar findings left at the end were fixed before the merge on
+  the operator's ask (`59d83f8`, `25cf20e`): `_drain_deferred` split into
+  three methods (cognitive complexity 19 → under 15, no behaviour change),
+  and the one assertion in `tests/test_harness_speaking_attention.py` that
+  compared a tuple literal on the left (Sonar's "expected first") now
+  compares two names — the rule's flow locations, read from the API, were
+  what identified it among 28 "actual first" assertions
 
 ## Drift From Plan
 
@@ -195,7 +198,7 @@ confirmation; quoted as recorded.
 - runtime tests: reachy-mini-cli `uv run pytest -n auto` at `b3fd068` — 5668 passed, 7 skipped, 1 failed (`tests/test_vision_scene_integration.py::test_integration_scene_default_model_resolves_via_senses_role`, a live-gateway test that fails identically on `origin/main`)
 - audit: `scratchpad/audit-t14.txt` (session) — no legacy imports under `reachy_nova/harness/`, `nova_browser.py` act path byte-unchanged, daemon paths `/api/media/{play_sound,sounds,sounds/upload,stop_sound}` and `/api/volume/{current,set}` only
 - lint: `markdownlint-cli2` on the touched docs — 0 new findings (pre-existing table-row MD013 in `gaze.md`/`attention.md`, list-style findings in `nova_browser.md`)
-- commits: `a144528..af9276c` on `spec/features-and-bugs-round-25` (spec+plan, 20 task merges, 1 follow-up, 5 Sonar fixes, 3 review-fix merges, 3 live-fix commits, 1 liveness merge, 1 prerequisite for #177, 1 base-layer revive, 1 reflex bypass)
+- commits: `a144528..25cf20e` on `spec/features-and-bugs-round-25` (spec+plan, 20 task merges, 1 follow-up, 7 Sonar fixes, 3 review-fix merges, 3 live-fix commits, 1 liveness merge, 1 prerequisite for #177, 1 base-layer revive, 1 reflex bypass, delivery-doc commits)
 - runtime commits: `c8e2575..ca64951` on `feat/reachy-nova-25-names-select-face` (PR #178, merged as 0.52.0); device branch `wireless-motor-enable` @ `cb1ab7c` (0.52.1, carrying #180's knobs ahead of their merge to main)
 - PRs / issues: OriNachum/reachy-nova#26 (this round), #25 (closed by it), #8 (closed by it), #27 (filed by the runtime agent, landed `67d5d75`); agentculture/reachy-mini-cli#178 (runtime PR, merged), #175 (enrolled-face preference), #176 (camera pipeline failure, two causes), #177 (configurable names, the runtime agent's; shipped as #182, v0.53.0 on main, not yet on the device branch), #180 (detection knobs, merged as v0.53.1 `21847ac`; the device branch `wireless-motor-enable` still `cb1ab7c`), #179 (detect only in the still period), #180 (detection knobs), #181 (open-loop aim), #183 (base layer never re-seeded after a lock)
 - robot journal, harness pid 15925 (round branch `d5f044b`, 09:31 local): `switches ... face_hold=on think_posture=on attention_gate=on`; `persona ... chars=1615`; `face-nod retired id=nova-face-noticed changed=True verdict=reload confirmed`; `start-hygiene release ok=true` / `start-hygiene clear goal ok=true`; `layer wander -> conversation` at 09:31:17, `look at sound ok=true`, `lock face attempt=1..4 ... error=no face known`, `layer conversation -> wander` at 09:32:03 with `lock never held: refusals=4`; `[SENSE stage=vision source=runtime event=frames] dropped reason=no-frames after=60s` at 09:32:15
@@ -211,7 +214,7 @@ confirmation; quoted as recorded.
 - camera intrinsics from the daemon (`GET /api/camera/specs`): K fx ≈ 2002, cx ≈ 1906 on the 3840-wide sensor → ≈ 87° horizontal field of view; against the face-lock's 20° yaw gain per half-frame the aim settles at ≈ 0.31 of the face angle (#181)
 - device overlay `~/.local/state/reachy/behavior/rules.toml`: `id = "nova-face-noticed"` / `enabled = false` in the nova-managed block; device drop-in `~/.config/systemd/user/reachy-runtime.service.d/override.conf`: `REACHY_FACE_DETECT_INTERVAL=1.0`, `REACHY_FACE_DETECT_MAX_WIDTH=640`
 - deviations: `devague deviate --list` — `d1`–`d9`, all proposed; deltas `b1`–`b12`, obligations `o1`–`o28`, evidence `e1`–`e49`, all proposed
-- PR #26 review: 10 Qodo threads, 10 answered, 10 resolved; Sonar quality gate passed, 1 open finding (S3415) left for the operator; CI green at `61bde6f`, `76186d0` and `29e65dd`, running at `af9276c`
+- PR #26 review: 10 Qodo threads, 10 answered, 10 resolved; Sonar quality gate passed with 0 open issues at `25cf20e`; CI green at every pushed head from `61bde6f` to `25cf20e`
 
 ## Delivery Claims
 
@@ -248,6 +251,5 @@ confirmation; quoted as recorded.
 - the camera died silently a third time (≈12:43–13:29, no daemon log line; a runtime restart restores it) — reachy-mini-cli #176 carries the recurrence; the user journals rotate after ~35 min on the 91 %-full card, so the eyes lines are the only durable trace and only while the harness process lives
 - the camera's two causes need durable fixes outside this repo: the WirePlumber config belongs in the OS image or the runtime's `service` setup, and the daemon should not let a second SDK client release media held by the runtime (both on reachy-mini-cli #176)
 - confirm or reject deviations `d1`–`d9`, obligations `o1`–`o28`, evidence `e1`–`e49`, deltas `b1`–`b12` (all proposed)
-- Sonar S3415 on `tests/test_harness_speaking_attention.py:150` — accept as a false positive in the Sonar UI, or ask for the two `in` assertions to be reshaped
-- PR #26 is open with all ten review threads resolved; the operator wants everything right on the robot before it merges; merging publishes 0.5.0 to PyPI, after which the robot's checkout goes back to `main`
+- PR #26: all ten review threads resolved, Sonar clean, CI green; the operator asked for the two Sonar findings fixed first and then the merge; merging publishes 0.5.0 to PyPI, after which the robot's checkout goes back to `main`
 - follow-ups noted, not built: a trailing-name grace for fragmented transcripts (park `v4`); multi-angle enrolment (park `v5`, #127); a wandering "thinking" runtime library entry instead of the static gaze-hold (decision `c19`); the runtime's lock still inhibits feel-alive wholesale and never re-seeds it (the antenna sway and the base-layer revive are the harness's workarounds, `d5`, `d8`; reachy-mini-cli #183 is the fix); observations: the cognition feed logs every assistant line twice (pre-existing), one ASR-hallucinated "refusal" transcript (10:49:59), memory replay carrying odd topics
