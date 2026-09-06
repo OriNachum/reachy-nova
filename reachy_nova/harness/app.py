@@ -15,25 +15,39 @@ The graph::
     sonic.on_audio_output ──► SonicSpeaker ──► daemon HTTP play  (arms the gate)
     sonic.on_interruption ──► speaker.preempt()          (barge-in / mouth loss)
     sonic.on_tool_use ─thread─► IntentTools.execute ──► sonic.send_tool_result
-    bus reachy/events/# ──rules.yaml──► sonic.inject_text (throttled inside)
+    bus reachy/events/# ──rules.yaml──► _inject ──► sonic.inject_text
+                                              └────► ledger.append("sense")
+                                              └────► mood.note(pat|face)
+    bus react: lite entries ──► LiteReactor ──► _inject / intents.run_behavior
     bus reachy/state/clip ──VisionLeg──NovaOmni──► sonic.inject_text
     NovaBrowser.on_progress ──► sonic.inject_text        (browse tool, flag-gated)
     memory (qq) ──MemoryLeg──rules.yaml──► sonic.inject_text
     sonic.on_transcript(ASSISTANT) ──► CognitionFeed.message  (NDJSON, stdout)
+    sonic.on_transcript(USER|ASSISTANT) ──► ledger.append ──► MemoryCompactor
+                                       └──► mood.note(user_turn|assistant_turn)
+    MemoryCompactor.history ──► sonic history replay (at every session start)
     NetworkUnit joined/moved ──NetworkReactor──► sonic.request_immediate_restart
                                               └► kiro_unit.request_restart
 
 Optional legs degrade, never crash: the browser exists only when
 ``NOVA_ACT_ENABLED`` is on, the vision leg only when ``NOVA_OMNI_MODEL_ID`` is
 set (the Omni preview is model-config-gated) AND the bus built (it supplies the
-retained clip state). Every absent leg emits the standard
-``component absent name=<leg> reason=<why>`` senselog line, so "we started
-without seeing" is visible rather than inferred.
+retained clip state), the ledger/compactor pair only when ``NOVA_MEMORY`` is on,
+and the Lite reaction tier only when ``NOVA_LITE_REACTIONS`` is on. Every absent
+leg emits the standard ``component absent name=<leg> reason=<why>`` senselog
+line, so "we started without seeing" — or without remembering — is visible
+rather than inferred.
+
+The switches themselves (:mod:`reachy_nova.harness.switches`) are resolved and
+logged FIRST, before anything is constructed, so the journal's opening lines
+say what this process is going to be before it is anything at all.
 """
 
 from __future__ import annotations
 
 import threading
+
+import numpy as np
 from pathlib import Path
 
 from .. import config
@@ -45,19 +59,38 @@ from .cognition_feed import CognitionFeed
 from .daemon_client import DaemonClient, restore_volume
 from .gate import EchoGate, resolve_policy
 from .hearing import TeeHearing
+from .ledger import Ledger
 from .lock_state import LockState
+from .mood import Mood
 from .network import NetworkUnit
+from .persona import DEFAULT_PERSONA
+from .persona import read as read_persona
 from .quiet import QuietState
 from .rules_overlay import upsert_rule
 from .sense_history import SenseHistory
 from .speaking import SonicSpeaker
+from .switches import Switches
+from .switches import log as log_switches
+from .switches import resolve as resolve_switches
 from .tools import TOOL_SPECS, IntentTools
 
-HARNESS_SYSTEM_PROMPT = (
-    "You are Nova, the mind of a small Reachy Mini robot. You hear the room "
-    "through your microphones and speak aloud through your speaker. Keep your "
-    "words short, warm, and natural — you are a curious household companion, "
-    "not an assistant reading documentation. "
+# --------------------------------------------------------------------------- #
+# The system prompt: WHO (persona.py, on disk) + HOW (the tool guide, here)     #
+# --------------------------------------------------------------------------- #
+
+#: The Nova 2 Sonic voice Nova speaks with (en-GB). The system prompt steers
+#: lexical style but not accent or pitch, so the voice id is the only knob on
+#: the SOUND of the personality (AWS nova2-userguide/sonic-language-support).
+SONIC_VOICE_ID = "amy"
+
+#: The tool half of the system prompt: which tool moves what, and what to say
+#: when the engine will not or cannot do it. Deliberately mechanics ONLY —
+#: every sentence about who Nova is lives in ``config/persona/nova.md`` (or
+#: :data:`~reachy_nova.harness.persona.DEFAULT_PERSONA` when that file is not
+#: on this box), so an operator can rewrite the character without touching the
+#: tool contract and vice versa. The word "assistant" appears nowhere in
+#: either half on purpose: it is the exact register this round removed.
+TOOL_GUIDE = (
     "You act through your body with tools: run_behavior plays a named gesture "
     "(including the gaze one-shots look-at-sound and look-at-face), goto "
     "moves your head and antennas, declare_goal and set_mode steer your "
@@ -68,15 +101,47 @@ HARNESS_SYSTEM_PROMPT = (
     "If a tool answers that the engine did not confirm, say your body did "
     "not respond; if it answers with an unknown-kind error, say your body "
     "does not know that move yet. "
-    "Body cues arrive in parentheses — react to them naturally, with a word, "
-    "a sound, or nothing at all, and never describe your own mechanism (no "
-    "'reflex', 'rule', 'my body reacted on its own') unless someone asks why. "
-    "When someone asks why you did something, what you felt, or what just "
-    "happened, call recall_senses and answer from what it returns. "
     "When someone tells you to stop following or look away, call "
-    "release_face; when they ask why you did something, call recall_senses "
-    "before answering."
+    "release_face; when they ask why you did something, what you felt, or "
+    "what just happened, call recall_senses before answering."
 )
+
+
+#: Longest scene description Nova is handed as a glance; Omni answers run to
+#: 850 characters and Sonic narrated every one of them (robot, 2026-09-06).
+VISION_CUE_MAX_CHARS = 240
+
+
+def render_vision_cue(text: str) -> str:
+    """Shape a scene description as a brief body cue rather than a report.
+
+    Parenthesised like every other cue, cut at the last sentence end inside
+    :data:`VISION_CUE_MAX_CHARS`, and carrying the same brief marker the
+    nervous-system rules append — so the model treats a glance as something
+    to react to with a word or nothing, not something to read out.
+    """
+    body = " ".join(str(text or "").split())
+    if len(body) > VISION_CUE_MAX_CHARS:
+        cut = body[:VISION_CUE_MAX_CHARS]
+        end = max(cut.rfind(". "), cut.rfind("; "))
+        body = (cut[: end + 1] if end > 60 else cut.rstrip()) 
+    return f"(you glance around: {body}) (react briefly if at all)"
+
+
+#: Lite's vocalize vocabulary -> the legacy synthesiser's kinds.
+VOCALIZE_KINDS = {"chirp": "chirp_up", "trill": "trill", "purr": "purr_tone"}
+
+
+def build_system_prompt(persona_text: str) -> str:
+    """The full system prompt: the persona, a blank line, then the tool guide."""
+    return f"{persona_text}\n\n{TOOL_GUIDE}"
+
+
+#: Module-level default, kept for importers that want "the prompt Nova ships
+#: with" without resolving the persona file: the EMBEDDED persona plus the tool
+#: guide. ``build_app()`` does not use it — it builds the same shape from
+#: whatever :func:`reachy_nova.harness.persona.read` resolved at startup.
+HARNESS_SYSTEM_PROMPT = build_system_prompt(DEFAULT_PERSONA)
 
 # --------------------------------------------------------------------------- #
 # The standing face rule (t10)                                                 #
@@ -311,6 +376,107 @@ class BrowserComponent:
 
 
 # --------------------------------------------------------------------------- #
+# Memory + reaction-context helpers                                            #
+# --------------------------------------------------------------------------- #
+
+#: Sense classes that move the mood. Every other class (``sound``, ``vision``,
+#: ``None``) is a mood no-op — :meth:`Mood.note` would ignore it anyway, but
+#: naming the two here keeps "what changes how Nova feels" readable.
+MOOD_SENSE_CLASSES = ("pat", "face")
+
+#: How many recent senses ride along in the Lite reactor's context.
+REACTION_SENSES = 5
+
+#: How many trailing USER/ASSISTANT exchanges ride along with them.
+REACTION_EXCHANGES = 4
+
+#: Bounded duration submitted with a Lite-planned gesture. The engine refuses
+#: a looping behavior with no duration (see :data:`FACE_RULE`'s note), and
+#: "about 2 seconds" is what the ``run_behavior`` tool description advertises.
+REACTION_GESTURE_DURATION_S = 2.0
+
+
+def build_memory(switches: Switches, quiet: QuietState) -> tuple[Ledger | None, object | None]:
+    """The ledger/compactor pair, or ``(None, None)`` with a named absence.
+
+    Total, like every other optional leg in this module: the switch being off,
+    a missing state dir, or an import that cannot resolve boto3 all degrade to
+    one ``component absent name=memory-ledger reason=<why>`` line. The pair is
+    all-or-nothing — a ledger nothing ever distils is just a growing file, so
+    a compactor that will not construct takes the ledger down with it.
+
+    (The separate ``name=memory`` line further down ``build_app`` is the qq
+    knowledge leg — a different, older leg that happens to share the word.)
+    """
+    if not switches.memory:
+        _stage(
+            "supervise",
+            "nova",
+            "component",
+            "component absent name=memory-ledger reason=switch-off",
+        )
+        return None, None
+    try:
+        from .memory_compactor import MemoryCompactor
+
+        ledger = Ledger(quiet=quiet)
+        return ledger, MemoryCompactor(ledger)
+    except Exception as err:  # noqa: BLE001 - no memory must never mean no voice
+        _stage(
+            "supervise",
+            "nova",
+            "component",
+            f"component absent name=memory-ledger reason={err}",
+        )
+        return None, None
+
+
+def render_memory_paragraph(memory: dict) -> str:
+    """The day's memory as ONE short paragraph for the Lite reactor's context.
+
+    ``memory`` is :meth:`MemoryCompactor.memory`'s shape — ``{"topics": [...],
+    "items": [...]}``, each entry a dict with a ``text``. Returns ``""`` when
+    there is nothing remembered yet, which the reactor renders as "(none)"
+    rather than as an empty label.
+    """
+
+    def texts(key: str) -> list[str]:
+        entries = memory.get(key) or []
+        out = []
+        for entry in entries:
+            text = str(entry.get("text", "")).strip() if isinstance(entry, dict) else ""
+            if text:
+                out.append(text)
+        return out
+
+    parts = []
+    topics = texts("topics")
+    if topics:
+        parts.append("talked about " + ", ".join(topics))
+    items = texts("items")
+    if items:
+        parts.append("worth remembering: " + "; ".join(items))
+    return ". ".join(parts)
+
+
+def recent_exchanges(ledger: Ledger | None, limit: int = REACTION_EXCHANGES) -> list[dict]:
+    """The last *limit* USER/ASSISTANT ledger lines as ``{"role", "text"}``.
+
+    ``[]`` when there is no ledger (``NOVA_MEMORY=0``) — the reactor's context
+    simply carries no exchanges, exactly as it did before this round.
+    """
+    if ledger is None:
+        return []
+    records = ledger.read()
+    exchanges = [
+        {"role": str(record.get("kind")), "text": str(record.get("text", ""))}
+        for record in records
+        if record.get("kind") in ("USER", "ASSISTANT") and str(record.get("text", "")).strip()
+    ]
+    return exchanges[-limit:]
+
+
+# --------------------------------------------------------------------------- #
 # The composition root                                                         #
 # --------------------------------------------------------------------------- #
 
@@ -319,26 +485,62 @@ def build_app() -> list[object]:
     """Construct and wire every harness component; return them in start order."""
     from ..nova_sonic import NovaSonic  # heavy AWS SDK import kept out of module import
 
+    # switches FIRST (t14/c33) — before anything is built, so the journal's
+    # opening lines name every resolved value. Fails open: an unrecognised
+    # value is the new default plus a warning, never a silently-off feature.
+    switches = resolve_switches()
+    log_switches(switches)
+
+    # persona (t3/c8) — WHO Nova is, read from disk once. One call, because
+    # each call that falls back to the embedded default logs its own line.
+    persona = read_persona(switches.persona_path)
+    _stage(
+        "supervise",
+        "nova",
+        "persona",
+        f"persona source={persona.source} chars={len(persona.text)}",
+    )
+
     gate = EchoGate()
     feed = CognitionFeed()
 
-    # timed quiet (t11/t12) — ONE object, three readers: the speaker gates
-    # playback on it, the bus marks every inject with it, and the
-    # stay_silent/end_silence tools arm and release it. Constructed here
-    # rather than inside any of the three so they can never disagree about
-    # whether the robot is currently supposed to be quiet. It reloads a
-    # still-future deadline off disk, so a restart inside a quiet window
-    # comes back quiet instead of loudly reintroducing itself.
+    # timed quiet (t11/t12) — ONE object, four readers now: the speaker gates
+    # playback on it, the bus marks every inject with it, the
+    # stay_silent/end_silence tools arm and release it, and the ledger writes
+    # nothing at all while it is armed. Constructed here rather than inside
+    # any of them so they can never disagree about whether the robot is
+    # currently supposed to be quiet. It reloads a still-future deadline off
+    # disk, so a restart inside a quiet window comes back quiet instead of
+    # loudly reintroducing itself.
     quiet = QuietState()
 
-    speaker = SonicSpeaker(gate=gate, quiet=quiet)
+    # mood (t6/c9) — ALWAYS constructed: four floats and a lock, no I/O and no
+    # failure mode worth degrading over (same reasoning as the sense history
+    # and the network leg). Fed from the inject wrapper (pat/face) and from
+    # transcripts (user/assistant turns), read by the Lite reactor's context.
+    mood = Mood()
+
+    speaker = SonicSpeaker(gate=gate, quiet=quiet, chunked=switches.chunked_playback)
+
+    # memory (t4/t10, c13) — the raw ledger and the Lite compactor that
+    # distils it. Built BEFORE Sonic because Sonic takes the compactor's
+    # history as a constructor argument: the replay hook is what makes a
+    # session rotation keep the topic (c12) instead of starting blank.
+    ledger, compactor = build_memory(switches, quiet)
 
     sonic = NovaSonic(
-        system_prompt=HARNESS_SYSTEM_PROMPT,
+        system_prompt=build_system_prompt(persona.text),
         tools=TOOL_SPECS,
         on_audio_output=None,  # bound below once speaker exists
         region=config.region(),
         model_id=config.sonic_model_id(),
+        voice_id=SONIC_VOICE_ID,
+        history_provider=None if compactor is None else compactor.history,
+        # Rotation waits for an idle moment, and playback lags generation by at
+        # least a chunk — so "is the speaker still saying the last reply out
+        # loud" is part of idle. Wired even with memory off: there is nothing
+        # to replay then, but a rotation must still not cut a chunk in half.
+        speaker_idle=lambda: speaker.idle,
     )
 
     # speak leg
@@ -464,8 +666,14 @@ def build_app() -> list[object]:
     def _on_transcript(role: str, text: str) -> None:
         if role == "ASSISTANT" and text.strip():
             feed.message(text)
+            if ledger is not None:
+                ledger.append("ASSISTANT", text)
+            mood.note("assistant_turn")
         elif role == "USER" and text.strip():
             _stage("hear", "nova", "transcript", f"heard {text[:120]!r}")
+            if ledger is not None:
+                ledger.append("USER", text)
+            mood.note("user_turn")
             # Playback-aware barge-in: Sonic's own interruption path only runs
             # while it is GENERATING, but the audible playback happens after
             # (upload + play on the daemon). A user transcript while the gate
@@ -476,6 +684,68 @@ def build_app() -> list[object]:
                 speaker.preempt()
 
     sonic.on_transcript = _on_transcript
+
+    # inject wrapper (t14) — the ONE seam every bus cue passes through on its
+    # way to the conversation. The bus used to hand its cues straight to
+    # ``sonic.inject_text``; three things now hang off the same call, and they
+    # hang off it HERE rather than inside the bus so the bus keeps knowing
+    # nothing about ledgers or moods. ``sense_class`` is a real keyword, which
+    # is what makes NovaBus pass it (it introspects the callable once).
+    def _inject(text: str, sense_class: str | None = None) -> None:
+        # The ledger records DELIVERED senses only (PR #24 review): a cue
+        # dropped as throttled/inactive never reached the model, and a
+        # deferred one is appended when the drain actually sends it (see
+        # sonic.on_deferred_delivered below). Mood is about what happened to
+        # the body, so it is noted either way.
+        status = sonic.inject_text(text, sense_class=sense_class)
+        if status == "sent" and ledger is not None:
+            ledger.append("sense", text, sense_class=sense_class)
+        if sense_class in MOOD_SENSE_CLASSES:
+            mood.note(sense_class)
+
+    if ledger is not None:
+        sonic.on_deferred_delivered = lambda text, sense_class: ledger.append(
+            "sense", text, sense_class=sense_class
+        )
+
+    # Lite reactor context (t11) — what the fast tier gets to reason with:
+    # the recent senses, the day's memory, the mood, and the last exchanges.
+    # Called on the reactor's OWN worker thread, so it never raises into it:
+    # a broken context is an empty context, not a lost reaction.
+    def _reaction_context() -> dict:
+        try:
+            senses = [str(entry.get("text", "")) for entry in history.recent(REACTION_SENSES)]
+        except Exception:  # noqa: BLE001
+            senses = []
+        try:
+            memory_text = "" if compactor is None else render_memory_paragraph(compactor.memory())
+        except Exception:  # noqa: BLE001
+            memory_text = ""
+        try:
+            exchanges = recent_exchanges(ledger)
+        except Exception:  # noqa: BLE001
+            exchanges = []
+        return {
+            "senses": senses,
+            "memory": memory_text,
+            "mood": mood.render(),
+            "exchanges": exchanges,
+        }
+
+    # A gesture the Lite plan named goes through the SAME spool every tool
+    # call uses — the reactor never touches the engine itself.
+    def _reaction_gesture(name: str) -> None:
+        try:
+            intents.execute(
+                "run_behavior", {"name": name, "duration": REACTION_GESTURE_DURATION_S}
+            )
+        except Exception as err:  # noqa: BLE001 - a refused gesture is not a lost reaction
+            _stage(
+                "act",
+                "nova",
+                "lite-gesture",
+                f"dropped reason=lite-gesture-failed name={name} detail={err}",
+            )
 
     # hear leg — the echo-gate policy is wired EXPLICITLY (resolve_policy reads
     # $NOVA_ECHO_GATE, default off) so the wiring is assertable, not ambient.
@@ -498,11 +768,48 @@ def build_app() -> list[object]:
     # worth degrading over. The reactor is appended FIRST so the supervisor
     # hands it the stop_event before the poll thread can fire a transition at
     # it (the Sonic fallback restart path needs that event).
-    reactor = NetworkReactor(sonic, kiro_unit)
+    network_reactor = NetworkReactor(sonic, kiro_unit)
     network_unit = NetworkUnit()
-    network_unit.on_change(reactor.on_network_change)
-    components.append(reactor)
+    network_unit.on_change(network_reactor.on_network_change)
+    components.append(network_reactor)
     components.append(network_unit)
+
+    # Lite reaction tier (t11/t13) — appended BEFORE the bus so the supervisor
+    # has started its worker by the time the first cue can be handed to it.
+    # Off (NOVA_LITE_REACTIONS=0) or unbuildable means reactor=None below,
+    # which is exactly the template-only rendering of every previous round.
+    lite_reactor: object | None = None
+    if switches.lite_reactions:
+        try:
+            from .lite_reactor import LiteReactor
+
+            # Lite plans may ask for a sound (chirp|trill|purr). The harness has no
+            # SDK speaker, so the legacy synthesiser's samples ride the SonicSpeaker
+            # like a reply chunk: 24 kHz, flushed by inactivity, gate-serialised
+            # (PR #24 review: vocalizations were parsed and then silently ignored).
+            def _vocalize(kind: str) -> None:
+                try:
+                    from ..vocalize import synthesize
+
+                    samples = synthesize(VOCALIZE_KINDS[kind], sample_rate=24000)
+                    speaker.on_audio_chunk(np.asarray(samples, dtype=np.float32))
+                except Exception as err:  # noqa: BLE001 - a sound must never cost a reaction
+                    _stage("react", "lite", "vocalize", f"dropped reason=vocalize-failed kind={kind} ({err})")
+
+            lite_reactor = LiteReactor(
+                context_provider=_reaction_context, on_gesture=_reaction_gesture,
+                on_vocalize=_vocalize,
+            )
+            components.append(lite_reactor)
+        except Exception as err:  # noqa: BLE001
+            lite_reactor = None
+            _stage(
+                "supervise", "nova", "component", f"component absent name=lite-reactor reason={err}"
+            )
+    else:
+        _stage(
+            "supervise", "nova", "component", "component absent name=lite-reactor reason=switch-off"
+        )
 
     # read leg — bus is optional-degraded: no broker means named drops, not death
     bus_component = None
@@ -510,17 +817,31 @@ def build_app() -> list[object]:
         from .bus import NovaBus
 
         bus_component = NovaBus(
-            on_inject=sonic.inject_text,
+            on_inject=_inject,
             on_event=lock_state.on_bus_event,
             history=history,
             quiet=quiet,
+            reactor=lite_reactor,
         )
         components.append(bus_component)
     except Exception as err:  # noqa: BLE001
         _stage("supervise", "nova", "component", f"component absent name=bus reason={err}")
 
+    # memory compactor (t10) — after the bus: its Lite call is periodic and
+    # slow, nothing waits on it, and it must never be between a cue and the
+    # mouth. Its own thread does the work; Sonic only reads its history().
+    if compactor is not None:
+        components.append(compactor)
+
     if browser is not None:
         components.append(BrowserComponent(browser))
+
+    # vision leg's inject wrapper (live finding 2026-09-06 00:23/00:38/00:43):
+    # the raw Omni description (400-850 chars) handed to Sonic bare produced a
+    # 30 s unprompted monologue about the scene at every harness start. A
+    # glance is a body cue like any other: parenthesised, capped, marked brief.
+    def _vision_cue(text: str) -> None:
+        _inject(render_vision_cue(text), sense_class="vision")
 
     # vision leg — Omni is model-config-gated (empty id = preview not enabled)
     # and the bus supplies the retained reachy/state/clip payload it reads.
@@ -539,7 +860,7 @@ def build_app() -> list[object]:
                 VisionLeg(
                     get_clip_state=bus_component.clip_state,
                     understand=NovaOmni(),
-                    on_answer=sonic.inject_text,
+                    on_answer=_vision_cue,
                 )
             )
         except Exception as err:  # noqa: BLE001

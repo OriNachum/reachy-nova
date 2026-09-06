@@ -122,19 +122,20 @@ Example trace for one utterance heard from the left while awake:
 
 If the robot is asleep, the `inject` stage line instead reads
 `suppressed reason=sleeping` and no text is injected. If awake but Sonic
-itself drops the inject (already speaking, or throttled), that drop is
+defers or drops the inject (mid-utterance, or throttled), that fate is
 logged separately — see the next section.
 
-### A Second `inject`-Stage Line: Sonic's Own Drop Path
+### A Second `inject`-Stage Line: Sonic's Own Deferral and Drop Paths
 
 The `attempted` line above only records that `main.py` *tried* to inject.
-`NovaSonic.inject_text` (`reachy_nova/nova_sonic.py`) can still silently skip
-the send — while the model is speaking, or while throttled
-(`_inject_min_interval = 3.0`s) — and now logs that drop itself, through the
-same `sensory_stage` helper, at INFO:
+`NovaSonic.inject_text` (`reachy_nova/nova_sonic.py`) can still skip the send
+— while the model is generating, or while throttled
+(`_inject_min_interval = 3.0`s) — and logs that itself, through the same
+`sensory_stage` helper, at INFO:
 
 ```text
-[SENSE stage=inject source=speech event=<uuid>] dropped reason=speaking text='You hear someone speaking from your left.'
+[SENSE stage=inject source=speech event=<uuid>] deferred class=sound text='You hear someone speaking from your left.'
+[SENSE stage=inject source=speech event=<uuid>] drained class=sound age=3.0s text='(3 seconds ago, while you were talking: You hear someo'
 [SENSE stage=inject source=speech event=<uuid>] dropped reason=throttled interval=1.2s text='You hear someone speaking from your left.'
 ```
 
@@ -142,7 +143,16 @@ Before this arc, both of these were `logger.debug(...)` calls
 (`"inject_text skipped — model is speaking"` /
 `"inject_text throttled (interval=...)"`) — invisible at the default INFO
 level, so a dropped sensory notice was silent. They are not scoped to speech
-events only — every `inject_text` caller's drops now log the same way.
+events only — every `inject_text` caller's fate now logs the same way.
+
+The mid-utterance case is a **deferral**, not a drop: since t9 the cue is
+parked in a latest-wins slot per sense class
+(`reachy_nova/harness/deferred_cues.py`, TTL 5 s) and delivered through the
+same inject path — with its age in the text — the moment the utterance ends.
+The old `dropped reason=speaking` line is gone; the surviving named drops on
+this path are `dropped reason=deferred-expired age=...` (the cue waited past
+its TTL), `dropped reason=deferred-overflow ...` (more than four cues parked
+in one utterance) and `dropped reason=throttled ...` (unchanged).
 
 ## Direction Correlation
 

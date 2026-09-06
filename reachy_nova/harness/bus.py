@@ -78,6 +78,7 @@ and no paho import at all.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -330,6 +331,39 @@ VOICE_MARKERS: dict[str, str] = {
 QUIET_MARKER = " (quiet mode: do not speak)"
 
 
+def render_base(
+    rule: dict[str, Any],
+    source: str,
+    event_type: str,
+    payload: dict[str, Any] | None,
+) -> tuple[str | None, str]:
+    """Render *rule*'s ``inject_template`` against *payload* — no marker.
+
+    Returns ``(text | None, reason)`` where *reason* is one of the named
+    verdicts above. This is :func:`route_event`'s rendering half, minus the
+    ``VOICE_MARKERS``/quiet suffix: it is the BASE text a ``react: lite``
+    entry hands its reactor as both ``cue`` and ``template`` (task t13,
+    spec c29) — the marker is applied later, to whatever text actually gets
+    delivered (a template render or a Lite plan), by
+    :meth:`NovaBus._deliver`. ``route_event`` itself builds on this helper
+    so every other caller (:class:`~reachy_nova.harness.memory_leg.MemoryLeg`,
+    the tests below) keeps its existing marked-text contract unchanged.
+    """
+    template = rule.get("inject_template")
+    if not template:
+        return None, REASON_NO_TEMPLATE
+    fields: dict[str, Any] = payload if isinstance(payload, dict) else {}
+    try:
+        text = str(template).format_map(defaultdict(str, fields))
+    except (IndexError, ValueError, TypeError) as err:
+        logger.warning("bus: bad inject_template for %s/%s: %s", source, event_type, err)
+        return None, REASON_TEMPLATE_FAILED
+    text = text.strip()
+    if not text:
+        return None, REASON_NO_TEMPLATE
+    return text, REASON_INJECT
+
+
 def route_event(
     rules_cfg: dict[str, Any],
     source: str,
@@ -347,21 +381,14 @@ def route_event(
     ``VOICE_MARKERS``) is appended to the rendered text — a hint to Nova
     about how much it should say about the event, not whether the event
     happened at all. Absent or unrecognized values behave like ``free``
-    (no marker).
+    (no marker). This output is unchanged by task t13's Lite reaction tier —
+    see :func:`render_base` for the marker-free half NovaBus's ``react: lite``
+    path builds on instead.
     """
     rule = rule_for(rules_cfg, source, event_type, payload)
-    template = rule.get("inject_template")
-    if not template:
-        return None, REASON_NO_TEMPLATE
-    fields: dict[str, Any] = payload if isinstance(payload, dict) else {}
-    try:
-        text = str(template).format_map(defaultdict(str, fields))
-    except (IndexError, ValueError, TypeError) as err:
-        logger.warning("bus: bad inject_template for %s/%s: %s", source, event_type, err)
-        return None, REASON_TEMPLATE_FAILED
-    text = text.strip()
-    if not text:
-        return None, REASON_NO_TEMPLATE
+    text, reason = render_base(rule, source, event_type, payload)
+    if text is None:
+        return None, reason
     text += VOICE_MARKERS.get(rule.get("voice", "free"), "")
     return text, REASON_INJECT
 
@@ -445,6 +472,30 @@ def harness_state_payload(status: str) -> str:
     return json.dumps({"status": status, "ts": time.time()}, separators=(",", ":"))
 
 
+def _accepts_sense_class_kw(func: Callable[..., Any]) -> bool:
+    """Does *func* accept a ``sense_class`` keyword? Checked ONCE, at
+    :meth:`NovaBus.__init__` time, rather than per event — the common case
+    (a plain ``Callable[[str], None]``: :class:`~reachy_nova.harness.
+    memory_leg.MemoryLeg`'s contract, every existing test's Recorder) never
+    pays an ``inspect.signature`` call per inject. A callable
+    ``inspect.signature`` cannot introspect (a C builtin, a Mock with no
+    spec) is treated as not accepting it — the safer, narrower default.
+    """
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    for param in sig.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if param.name == "sense_class" and param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            return True
+    return False
+
+
 def _default_client_factory() -> Any:
     """Build a real paho client. Imported lazily so tests need no broker/paho."""
     import paho.mqtt.client as paho_mqtt
@@ -483,6 +534,21 @@ class NovaBus:
             you move?" from what really happened. A ``voice: none`` cue (t14)
             is the one exception that still reaches history WITHOUT ever
             calling *on_inject* — see :meth:`_deliver_muted`.
+        reactor: optional Nova 2 Lite reaction-tier worker (t13; wired to
+            :class:`~reachy_nova.harness.lite_reactor.LiteReactor` by the
+            app, ``None`` when ``NOVA_LITE_REACTIONS=0``) — anything shaped
+            like ``react(cue: str, template: str, deliver: Callable[[str],
+            None]) -> None``. A rule entry carrying ``react: lite`` (see
+            ``config/nervous-system/rules.yaml``'s header) hands this the
+            BASE rendered text (no voice/quiet marker) as both ``cue`` and
+            ``template``; whatever text *deliver* is eventually called with
+            (the reactor's own thread, its own time) gets the entry's
+            voice/quiet markers applied and is what reaches *on_inject* and
+            :class:`SenseHistory` — see :meth:`_deliver`. ``None`` (the
+            default), or an entry without ``react: lite``, renders exactly
+            as it did before this task. A ``voice: none`` entry never
+            reaches the reactor regardless of ``react`` — see
+            :meth:`_deliver_muted`.
     """
 
     def __init__(
@@ -496,11 +562,14 @@ class NovaBus:
         clock: Callable[[], float] | None = None,
         history: SenseHistory | None = None,
         quiet: QuietState | None = None,
+        reactor: Any | None = None,
     ) -> None:
         self._on_inject = on_inject
+        self._on_inject_accepts_sense_class = _accepts_sense_class_kw(on_inject)
         self._on_event = on_event
         self.history = history
         self.quiet = quiet
+        self._reactor = reactor
         self.sources = resolve_sources(sources)
         self.broker = broker if broker is not None else broker_url()
         self.host, self.port = parse_broker_url(self.broker)
@@ -685,25 +754,27 @@ class NovaBus:
 
         self._notify_on_event(source, event_type, payload)
 
-        text, reason = route_event(self.rules, source, event_type, payload)
-        if text is None:
+        # (t13) rule_for + render_base, not route_event: _deliver needs the
+        # BASE text (no voice marker) to hand a react: lite entry's reactor,
+        # so marking happens downstream in _deliver/_finish_delivery instead
+        # of here. route_event itself (MemoryLeg's own call path) is
+        # unaffected — it still returns the fully marked text, unchanged.
+        rule = rule_for(self.rules, source, event_type, payload)
+        base_text, reason = render_base(rule, source, event_type, payload)
+        if base_text is None:
             sensory_log.stage(STAGE_ROUTE, SOURCE, key, f"dropped reason={reason}")
             return
 
-        rule = rule_for(self.rules, source, event_type, payload)
-
         # ``voice: none`` (t14): recorded for ``recall_senses`` but NEVER
         # spoken — no ``on_inject`` call, no quiet marker, and it never
-        # touches ``_deliver``'s on-inject-failure rollback machinery, since
-        # there is no callback here that can fail.
+        # touches ``_deliver``'s on-inject-failure rollback machinery (nor
+        # the Lite reactor, regardless of ``react``), since there is no
+        # callback here that can fail.
         if rule.get("voice") == "none":
-            self._deliver_muted(source, event_type, key, payload, text, rule)
+            self._deliver_muted(source, event_type, key, payload, base_text, rule)
             return
 
-        # Marked BEFORE the history record so "what Nova was told" and "what
-        # Nova remembers being told" can never drift apart.
-        text = self._mark_quiet(text)
-        self._deliver(source, event_type, key, payload, text, rule)
+        self._deliver(source, event_type, key, payload, base_text, rule)
 
     def _parse_event(self, topic: str, raw: bytes | str) -> tuple[str, str, str, dict] | None:
         """Resolve a raw bus message into ``(source, event_type, key, payload)``.
@@ -756,13 +827,25 @@ class NovaBus:
     def _deliver(
         self, source: str, event_type: str, key: str, payload: dict, text: str, rule: dict
     ) -> None:
-        """Reserve the dedupe key, call ``on_inject``, then commit or roll back.
+        """Reserve the dedupe key, then deliver *text* — directly, or via
+        the Lite reactor for a ``react: lite`` entry (t13).
 
-        Concurrent same-key events are delivered exactly once: the dedupe
-        reservation happens under the lock BEFORE ``on_inject`` runs, and is
-        rolled back if it raises so a failed delivery never poisons the
-        window for the retry that follows it. History is recorded only
-        after ``on_inject`` succeeds.
+        *text* here is the BASE rendered template — no voice/quiet marker
+        yet (see :func:`render_base`). Concurrent same-key events are
+        delivered exactly once: the dedupe reservation happens under the
+        lock BEFORE any calling out (to ``on_inject`` OR to the reactor), so
+        a duplicate racing in while a Lite call is still thinking costs
+        neither a Lite call nor an inject — exactly the same guarantee the
+        direct path always had against ``on_inject``.
+
+        A ``react: lite`` entry with a wired :attr:`_reactor` hands it *text*
+        as both ``cue`` and ``template``; the reactor's own ``deliver``
+        callback (called later, on whatever thread the reactor uses — see
+        :meth:`_finish_delivery`) is what actually applies the markers, calls
+        ``on_inject``, and commits/rolls back the reservation. Every other
+        entry — no reactor wired, or no ``react: lite`` — calls
+        :meth:`_finish_delivery` immediately, byte-identical to before this
+        task.
         """
         dedupe_key = dedupe_key_for(source, event_type, payload, rule)
         now = self._clock()
@@ -780,10 +863,53 @@ class NovaBus:
                 return
             # Reserve the key BEFORE calling out, so two concurrent same-key
             # events can never both pass the check above and double-deliver.
-            # (F6) The reservation is provisional: it is rolled back below if
-            # on_inject raises, so a failed delivery never poisons the window
-            # for the retry that follows it.
+            # (F6) The reservation is provisional: it is rolled back if the
+            # eventual on_inject call raises, so a failed delivery never
+            # poisons the window for the retry that follows it.
             self._last_inject_at[dedupe_key] = now
+
+        def _finish(plan_text: str) -> None:
+            self._finish_delivery(
+                source, event_type, key, payload, plan_text, rule, dedupe_key, now
+            )
+
+        reactor = self._reactor
+        if rule.get("react") == "lite" and reactor is not None:
+            sensory_log.stage(
+                STAGE_ROUTE, SOURCE, key, f"handed to lite-tier reactor chars={len(text)}"
+            )
+            reactor.react(cue=text, template=text, deliver=_finish)
+            return
+
+        _finish(text)
+
+    def _finish_delivery(
+        self,
+        source: str,
+        event_type: str,
+        key: str,
+        payload: dict,
+        plan_text: str,
+        rule: dict,
+        dedupe_key: str,
+        reserved_at: float,
+    ) -> None:
+        """Mark *plan_text*, call ``on_inject``, then commit or roll back.
+
+        Shared tail for both :meth:`_deliver`'s direct path and the Lite
+        reactor's ``deliver`` callback (t13) — whichever text ends up here
+        (a template render or a Lite plan) gets the SAME voice marker
+        (``VOICE_MARKERS``) and quiet marker (:meth:`_mark_quiet`) a plain
+        template render always got, and it is exactly what ``on_inject``
+        receives and (on success) what :class:`SenseHistory` records as the
+        DELIVERED text — never the raw plan. May run on a different thread
+        than :meth:`_deliver` (the reactor's own worker); the dedupe
+        commit/rollback below still only touches *this* reservation
+        (``reserved_at``), so a newer reservation racing in is never
+        clobbered — the same rule :meth:`_deliver` always followed.
+        """
+        text = plan_text + VOICE_MARKERS.get(rule.get("voice", "free"), "")
+        text = self._mark_quiet(text)
 
         sensory_log.stage(
             STAGE_INJECT,
@@ -793,7 +919,7 @@ class NovaBus:
             f"chars={len(text)}",
         )
         try:
-            self._on_inject(text)
+            self._call_on_inject(text, rule.get("sense"))
         except Exception as err:
             logger.warning("bus: inject callback failed: %s", err, exc_info=True)
             sensory_log.stage(STAGE_INJECT, SOURCE, key, f"dropped reason=inject-failed: {err}")
@@ -803,7 +929,7 @@ class NovaBus:
             # reservation — a newer one (a fresh event that raced in after
             # this failure) must not be clobbered.
             with self._dedupe_lock:
-                if self._last_inject_at.get(dedupe_key) == now:
+                if self._last_inject_at.get(dedupe_key) == reserved_at:
                     del self._last_inject_at[dedupe_key]
             return
 
@@ -821,6 +947,20 @@ class NovaBus:
                 rule.get("sense"),
                 rule.get("voice"),
             )
+
+    def _call_on_inject(self, text: str, sense_class: str | None) -> None:
+        """Call ``on_inject``, passing ``sense_class`` only when it accepts
+        that keyword (checked once at construction — see
+        :func:`_accepts_sense_class_kw`). A plain ``Callable[[str], None]``
+        (:class:`~reachy_nova.harness.memory_leg.MemoryLeg`'s contract, every
+        existing test's Recorder) is called exactly as before this task;
+        ``NovaSonic.inject_text`` gets the rule's ``sense`` field so a
+        deferred cue (t9) is parked under its own latest-wins slot.
+        """
+        if self._on_inject_accepts_sense_class:
+            self._on_inject(text, sense_class=sense_class)
+        else:
+            self._on_inject(text)
 
     def _deliver_muted(
         self, source: str, event_type: str, key: str, payload: dict, text: str, rule: dict

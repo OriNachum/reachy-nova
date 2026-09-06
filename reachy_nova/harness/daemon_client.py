@@ -19,16 +19,23 @@ Endpoints used here:
 - ``POST /api/media/sounds/upload`` — multipart/form-data upload of a WAV.
 - ``POST /api/media/play_sound``    body ``{"file": "<path>"}``.
 - ``POST /api/media/stop_sound``    body ``{}`` (barge-in cut).
+- ``GET  /api/media/sounds``        -> the daemon's list of saved sound
+  filenames (a bare JSON array, or an object carrying the list under one of
+  its fields — either shape is accepted).
+- ``DELETE /api/media/sounds/{filename}`` -> the daemon's parsed JSON
+  response; an HTTP failure here is left to raise (the caller names the drop
+  itself, per its own senselog convention).
 
-stdlib + injectable ``post``/``get`` callables only — the test seam mirrors
-``speaking.py``'s existing ``poster``/``stopper`` pattern, and no network is
-ever touched in tests.
+stdlib + injectable ``post``/``get``/``delete`` callables only — the test
+seam mirrors ``speaking.py``'s existing ``poster``/``stopper`` pattern, and
+no network is ever touched in tests.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -43,6 +50,7 @@ _VOLUME_SET_PATH = "/api/volume/set"
 _UPLOAD_PATH = "/api/media/sounds/upload"
 _PLAY_PATH = "/api/media/play_sound"
 _STOP_PATH = "/api/media/stop_sound"
+_SOUNDS_PATH = "/api/media/sounds"
 
 _HTTP_TIMEOUT_S = 10.0
 
@@ -76,6 +84,15 @@ def _default_post(url: str, data: bytes, content_type: str, timeout: float) -> d
         return json.loads(resp.read())
 
 
+def _default_delete(url: str, timeout: float) -> dict:
+    req = urllib.request.Request(
+        url, method="DELETE", headers={"Accept": JSON_CONTENT_TYPE}
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
+        body = resp.read()
+        return json.loads(body) if body else {}
+
+
 def _multipart_encode(filename: str, wav_bytes: bytes) -> tuple[bytes, str]:
     """Encode a single-file multipart/form-data body; return (body, content-type)."""
     boundary = "----ReachyNovaSpeakBoundary"
@@ -93,10 +110,10 @@ def _multipart_encode(filename: str, wav_bytes: bytes) -> tuple[bytes, str]:
 class DaemonClient:
     """A tiny HTTP client for the daemon's volume + media endpoints.
 
-    ``post``/``get`` are injectable so tests never touch the network:
-    ``post(url, data, content_type, timeout) -> dict`` and
-    ``get(url, timeout) -> dict``, mirroring ``speaking.py``'s existing
-    poster/stopper seam.
+    ``post``/``get``/``delete`` are injectable so tests never touch the
+    network: ``post(url, data, content_type, timeout) -> dict``,
+    ``get(url, timeout) -> dict`` and ``delete(url, timeout) -> dict``,
+    mirroring ``speaking.py``'s existing poster/stopper seam.
     """
 
     def __init__(
@@ -104,12 +121,14 @@ class DaemonClient:
         base_url: str | None = None,
         post: Callable[[str, bytes, str, float], dict] | None = None,
         get: Callable[[str, float], dict] | None = None,
+        delete: Callable[[str, float], dict] | None = None,
         timeout: float = _HTTP_TIMEOUT_S,
     ) -> None:
         base = base_url or os.environ.get(BASE_URL_ENV, DEFAULT_BASE_URL)
         self.base_url = base.rstrip("/")
         self._post = post or _default_post
         self._get = get or _default_get
+        self._delete = delete or _default_delete
         self.timeout = timeout
 
     # -- volume -------------------------------------------------------------
@@ -147,6 +166,34 @@ class DaemonClient:
 
     def stop_sound(self) -> None:
         self._post(f"{self.base_url}{_STOP_PATH}", b"{}", JSON_CONTENT_TYPE, self.timeout)
+
+    # -- sounds housekeeping (task t1) ---------------------------------------
+
+    def list_sounds(self) -> list:
+        """``GET /api/media/sounds`` -> the daemon's list of saved filenames.
+
+        The daemon may answer with a bare JSON array, or with an object that
+        carries the list under one of its fields (e.g. ``{"files": [...]}"``);
+        either shape is accepted and normalised to a plain list.
+        """
+        resp = self._get(f"{self.base_url}{_SOUNDS_PATH}", self.timeout)
+        if isinstance(resp, list):
+            return resp
+        if isinstance(resp, dict):
+            for value in resp.values():
+                if isinstance(value, list):
+                    return value
+        return []
+
+    def delete_sound(self, filename: str) -> dict:
+        """``DELETE /api/media/sounds/{filename}`` -> the daemon's parsed JSON.
+
+        An HTTP failure here is left to propagate — the caller (chunked
+        playback cleanup) names the drop itself in its own senselog line
+        rather than this client swallowing it.
+        """
+        encoded = urllib.parse.quote(filename, safe="")
+        return self._delete(f"{self.base_url}{_SOUNDS_PATH}/{encoded}", self.timeout)
 
 
 # --------------------------------------------------------------------------- #

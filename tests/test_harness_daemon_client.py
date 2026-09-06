@@ -27,8 +27,11 @@ class FakeTransport:
     def __init__(self):
         self.gets: list[str] = []
         self.posts: list[tuple[str, bytes, str]] = []
+        self.deletes: list[str] = []
         self.get_response: dict = {"volume": 42}
         self.post_responses: dict[str, dict] = {}
+        self.delete_responses: dict[str, dict] = {}
+        self.delete_error: Exception | None = None
 
     def get(self, url: str, timeout: float) -> dict:
         self.gets.append(url)
@@ -41,6 +44,15 @@ class FakeTransport:
                 return resp
         return {}
 
+    def delete(self, url: str, timeout: float) -> dict:
+        self.deletes.append(url)
+        if self.delete_error is not None:
+            raise self.delete_error
+        for suffix, resp in self.delete_responses.items():
+            if url.endswith(suffix):
+                return resp
+        return {}
+
 
 @pytest.fixture
 def transport():
@@ -49,7 +61,12 @@ def transport():
 
 @pytest.fixture
 def client(transport):
-    return DaemonClient(base_url="http://daemon.local:8000", post=transport.post, get=transport.get)
+    return DaemonClient(
+        base_url="http://daemon.local:8000",
+        post=transport.post,
+        get=transport.get,
+        delete=transport.delete,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -132,6 +149,54 @@ def test_stop_sound_posts_empty_body(client, transport):
     (url, data, ctype) = transport.posts[0]
     assert url == "http://daemon.local:8000/api/media/stop_sound"
     assert json.loads(data) == {}
+
+
+# --------------------------------------------------------------------------- #
+# sounds — list_sounds / delete_sound (task t1)                               #
+# --------------------------------------------------------------------------- #
+
+
+def test_list_sounds_returns_list_when_response_is_a_bare_list(client, transport):
+    transport.get_response = ["a.wav", "b.wav"]
+    assert client.list_sounds() == ["a.wav", "b.wav"]
+    assert transport.gets == ["http://daemon.local:8000/api/media/sounds"]
+
+
+def test_list_sounds_extracts_list_field_from_object_response(client, transport):
+    transport.get_response = {"files": ["a.wav", "b.wav"], "count": 2}
+    assert client.list_sounds() == ["a.wav", "b.wav"]
+
+
+def test_list_sounds_returns_empty_list_when_object_has_no_list_field(client, transport):
+    transport.get_response = {"count": 0}
+    assert client.list_sounds() == []
+
+
+def test_delete_sound_issues_delete_and_returns_parsed_json(client, transport):
+    transport.delete_responses["/api/media/sounds/x.wav"] = {"deleted": "x.wav"}
+    result = client.delete_sound("x.wav")
+    assert result == {"deleted": "x.wav"}
+    assert transport.deletes == ["http://daemon.local:8000/api/media/sounds/x.wav"]
+
+
+def test_delete_sound_url_encodes_filename():
+    transport = FakeTransport()
+    transport.delete_responses["/api/media/sounds/nova%20cue.wav"] = {"deleted": "nova cue.wav"}
+    client = DaemonClient(
+        base_url="http://daemon.local:8000",
+        post=transport.post,
+        get=transport.get,
+        delete=transport.delete,
+    )
+    client.delete_sound("nova cue.wav")
+    assert transport.deletes == ["http://daemon.local:8000/api/media/sounds/nova%20cue.wav"]
+
+
+def test_delete_sound_http_failure_raises(client, transport):
+    transport.delete_error = RuntimeError("boom")
+    with pytest.raises(RuntimeError):
+        client.delete_sound("x.wav")
+    assert transport.deletes == ["http://daemon.local:8000/api/media/sounds/x.wav"]
 
 
 # --------------------------------------------------------------------------- #

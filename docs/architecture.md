@@ -120,7 +120,7 @@ so it survives either side restarting. Everything file-shaped lives under one
 | **MQTT `reachy/events/<source>/<type>`** | body → mind | compact JSON cues (`rule/*`, `intent/*`, `motion/*`, provisional `pat`/`face`/`vision`). Not retained, QoS 0: a cue is a *moment*. |
 | **MQTT `reachy/state/online`** (retained, last-will) | body → mind | availability only; never treated as a cue |
 | **MQTT `reachy/state/clip`** (retained) | body → mind | `{available, path, ts, duration_s, …}` for the camera clip the rider keeps overwriting in place |
-| **MQTT `nova/harness/state`** (retained, last-will) | mind → world (and body) | the harness's own availability `{status: online|offline, ts}` — the runtime's `MindPresence` subscribes to it so a face-lock releases when the mind goes away |
+| **MQTT `nova/harness/state`** (retained, last-will) | mind → world (and body) | the harness's own availability `{status: online\|offline, ts}` — the runtime's `MindPresence` subscribes to it so a face-lock releases when the mind goes away |
 | **Audio tee** (`<state>/audio_tee.sock`, Unix stream) | body → mind | one JSON header line (`format`, `channels`, `samplerate`) then endless float32 mono samples — what the mic hears, post-AEC |
 | **Intents spool** (`<state>/behavior/intents/commands/*.json` → `results/<cmd_id>.json`) | mind → body → mind | atomically written op dicts (`run_behavior`, `declare_goal`, `set_mode`, `set_inhibition`, `goto`, enroll); the engine's verdict comes back under the same id |
 | **Rules overlay** (`<state>/behavior/rules.toml`, nova-managed block) | mind → body | `[[react]]` rules the mind authored, `nova-` prefixed, inside sentinel markers, merged by id; operator rules outside the block are byte-preserved |
@@ -130,6 +130,7 @@ so it survives either side restarting. Everything file-shaped lives under one
 | **Daemon HTTP** (`POST /api/media/sounds/upload` → `play_sound` / `stop_sound`, plus `GET /api/volume/current` / `POST /api/volume/set`) | mind → daemon | complete mono int16 WAV per utterance; `play_sound` returns when playback *starts*, not ends; the volume endpoints back the `raise_voice`/`lower_voice`/`set_voice_level` tools |
 | **Persisted volume** (`<state>/nova-volume.json`) | mind (own) | last-set voice level, re-applied to the daemon on harness start when it disagrees |
 | **Persisted quiet deadline** (`<state>/nova-quiet.json`) | mind (own) | the timed-quiet `until` epoch, atomically written on every arm/release so a restart inside a quiet window comes back quiet rather than reintroducing itself out loud |
+| **Conversation memory** (`<state>/nova-conversation.jsonl` + `<state>/nova-memory.json`) | mind (own) | the raw ledger (every transcript and delivered sense, locked NDJSON, 24 h truncation) and the Lite-distilled topics/items it compacts down to, replayed as history at every Sonic session start |
 | **Cognition feed** (NDJSON on stdout/journal) | mind → consumers | `{"t": "thinking" / "message" / "emotion", …}` in reachy-mini-cli's export schema, so external displays (e.g. the reTerminal bridge) read it unmodified |
 | **Kiro stdio** | mind ↔ writer | newline-delimited JSON‑RPC 2.0 (ACP): `initialize` → `session/new` → `session/prompt` with streamed `session/update` chunks |
 
@@ -172,7 +173,11 @@ backoff; the Kiro session has a liveness monitor with capped exponential backoff
 and a stuck-prompt deadline; Sonic has a clock-step detector (a ±60 s
 wall‑vs‑monotonic jump forces a restart — learned from an NTP correction that
 once left a zombie session), a response-liveness watchdog, and a short speaking
-watchdog.
+watchdog. The response-liveness watchdog counts only input that carried
+*speech energy* above the mic floor (or an inject/tool result) as "flowing" —
+the harness feeds the microphone continuously whether or not anyone is
+talking, so without that gate an ordinary quiet room reads exactly like a
+zombie stream and gets restarted for no reason.
 
 ### 5.2 The bus — turning body cues into things the mind notices
 
@@ -209,6 +214,23 @@ So for a recognised face to reach the mind at all, the harness upserts one
 standing overlay rule (`nova-face-noticed`) into the body's rules at start —
 the single deliberate side effect of composition.
 
+A third per-entry field, `react: lite`, opts a cue into the Lite reaction
+tier (§6): instead of delivering its rendered template straight to
+`inject_text`, the bus hands the base text (no voice/quiet marker yet) to
+the wired `LiteReactor`, and whatever plan text comes back gets the entry's
+own markers applied exactly as a plain template render would — so what
+Sonic hears, and what sense history records, is always the *delivered*
+text, whichever tier produced it. A `voice: none` entry never reaches Lite
+regardless of `react`, and with no reactor wired (`NOVA_LITE_REACTIONS=0`)
+the field is simply ignored.
+
+One more seam sits between the bus and Sonic: every cue the bus decides to
+deliver passes through a small inject wrapper before `inject_text` ever
+sees it. That wrapper is where the conversation ledger gets its "sense"
+entries (§6.4) and where a pat or a recognised face nudges the small mood
+state the Lite reactor's context reads — the bus itself stays ignorant of
+both; it only ever calls one function.
+
 ### 5.3 Hearing — mic to Sonic
 
 Tee stream → header validated in full (a foreign or rate‑less header is a named
@@ -226,16 +248,30 @@ human is talking over audible speech → preempt directly).
 
 ### 5.4 Speaking — Sonic to speaker
 
-Sonic's 24 kHz audio is buffered **per utterance**, flushed when Sonic leaves
-its `speaking` state (or every ~15 s during a monologue), wrapped as WAV,
-uploaded, and played through the daemon. Two details carry the correctness:
+Sonic's 24 kHz audio is cut into **chunks** and played as they become ready,
+not buffered for the whole utterance: a chunk is flushed when it reaches
+~1 s of audio (split at the lowest-energy 50 ms window in the last 200 ms so
+the cut lands in a pause, not mid-word), or when 300 ms have passed with no
+new audio — whichever comes first. The transition out of Sonic's `speaking`
+state is only the *final sweep* of whatever tail is left, never the thing
+that starts playback: on the robot that transition is produced by a 4 s
+speaking watchdog rather than an end-of-turn event, so waiting for it would
+put a flat 4 s of silence in front of every reply. With chunking, first
+audio lands about a second after Sonic's first sample regardless of how long
+the reply runs.
 
-- The **echo gate is armed before the play request**, not after — a live
-  incident had the robot conversing with its own tail.
-- A **preempt epoch** is snapshotted when an utterance is dequeued and
-  re-checked before the request and after it returns, because `play_sound`
-  returns at *trigger* time; without this, an utterance already in the worker's
-  hand would replay after a barge‑in cut it.
+Each chunk uploads and deletes under its own filename once its playback
+window elapses (measured seamless on the daemon — a 2026-09-06 probe posted
+two chunks back to back with no pre-roll and heard no gap or click), keeping
+only a handful of files on a disk that runs close to full. The echo gate
+still serialises chunks one speaker at a time, still arms *before* the play
+request (not after), and a barge-in purges every chunk not yet played —
+correctness here is unchanged by chunking, only the grain is finer. The 4 s
+speaking watchdog is no longer the latency path; it survives only as the
+safety net for a stuck generation. `NOVA_CHUNKED_PLAYBACK=0` restores
+whole-utterance playback (one file, no per-chunk cleanup) exactly as it
+shipped before this round. See `docs/components/nova_sonic.md`'s Chunked
+Playback section for the mechanics.
 
 Any playback HTTP failure clears the gate, purges the queue and fires one
 `on_playback_failure` — losing the mouth can never leave the mind stuck in
@@ -245,6 +281,18 @@ A timed **quiet gate** (`QuietState`, optional) sits at the very top of this
 path: while a quiet deadline is armed, an utterance is dropped there before
 any upload, gate arm, or queue touch happens — see
 `docs/components/quiet-mode.md`.
+
+Sonic's own stream also rotates proactively, a little before the service's
+connection limit (measured at 8 minutes on this account): at ~7 minutes it
+waits for an idle moment — listening, no tool in flight, speaker idle — and
+replaces itself with zero restart delay, replaying the day's memory as
+conversation history so the swap is inaudible and the topic survives. A hard
+deadline just short of the ceiling rotates anyway if nothing is ever idle,
+because the alternative is Bedrock's own timeout, which is strictly worse.
+The same replay path is reused by every other restart cause (the liveness
+and clock-step watchdogs, a network change), so "the robot forgot
+everything" stops being true for all of them, not just the proactive case.
+See §6.4.
 
 ### 5.5 The tool surface — what the voice can *do*
 
@@ -288,7 +336,7 @@ and a fixed trust level.
 | Tier | Model | Job | Trust boundary |
 | --- | --- | --- | --- |
 | **Live voice** | Nova 2 Sonic (`amazon.nova-2-sonic-v1:0`) | bidirectional speech stream, its own ASR, tool use; `inject_text` is the *single pressure valve* every sense passes through (3 s throttle + speaking guard) | speaks and requests intents; never moves anything directly |
-| **Fast judgment** | Nova 2 Lite (`us.amazon.nova-2-lite-v1:0`) | barge‑in decision, nervous‑system verdicts, vision fallback; on the current account also carries the clip (`NOVA_OMNI_MODEL_ID` points at Lite) | stateless request/response |
+| **Fast judgment** | Nova 2 Lite (`us.amazon.nova-2-lite-v1:0`) | barge‑in decision, nervous‑system verdicts, vision fallback; reaction plans for opted-in cues (Lite reactor, 2 s timeout, template fallback) and the memory compaction; on the current account also carries the clip (`NOVA_OMNI_MODEL_ID` points at Lite) | stateless request/response |
 | **Deep multimodal** | Nova 2 Omni (preview; enabled per account) | scene/clip understanding | same as Lite |
 | **Action in the world** | Nova Act (hosted AgentCore browser) | `browse` tasks; results route back into speech | off‑robot |
 | **Writer** | **Kiro CLI over ACP** (`kiro-cli acp`, agent `nova-writer`, model `minimax-m2.5`, engine v2) | authors *code and rules* for the robot at runtime | **full shell as `pollen`** — a cognition‑tier actor *inside* the harness boundary; it can never become a second owner of the SDK, and its blast radius is the pollen account, not root and not the motors |
@@ -356,20 +404,68 @@ re‑parses and re‑validates it, atomically replaces, then submits a reload an
 and the tool answers `ok: false` — the robot never believes it has a reflex it
 does not have.
 
+### 6.4 Memory: ledger, compaction, replay
+
+Every USER/ASSISTANT transcript and every sense the bus delivers is appended
+as one NDJSON line to a conversation ledger under the state dir
+(`<state>/nova-conversation.jsonl`); nothing is written while a timed quiet
+is armed, and the ledger is truncated to the last 24 hours at each
+compaction. A background thread — never Sonic's response loop, never the
+MQTT thread — periodically asks Nova 2 Lite to distil that ledger into the
+topics the conversation touched and the specific items worth remembering (a
+request, a stated preference, a running joke, something Nova was told to
+stop doing), stored with timestamps in `<state>/nova-memory.json`; anything
+past 24 hours is gone after the next compaction.
+
+At every Sonic session start — a cold start, a proactive rotation, a
+watchdog or network restart alike — the surviving memory is replayed as
+conversation history through the one window the service allows: once, after
+the system prompt, before audio streaming begins. The replay ends with a
+compact "earlier today we talked about…" block plus the last few exchanges
+verbatim, worded so the model does not greet or comment on it — a rotation
+is meant to feel like nothing happened, never like waking up. Proactive
+rotation itself runs on its own idle-gated schedule (§5.4). `NOVA_MEMORY=0`
+turns off the ledger and the replay entirely, restoring a session that
+starts blank, as it always did before this round. See
+`docs/components/memory.md`.
+
+### 6.5 Persona
+
+Nova's character lives in one text file, `config/persona/nova.md`, read once
+at harness start: editing it and restarting changes the next session's
+system prompt with no code change and no release. A wheel install ships
+`reachy_nova/` only, not the repo-root `config/` tree, so an absent,
+unreadable, or empty persona path falls back to an embedded default persona
+in the same register, with one named senselog line saying so — a silent
+personality swap would be the worst failure here. The system prompt Sonic
+actually sends is that persona text plus one short, separate tool-usage
+paragraph (`TOOL_GUIDE`) — mechanics only, no character — so an operator can
+rewrite the personality without touching the tool contract, and vice versa.
+Nova speaks as **amy** (Nova 2 Sonic, en-GB): the only knob on the *sound* of
+the personality, since the system prompt steers lexical style, not accent or
+pitch. See `docs/components/persona.md`.
+
 ## 7. Four walkthroughs
 
 **Someone speaks.** Mic → XVF3800 AEC → runtime → audio tee → hearing unit →
-16 kHz → Sonic. Sonic transcribes, thinks, streams audio back → speaking unit
-buffers the utterance → WAV → daemon `play_sound`, gate armed → speaker. If the
+16 kHz → Sonic. Sonic transcribes, thinks, streams audio back in chunks →
+the speaking unit flushes each ~1 s chunk (or sooner, on inactivity) → WAV →
+daemon `play_sound`, gate armed → speaker, first audio audible about a
+second after Sonic's first sample rather than after the whole reply. If the
 person talks over it, the transcript during the armed window triggers a
-preempt: `stop_sound`, queue purged, epoch bumped.
+preempt: `stop_sound`, every chunk not yet played purged, epoch bumped.
 
 **Someone pats the robot.** The runtime's pat sense fires `pat-acknowledge` /
 `pet-reaction` *by itself* (antennas, lean) — no mind involved. The rule fire
 crosses the bus as `rule/fire`; the nervous‑system rules render "you feel
-someone petting you…" and inject it; Sonic may say something, and a
-Kiro‑authored overlay rule (`nova-pat-cheer`) may also speak. Reactions
-compose: body reflex, voice, and authored rule all fire off the same event.
+someone petting you…" and, for a rule opted into the Lite reaction tier,
+hand it to Nova 2 Lite for a one-line plan before it becomes the inject
+(falling back to the plain rendered line on a timeout); Sonic may say
+something, and a Kiro‑authored overlay rule (`nova-pat-cheer`) may also
+speak. A pat that lands while Sonic is already mid-reply is not lost: it is
+parked and delivered, with its age named in the text, the moment the
+utterance ends. Reactions compose: body reflex, voice, and authored rule all
+fire off the same event.
 
 **A face appears.** The runtime's face sense recognises it; the standing
 `nova-face-noticed` overlay rule fires → bus → inject → Sonic greets by name.
@@ -394,7 +490,11 @@ lives under `~/.reachy_nova/skills-active/`.
   `FORGE_WRITER=kiro`, `KIRO_*`, `NOVA_*`; runtime tuning such as the pat
   stillness gate is a systemd drop‑in on the runtime unit. A dropped
   `--env-file` flag once silently removed credentials — treat that flag as
-  load‑bearing.
+  load‑bearing. Every switch this round added (`NOVA_CHUNKED_PLAYBACK`,
+  `NOVA_LITE_REACTIONS`, `NOVA_MEMORY`, `NOVA_PERSONA_PATH`) is resolved once
+  at start, fails open to today's new default on an unrecognised value, and
+  is named in one grep‑able switches summary line in the journal — see
+  `.env.sample`.
 - **Network.** The robot keeps several NetworkManager Wi‑Fi profiles with
   autoconnect priorities: the home network first, a phone hotspot as the
   travelling fallback. mDNS is unreliable on this LAN, so operators reach it by
@@ -423,7 +523,7 @@ lives under `~/.reachy_nova/skills-active/`.
   it restarts both cloud legs at once —
   `sonic.request_immediate_restart()` and `kiro_unit.request_restart()` — because
   every open connection is bound to the address that just went away, and Sonic's
-  liveness watchdog alone (180 s) cannot meet the 60 s "the mind is back" bound.
+  liveness watchdog alone (900 s) cannot meet the 60 s "the mind is back" bound.
   On a **drop** it logs only: the legs' own watchdogs own the offline state, and
   respawning into a dead network only guarantees a failed respawn.
   `After=network-online.target` on the unit is **ordering only** — it is reached
@@ -441,7 +541,11 @@ lives under `~/.reachy_nova/skills-active/`.
    (AST‑enforced).
 2. **One inject path.** Every sense reaches the conversation through the
    nervous‑system rules → plain `inject_text`, preserving throttle and
-   speaking guard. Never force past it.
+   speaking guard. A cue that arrives while Sonic is speaking is no longer
+   dropped: the guard now *defers* it (latest-wins per sense class, a short
+   TTL, delivered with its age once the utterance ends) — the path stays the
+   same one seam, only the fate of a mid-speech cue changed. Never force
+   past it.
 3. **Every failure has a name.** `component absent name=… reason=…`,
    `dropped reason=…` — latched, so a permanently absent camera costs one line
    per condition, not one per tick.
@@ -476,12 +580,14 @@ directly with no reachy_nova at all.
 - Decisions and plans: `docs/plans/2026-08-09-wireless-cli-harness-scope.md`,
   `docs/specs/2026-08-11-harness-round-2-*.md`,
   `docs/specs/2026-08-19-kiro-writer-pettable-upgrade.md`,
-  `docs/deliveries/2026-08-19-kiro-writer-pettable-upgrade.md`
+  `docs/deliveries/2026-08-19-kiro-writer-pettable-upgrade.md`,
+  `docs/specs/2026-09-05-fast-witty-remembering-nova.md`,
+  `docs/plans/2026-09-05-fast-witty-remembering-nova.md`
 - Trust and security: `docs/security.md`
 - Components: `docs/components/skill-forge.md`, `speech-events.md`,
   `nova_sonic.md`, `nova_vision.md`, `patting.md`, `tracking.md`,
   `vocalize.md`, `nova_browser.md`, `nova_memory.md`, `gaze.md`,
-  `quiet-mode.md`
+  `quiet-mode.md`, `persona.md`, `memory.md`, `lite-reactor.md`
 - Nervous system rules: `config/nervous-system/rules.yaml`,
   `docs/plans/nervous-system.md`
 - File‑level module map: `CLAUDE.md`

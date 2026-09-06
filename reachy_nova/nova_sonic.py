@@ -1,6 +1,7 @@
 """Nova Sonic - Bidirectional speech-to-speech via Amazon Bedrock."""
 
 import asyncio
+from collections import deque
 import base64
 import json
 import logging
@@ -24,6 +25,9 @@ from aws_sdk_bedrock_runtime.config import Config
 from smithy_aws_core.identity.environment import EnvironmentCredentialsResolver
 
 from . import config
+from .harness.history_blocks import normalise_history
+from .harness import deferred_cues
+from .harness.deferred_cues import DeferredCues
 from .sensory_log import stage as sensory_stage
 
 logger = logging.getLogger(__name__)
@@ -32,6 +36,9 @@ INPUT_SAMPLE_RATE = 16000
 OUTPUT_SAMPLE_RATE = 24000
 CHUNK_DURATION_MS = 100
 INPUT_CHUNK_SIZE = int(INPUT_SAMPLE_RATE * CHUNK_DURATION_MS / 1000)
+# mediaType of every TEXT content block on the stream (system prompt, history
+# replay, injected text, tool results) and of Sonic's text output.
+TEXT_MEDIA_TYPE = "text/plain"
 
 # Resilience watchdogs (see _check_clock_step / _check_response_liveness).
 # The robot has no RTC: it can boot with a stale clock and have NTP step time
@@ -39,7 +46,17 @@ INPUT_CHUNK_SIZE = int(INPUT_SAMPLE_RATE * CHUNK_DURATION_MS / 1000)
 # turns that stream into a zombie — sends keep succeeding, no response event
 # ever comes back, and nothing raises — so it must be detected, not waited on.
 CLOCK_STEP_THRESHOLD_S = 60.0
-DEFAULT_LIVENESS_S = 180.0
+# 15 minutes, not 3 (2026-09-06, robot): the proactive session rotation
+# (NOVA_SONIC_ROTATE_S, ~7 min, hard deadline 470 s) already replaces any
+# session — a zombie included — so this watchdog is a conservative second net,
+# not the first line of defence. At 180 s it restarted a quiet room every three
+# minutes on a desk where chairs, typing and a person moving about produce
+# speech-level bursts that Bedrock (rightly) never answers.
+DEFAULT_LIVENESS_S = 900.0
+# History-replay circuit breaker: a session that dies this soon after a start
+# that replayed history counts as a replay death; two in a row suspend replay.
+REPLAY_DEATH_WINDOW_S = 10.0
+REPLAY_DEATHS_TO_SUSPEND = 2
 
 
 def _liveness_window() -> float:
@@ -56,6 +73,79 @@ def _liveness_window() -> float:
     except (TypeError, ValueError):
         return DEFAULT_LIVENESS_S
     return value if value > 0 else DEFAULT_LIVENESS_S
+
+
+# Speech floor for the response-liveness watchdog (see feed_audio).
+#
+# The harness feeds the microphone to Sonic ten times a second whether or not
+# anybody is talking, so "input flowing, no response for 180s" used to mean
+# "nobody spoke for three minutes": the robot's journal for 2026-09-05 carried
+# six "Response liveness stall forced a restart" lines exactly 180s apart in a
+# quiet room, each one a clean session that wiped the conversation. Only a
+# chunk loud enough to be speech counts as input now. The default sits between
+# the measured quiet-room floor (~0.002 RMS) and human speech (~0.09 RMS) on
+# this microphone — see harness/hearing.py's echo-gate measurement.
+DEFAULT_SPEECH_FLOOR = 0.05
+# A single loud chunk is a cough, a door, a dropped spoon — not a person
+# talking to the robot. Only a BURST of speech-level chunks counts as input
+# for the liveness watchdog: at least SPEECH_BURST_CHUNKS above the floor
+# within the last SPEECH_BURST_WINDOW chunks (2 s at 100 ms/chunk). Measured
+# on the robot 2026-09-06 00:15 (quiet house): mic RMS median 0.005, one
+# chunk in ten above 0.02, so a single-chunk trigger restarted the stream
+# every 3 min of silence even after the floor was introduced — and at 0.02
+# with a burst rule a person moving around the desk still did (00:27, 00:30).
+# 0.05 is conversational speech near the robot (measured ~0.09 close-talk).
+SPEECH_BURST_CHUNKS = 5
+SPEECH_BURST_WINDOW = 20
+
+# Turn detection (see _endpointing_sensitivity).
+#
+# Nova 2 Sonic's sessionStart accepts turnDetectionConfiguration.
+# endpointingSensitivity: HIGH "detects pauses quickly, enabling faster
+# responses but may cut off slower speakers", LOW waits longer. The harness
+# used to send neither, leaving the service default to decide how long a
+# pause has to be before Nova may answer.
+DEFAULT_ENDPOINTING = "HIGH"
+ENDPOINTING_VALUES = ("HIGH", "MEDIUM", "LOW")
+
+
+def _speech_floor() -> float:
+    """RMS above which a microphone chunk counts as input (``NOVA_SONIC_SPEECH_FLOOR``).
+
+    Read at call time like :func:`_liveness_window`, and with the same
+    fallback rule: a missing, unparseable or non-positive value means the
+    default rather than a gate that lets everything (or nothing) through.
+    """
+    import os
+
+    try:
+        value = float(os.environ.get("NOVA_SONIC_SPEECH_FLOOR", ""))
+    except (TypeError, ValueError):
+        return DEFAULT_SPEECH_FLOOR
+    return value if value > 0 else DEFAULT_SPEECH_FLOOR
+
+
+def _endpointing_sensitivity() -> str:
+    """Turn-detection sensitivity for ``sessionStart`` (``NOVA_SONIC_ENDPOINTING``).
+
+    Read at call time so ``load_dotenv()`` order never matters, and
+    case-insensitive because this is a knob typed into a ``.env`` by hand. An
+    unrecognised value is a NAMED warning plus the default — a typo must not
+    cost the session, and must not be silent either.
+    """
+    import os
+
+    raw = os.environ.get("NOVA_SONIC_ENDPOINTING", "").strip()
+    if not raw:
+        return DEFAULT_ENDPOINTING
+    value = raw.upper()
+    if value not in ENDPOINTING_VALUES:
+        logger.warning(
+            f"Unrecognised NOVA_SONIC_ENDPOINTING={raw!r} — expected one of "
+            f"{'/'.join(ENDPOINTING_VALUES)}; using {DEFAULT_ENDPOINTING}"
+        )
+        return DEFAULT_ENDPOINTING
+    return value
 
 
 # Restart backoff (see NovaSonic._compute_restart_delay).
@@ -75,6 +165,101 @@ DEFAULT_RESTART_MAX_S = 60.0
 RESTART_HEALTHY_RESET_S = 60.0
 # Upper bound on the random jitter added on top of the backoff delay.
 RESTART_JITTER_FRACTION = 0.10
+
+
+# Proactive session rotation (see NovaSonic._rotation_due).
+#
+# Measured on the robot 2026-09-05: the one session that outlived the liveness
+# window started 21:51:29 and died at 21:59:30 — 480.5 s — with Bedrock's
+# "Model has timed out in processing the request". The Nova 2 Sonic connection
+# limit on this account really is 8 minutes, and hitting it costs the whole
+# conversation plus the base backoff. So the harness replaces the session
+# itself, a little early and at a moment when nothing is in flight.
+DEFAULT_ROTATE_S = 420.0
+# Bedrock drops a Nova 2 Sonic stream that carries no INTERACTIVE content
+# (speech or text) for 295 s — silent audio bytes do not count ("Please ensure
+# gaps between audio bytes and interactive content are less than 295 seconds",
+# robot 2026-09-06, three drops at exactly 296 s of quiet). A quiet session is
+# therefore rotated cleanly a little before that, at an idle moment.
+DEFAULT_IDLE_ROTATE_S = 270.0
+#: The substring of Bedrock's own idle-cutoff message.
+IDLE_CUTOFF_MARKER = "gaps between audio bytes and interactive content"
+# ...and if nothing is ever idle, rotate anyway rather than let Bedrock do it
+# for us at 480 s. This is the last quiet exit before the ceiling.
+DEFAULT_ROTATE_DEADLINE_S = 470.0
+# How many conversation-history blocks a fresh session replays at most.
+DEFAULT_HISTORY_MAX_BLOCKS = 8
+# Roles the Nova 2 input-events page accepts for replayed history content.
+HISTORY_ROLES = ("USER", "ASSISTANT")
+
+
+def _warn_unsupported_history_roles(blocks: list) -> None:
+    """Log a NAMED warning for every history block whose role Sonic rejects.
+
+    A pure logging pass, run before ``normalise_history`` drops such blocks
+    silently: the operator gets to see *which* role was wrong rather than
+    just a shorter replay. Non-dict entries and empty roles are ignored here
+    (the normaliser handles them).
+    """
+    for block in blocks:
+        role = str(block.get("role", "") or "").strip().upper() if isinstance(block, dict) else ""
+        if role and role not in HISTORY_ROLES:
+            logger.warning(
+                f"history block skipped: role={block.get('role')!r} is not one of "
+                f"{'/'.join(HISTORY_ROLES)}"
+            )
+
+
+def _idle_rotate_s() -> float:
+    """Seconds without interactive content before an idle rotation (``NOVA_SONIC_IDLE_ROTATE_S``).
+
+    Parsed like ``_rotate_interval_s``; ``0`` or negative disables it.
+    """
+    import os
+
+    raw = os.environ.get("NOVA_SONIC_IDLE_ROTATE_S", "")
+    if raw.strip() == "":
+        return DEFAULT_IDLE_ROTATE_S
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_IDLE_ROTATE_S
+    return value if value > 0 else 0.0
+
+
+def _rotate_interval_s() -> float:
+    """Session age at which a rotation becomes *possible* (``NOVA_SONIC_ROTATE_S``).
+
+    Read at call time like :func:`_liveness_window`, with the same fallback
+    for a missing or unparseable value — but here ``0`` (or negative) is a
+    meaningful setting rather than nonsense: it turns proactive rotation off
+    entirely and leaves the session to die at the service ceiling as before.
+    """
+    import os
+
+    try:
+        value = float(os.environ.get("NOVA_SONIC_ROTATE_S", ""))
+    except (TypeError, ValueError):
+        return DEFAULT_ROTATE_S
+    return value if value > 0 else 0.0
+
+
+def _rotate_deadline_s() -> float:
+    """Session age past which a rotation happens regardless of what is in flight.
+
+    (``NOVA_SONIC_ROTATE_DEADLINE_S``, default 470 — ten seconds of margin on
+    the measured 480.5 s ceiling.) Unlike the interval this has no "off"
+    value: a deadline of zero would mean "always past it", so a non-positive
+    setting falls back to the default. Rotation as a whole is switched off
+    with ``NOVA_SONIC_ROTATE_S=0``.
+    """
+    import os
+
+    try:
+        value = float(os.environ.get("NOVA_SONIC_ROTATE_DEADLINE_S", ""))
+    except (TypeError, ValueError):
+        return DEFAULT_ROTATE_DEADLINE_S
+    return value if value > 0 else DEFAULT_ROTATE_DEADLINE_S
 
 
 def _restart_base_s() -> float:
@@ -120,6 +305,10 @@ class NovaSonic:
         on_tool_use: Callable[[str, str, dict], None] | None = None,
         on_interruption: Callable[[], None] | None = None,
         restart_rng: random.Random | None = None,
+        deferred_ttl_s: float = deferred_cues.DEFAULT_TTL_S,
+        history_provider: Callable[[], list[dict]] | None = None,
+        history_max_blocks: int = DEFAULT_HISTORY_MAX_BLOCKS,
+        speaker_idle: Callable[[], bool] | None = None,
     ):
         self.region = region or config.region()
         self.model_id = model_id or config.sonic_model_id()
@@ -153,8 +342,52 @@ class NovaSonic:
         self._last_inject_time = 0.0
         self._inject_min_interval = 3.0  # seconds between inject_text calls
 
+        # Body cues that arrived mid-utterance. The speaking guard below can
+        # not send them (injecting into a generating stream can hang it), but
+        # it no longer throws them away either: they are parked here and
+        # delivered, with their age in the text, the moment the utterance
+        # ends. See reachy_nova/harness/deferred_cues.py.
+        self._deferred = DeferredCues(ttl_s=deferred_ttl_s)
+
+        # Conversation history replayed into every fresh session — the one
+        # documented place it may go ("only once, after the system prompt and
+        # before audio streaming begins"). Any zero-argument callable
+        # returning ``[{"role": "USER"|"ASSISTANT", "text": ...}, ...]`` will
+        # do; the harness passes the memory compactor's ``history``.
+        self._history_provider = history_provider
+        self._history_max_blocks = history_max_blocks
+
+        # Is the *speaker* done? A rotation must not cut a chunk that is
+        # still playing, and playback lags generation by at least one chunk,
+        # so our own ``_speaking`` flag is not enough. Missing = idle.
+        self._speaker_idle = speaker_idle
+        # Session age (seconds) of a rotation that has been decided but whose
+        # new session has not started yet — carried across so the journal line
+        # can name the age AND the replay count in one grep-able line.
+        self._pending_rotation: float | None = None
+        # History-replay circuit breaker (live incident 2026-09-06): a stream
+        # that dies within REPLAY_DEATH_WINDOW_S of a start that replayed
+        # history, twice in a row, means the history itself is what Bedrock
+        # refuses — replay is suspended until a session lives long enough.
+        self._replay_blocks_last = 0
+        self._replay_deaths = 0
+        self._replay_suspended = False
+        #: Called with (text, sense_class) after a DEFERRED cue is actually
+        #: sent (the drain), so the ledger records delivered senses only
+        #: (PR #24 review): the app wires it to ledger.append.
+        self.on_deferred_delivered: Callable[[str, str | None], None] | None = None
+        self._rotation_age_s: float | None = None
+        # Monotonic time of the last INTERACTIVE content we sent (a speech
+        # burst, a text inject, a tool result, the history replay).
+        self._last_interactive_mono: float | None = None
+        # Why the last stream death happened, as Bedrock phrased it.
+        self._last_stream_error: str = ""
+
         # Tool use tracking
         self._current_tool_use: dict | None = None
+
+        # Speech-burst window for the liveness watchdog (see feed_audio).
+        self._energy_recent: deque[bool] = deque(maxlen=SPEECH_BURST_WINDOW)
 
         # Watchdog bookkeeping: a generation that stalls mid-utterance (stream
         # hang, lost contentEnd) must not pin the speaking guard forever.
@@ -212,10 +445,18 @@ class NovaSonic:
         # Restart-backoff bookkeeping: a fresh session starts unproven.
         self._session_start_mono = mono
         self._session_had_response = False
+        # A speech burst must be earned inside THIS session (PR #24 review).
+        self._energy_recent.clear()
+        self._last_interactive_mono = mono
 
     def _note_input_sent(self) -> None:
         """Record that we pushed something (audio or text) into the stream."""
         self._input_since_response = True
+        self._last_interactive_mono = time.monotonic()
+
+    def _note_interactive_sent(self) -> None:
+        """Interactive content for Bedrock's idle clock, NOT liveness input."""
+        self._last_interactive_mono = time.monotonic()
 
     def _note_response_event(self, mono: float | None = None) -> None:
         """Record a sign of life from Bedrock — resets the liveness deadline."""
@@ -268,6 +509,66 @@ class NovaSonic:
         return True
 
     # ------------------------------------------------------------------
+    # Proactive rotation
+    # ------------------------------------------------------------------
+
+    def _session_is_idle(self) -> bool:
+        """True when replacing the session right now cuts nothing off.
+
+        Four things can be in flight, and the restart path drops all four:
+        Sonic generating a reply, the speaker still playing one (playback
+        lags generation by at least a chunk), a tool call whose result would
+        be discarded on the session-generation change, and the "thinking"
+        gap between a heard transcript and the first audio. A missing
+        ``speaker_idle`` callable counts as idle — an absent leg must not
+        wedge the rotation shut — but a *raising* one counts as busy, since
+        we then genuinely do not know; the hard deadline covers that case.
+        """
+        if self.state != "listening":
+            return False
+        if self._current_tool_use is not None:
+            return False
+        if self._speaking:
+            return False
+        if self._speaker_idle is None:
+            return True
+        try:
+            return bool(self._speaker_idle())
+        except Exception as e:  # pragma: no cover - defensive, logged not raised
+            logger.debug(f"speaker_idle check failed: {e} — treating as busy")
+            return False
+
+    def _rotation_due(self, mono: float) -> float | None:
+        """Session age at which to rotate *now*, or ``None`` to keep waiting.
+
+        Called on every tick of the response-wait loop, so the common case —
+        a session younger than the interval — costs one env lookup and a
+        subtraction. Past the interval the session is replaced at the first
+        idle moment; past the hard deadline it is replaced regardless,
+        because Bedrock's own timeout at ~480 s is strictly worse (it takes
+        the conversation with it and charges the backoff on the way out).
+        """
+        interval = _rotate_interval_s()
+        if interval <= 0 or self._session_start_mono is None:
+            return None
+        age = mono - self._session_start_mono
+        # Idle rotation: nothing interactive has been sent for a while and
+        # Bedrock will cut the stream at 295 s anyway — swap it cleanly now.
+        idle_s = _idle_rotate_s()
+        if (
+            idle_s > 0
+            and self._last_interactive_mono is not None
+            and mono - self._last_interactive_mono >= idle_s
+            and self._session_is_idle()
+        ):
+            return age
+        if age < interval:
+            return None
+        if age >= _rotate_deadline_s():
+            return age
+        return age if self._session_is_idle() else None
+
+    # ------------------------------------------------------------------
     # Restart backoff
     # ------------------------------------------------------------------
 
@@ -284,6 +585,32 @@ class NovaSonic:
             return
         if death_mono - self._session_start_mono >= RESTART_HEALTHY_RESET_S:
             self._restart_attempt = 0
+
+    def _note_session_death(self, death_mono: float) -> None:
+        """Feed the history-replay circuit breaker with how this session ended.
+
+        Called on the restart path with the monotonic time of death. A death
+        within :data:`REPLAY_DEATH_WINDOW_S` of a start that replayed at least
+        one history block is a *replay death*; :data:`REPLAY_DEATHS_TO_SUSPEND`
+        of them in a row suspend replay (the next start sends none, with a
+        warning). A session that lived past the window resets the count and
+        lifts the suspension, so a transient refusal costs one clean session,
+        not the memory forever.
+        """
+        age = None if self._session_start_mono is None else death_mono - self._session_start_mono
+        if age is not None and age < REPLAY_DEATH_WINDOW_S and self._replay_blocks_last > 0:
+            self._replay_deaths += 1
+            if self._replay_deaths >= REPLAY_DEATHS_TO_SUSPEND and not self._replay_suspended:
+                self._replay_suspended = True
+                logger.warning(
+                    f"history replay: {self._replay_deaths} sessions died within "
+                    f"{REPLAY_DEATH_WINDOW_S:.0f}s of replaying history — suspending replay"
+                )
+        elif age is not None and age >= REPLAY_DEATH_WINDOW_S:
+            if self._replay_suspended:
+                logger.info("history replay: a session lived — replay re-enabled")
+            self._replay_deaths = 0
+            self._replay_suspended = False
 
     def _compute_restart_delay(self) -> tuple[float, int]:
         """Return ``(delay_seconds, attempt_number)`` for the next restart.
@@ -390,6 +717,83 @@ class NovaSonic:
         await self._stream.input_stream.send(chunk)
         logger.debug(f"SEND → {event_type} OK")
 
+    async def _replay_history(self) -> int:
+        """Send the conversation history as TEXT blocks; return how many crossed.
+
+        Every restart goes through here — proactive rotation, the liveness and
+        clock-step watchdogs, the network-change path and an ordinary stream
+        death — so "the robot forgets everything on every restart" is fixed in
+        one place rather than four.
+
+        The provider is somebody else's code (the harness's memory compactor,
+        reading a file off a disk that has been 90 % full), so it never takes
+        the session down with it: a raising provider is one warning and an
+        empty replay. Blocks past ``history_max_blocks`` are dropped from the
+        end (the provider returns oldest-first, with its context summary at
+        the front, so the front is the part worth keeping), a role the service
+        does not accept is skipped with a NAMED warning rather than sent and
+        rejected, and an empty block is skipped silently — an empty
+        ``textInput`` is not something to spend a content block on.
+        """
+        blocks: list[dict] = []
+        if self._history_provider is not None:
+            try:
+                blocks = list(self._history_provider() or [])
+            except Exception as e:
+                logger.warning(
+                    f"history provider failed: {e} — starting the session with no replay"
+                )
+                blocks = []
+
+        if self._replay_suspended and blocks:
+            logger.warning(
+                f"history replay suspended after {self._replay_deaths} immediate stream "
+                f"deaths — starting clean ({len(blocks)} block(s) withheld)"
+            )
+            blocks = []
+
+        _warn_unsupported_history_roles(blocks)
+        # Defensive shaping at the SENDER: USER first, roles alternating, no
+        # trailing USER — Bedrock kills the whole stream otherwise (live
+        # incident 2026-09-06, see harness/history_blocks.py).
+        blocks = normalise_history(blocks)
+
+        sent = 0
+        for block in blocks:
+            if sent >= self._history_max_blocks:
+                break
+            role = block["role"]
+            text = block["text"]
+            content_name = str(uuid.uuid4())
+            await self._send({
+                "contentStart": {
+                    "promptName": self._prompt_name,
+                    "contentName": content_name,
+                    "type": "TEXT",
+                    "interactive": False,
+                    "role": role,
+                    "textInputConfiguration": {"mediaType": TEXT_MEDIA_TYPE},
+                }
+            })
+            await self._send({
+                "textInput": {
+                    "promptName": self._prompt_name,
+                    "contentName": content_name,
+                    "content": text,
+                }
+            })
+            await self._send({
+                "contentEnd": {
+                    "promptName": self._prompt_name,
+                    "contentName": content_name,
+                }
+            })
+            sent += 1
+
+        logger.info(f"history replayed blocks={sent}")
+        self._replay_blocks_last = sent
+        return sent
+
     async def _start_session(self) -> None:
         if not self._client:
             self._init_client()
@@ -400,15 +804,20 @@ class NovaSonic:
         )
         logger.info("Stream opened OK")
 
-        # Session start
-        logger.info("Sending sessionStart")
+        # Session start — the endpointing sensitivity is resolved per session,
+        # so a .env edit takes effect on the next restart without a redeploy.
+        endpointing = _endpointing_sensitivity()
+        logger.info(f"Sending sessionStart (endpointing={endpointing})")
         await self._send({
             "sessionStart": {
                 "inferenceConfiguration": {
                     "maxTokens": 1024,
                     "topP": 0.9,
                     "temperature": 0.7,
-                }
+                },
+                "turnDetectionConfiguration": {
+                    "endpointingSensitivity": endpointing,
+                },
             }
         })
 
@@ -416,7 +825,7 @@ class NovaSonic:
         logger.info(f"Sending promptStart (voice={self.voice_id})")
         prompt_start = {
             "promptName": self._prompt_name,
-            "textOutputConfiguration": {"mediaType": "text/plain"},
+            "textOutputConfiguration": {"mediaType": TEXT_MEDIA_TYPE},
             "audioOutputConfiguration": {
                 "mediaType": "audio/lpcm",
                 "sampleRateHertz": OUTPUT_SAMPLE_RATE,
@@ -442,7 +851,7 @@ class NovaSonic:
                 "type": "TEXT",
                 "interactive": True,
                 "role": "SYSTEM",
-                "textInputConfiguration": {"mediaType": "text/plain"},
+                "textInputConfiguration": {"mediaType": TEXT_MEDIA_TYPE},
             }
         })
         await self._send({
@@ -458,6 +867,18 @@ class NovaSonic:
                 "contentName": self._system_content,
             }
         })
+
+        # Conversation history — the ONLY window the service gives us for it:
+        # "after the system prompt and before audio streaming begins". Nothing
+        # else goes out in between; in particular no assistant-initiating
+        # text, because Sonic can speak unprompted on a fresh session and a
+        # rotation every seven minutes must not become a re-greeting (c31).
+        replayed = await self._replay_history()
+        if self._rotation_age_s is not None:
+            logger.info(
+                f"rotation delay=0 replay={replayed} age={self._rotation_age_s:.0f}s"
+            )
+            self._rotation_age_s = None
 
         # Start audio input stream
         logger.info("Sending audio input contentStart")
@@ -567,6 +988,20 @@ class NovaSonic:
                         ce = event["contentEnd"]
                         content_type = ce.get("type", "")
                         role = ce.get("role", "")
+                        stop_reason = ce.get("stopReason", "")
+
+                        # Name every contentEnd, whatever we then do with it.
+                        # On the robot (2026-09-05) the ASSISTANT contentEnd
+                        # never ended the speaking state — all five utterances
+                        # of that boot were flushed by the 4s speaking watchdog
+                        # instead — and the logs could not say whether the event
+                        # never arrived, arrived with another role/type, or
+                        # carried a stopReason this branch ignores. These three
+                        # fields are the answer, so they are INFO, not DEBUG.
+                        logger.info(
+                            f"contentEnd type={content_type or '?'} "
+                            f"role={role or '?'} stopReason={stop_reason or '?'}"
+                        )
 
                         if content_type == "TOOL" and self._current_tool_use:
                             # Tool use complete — fire callback
@@ -584,11 +1019,23 @@ class NovaSonic:
                                     self.on_tool_use(tool_name, tool_use_id, params)
                                 except Exception as e:
                                     logger.error(f"on_tool_use callback error: {e}")
-                        elif role == "ASSISTANT":
+                        elif role == "ASSISTANT" or (
+                            content_type == "AUDIO" and stop_reason == "END_TURN"
+                        ):
+                            # LIVE FINDING (robot, 2026-09-06 00:08): Nova 2
+                            # Sonic's contentEnd carries NO role field at all —
+                            # the journal shows ``contentEnd type=AUDIO role=?
+                            # stopReason=END_TURN`` — so the role check alone
+                            # never matched and every utterance ended on the
+                            # 4 s speaking watchdog. An AUDIO END_TURN is the
+                            # end of the spoken turn; a PARTIAL_TURN is not.
                             if self._speaking:
                                 logger.info("Utterance ended — back to listening")
                             self._speaking = False
                             self._set_state("listening")
+                            # Schedules a task; never awaited here, so a slow
+                            # send cannot stall the response reader.
+                            self._on_speaking_ended()
 
                 except StopAsyncIteration:
                     break
@@ -603,6 +1050,7 @@ class NovaSonic:
                             logger.warning(f"Transient stream error (#{consecutive_errors}): {e}")
                             await asyncio.sleep(0.05)
                             continue
+                        self._last_stream_error = str(e)
                         logger.error(f"Response processing error: {e}")
                     break
         except Exception as e:
@@ -719,6 +1167,14 @@ class NovaSonic:
                         )
                         break
 
+                    # Proactive rotation: replace the session ourselves, at an
+                    # idle moment, before Bedrock's ~8-minute ceiling does it
+                    # for us mid-sentence and without a recap.
+                    rotation_age = self._rotation_due(time.monotonic())
+                    if rotation_age is not None:
+                        self._pending_rotation = rotation_age
+                        break
+
                     # Speaking watchdog: a stalled generation (no audio for 10s
                     # while _speaking) would otherwise pin the inject guard
                     # forever and hold the speaker's utterance buffer hostage.
@@ -732,6 +1188,9 @@ class NovaSonic:
                         )
                         self._speaking = False
                         self._set_state("listening")
+                        # A cue parked during an utterance the service never
+                        # closed properly is still owed a delivery.
+                        self._on_speaking_ended()
                     await asyncio.sleep(0.1)
             finally:
                 # Mark inactive FIRST to stop all incoming traffic
@@ -746,10 +1205,15 @@ class NovaSonic:
             if self._should_stop(stop_event):
                 break
 
-            # Stream died (or a watchdog forced it) — prepare for restart.
-            # Either way the restart is CLEAN: fresh client, fresh UUIDs,
-            # system prompt only. No conversation recap is replayed.
+            # Stream died, a watchdog forced it, or the rotation timer decided
+            # it was time — prepare for restart. Either way the restart is a
+            # fresh client with fresh UUIDs and the system prompt, plus
+            # whatever ``history_provider`` remembers (see _replay_history).
             self._session_gen += 1  # invalidate any queued coroutines
+            # Parked cues belong to the conversation that just died; the fresh
+            # session never heard the utterance they interrupted, so delivering
+            # them into it would be a reaction to nothing.
+            self._deferred.clear()
             self._set_state("idle")
 
             immediate = self._restart_now_event.is_set()
@@ -757,12 +1221,32 @@ class NovaSonic:
             reason = self._forced_restart_reason or "Bedrock stream died"
             self._forced_restart_reason = None
 
-            if immediate:
+            rotation_age = self._pending_rotation
+            self._pending_rotation = None
+
+            if rotation_age is not None and not immediate:
+                # A planned swap of a healthy session, taken at an idle
+                # moment: no backoff, and no "restarting session" warning
+                # either — the single journal line for a rotation is emitted
+                # by the fresh session's replay, so it can name delay, replay
+                # count and age together.
+                delay = 0.0
+                self._restart_attempt = 0
+                self._rotation_age_s = rotation_age
+            elif immediate:
                 # request_immediate_restart() already reset the backoff —
                 # skip the delay entirely, this restart is urgent.
                 delay = 0.0
                 logger.warning(f"{reason} — restarting session now")
+            elif IDLE_CUTOFF_MARKER in self._last_stream_error:
+                # Bedrock's own idle cutoff: the stream was healthy, the room
+                # was quiet. A fresh stream works at once — no backoff.
+                delay = 0.0
+                self._restart_attempt = 0
+                self._last_stream_error = ""
+                logger.warning("Bedrock idle cutoff (no interactive content for 295 s) — restarting now")
             else:
+                self._note_session_death(time.monotonic())
                 self._maybe_reset_backoff_for_healthy_session(time.monotonic())
                 delay, attempt = self._compute_restart_delay()
                 logger.warning(
@@ -851,6 +1335,11 @@ class NovaSonic:
     def feed_audio(self, samples: np.ndarray) -> None:
         """Feed audio samples from the robot's microphone.
 
+        EVERY chunk is sent — the gate below decides only what the
+        response-liveness watchdog is told, never what Bedrock hears. A quiet
+        room must keep streaming (Sonic's own turn detection lives on that
+        stream) while still counting as "we sent nothing worth answering".
+
         Args:
             samples: float32 audio samples from reachy_mini at 16kHz.
                      Can be mono (N,) or stereo (N, 2).
@@ -862,6 +1351,11 @@ class NovaSonic:
         if samples.ndim == 2:
             samples = samples.mean(axis=1)
 
+        # Loudness, measured on the float32 array before the int16 conversion:
+        # this runs on the hearing thread ten times a second, so it stays one
+        # numpy pass over 100ms of samples and nothing more.
+        rms = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
+
         # Convert float32 [-1, 1] to int16 PCM bytes
         pcm = (samples * 32767).astype(np.int16).tobytes()
 
@@ -869,28 +1363,43 @@ class NovaSonic:
             asyncio.run_coroutine_threadsafe(
                 self._send_audio_chunk(pcm), self._loop
             )
-            self._note_input_sent()  # liveness watchdog: we pushed input
+            self._energy_recent.append(rms > _speech_floor())
+            if sum(self._energy_recent) >= SPEECH_BURST_CHUNKS:
+                # liveness watchdog: somebody is actually talking (a burst,
+                # not one loud chunk)
+                self._note_input_sent()
         except Exception as e:
             logger.warning(f"feed_audio scheduling failed: {e}")
 
-    def inject_text(self, text: str, force: bool = False) -> None:
+    def inject_text(
+        self, text: str, force: bool = False, sense_class: str | None = None
+    ) -> str:
         """Inject a text message into the conversation (e.g., vision description).
 
         Args:
             text: the text to inject as a USER message
             force: if True, skip the speaking guard (use with caution)
+            sense_class: the rules entry's ``sense:`` value (``pat``, ``face``,
+                ``sound``, ``vision``; ``None`` for anything unclassed). Used
+                only when the cue has to be deferred: it names the latest-wins
+                slot the cue is parked in, so a burst of pats during one reply
+                collapses to one delivery while a pat and a face stay two
+                independent facts.
         """
         if not self._active or not self._loop:
-            return
+            return "dropped-inactive"
 
         # Don't inject while the model is actively generating audio — this can
         # destabilize the Bedrock bidirectional stream and cause it to hang.
+        # The cue is parked rather than lost: _on_speaking_ended() delivers it
+        # (with its age in the text) the moment the utterance finishes.
         if self._speaking and not force:
+            cue = self._deferred.put(sense_class, text)
             sensory_stage(
                 "inject", "speech", str(uuid.uuid4()),
-                f"dropped reason=speaking text={text[:60]!r}",
+                f"deferred class={cue.sense_class} text={text[:60]!r}",
             )
-            return
+            return "deferred"
 
         # Throttle: skip if too soon after last inject to avoid flooding Bedrock
         now = time.time()
@@ -900,52 +1409,147 @@ class NovaSonic:
                 f"dropped reason=throttled interval={now - self._last_inject_time:.1f}s "
                 f"text={text[:60]!r}",
             )
-            return
+            return "dropped-throttled"
         self._last_inject_time = now
 
-        content_name = str(uuid.uuid4())
         gen = self._session_gen  # capture at scheduling time
 
-        async def _inject():
-            async with self._inject_lock:
-                if not self._active or self._session_gen != gen:
-                    return  # session restarted — discard stale inject
-                try:
-                    await self._send({
-                        "contentStart": {
-                            "promptName": self._prompt_name,
-                            "contentName": content_name,
-                            "type": "TEXT",
-                            "interactive": True,
-                            "role": "USER",
-                            "textInputConfiguration": {"mediaType": "text/plain"},
-                        }
-                    })
-                    await self._send({
-                        "textInput": {
-                            "promptName": self._prompt_name,
-                            "contentName": content_name,
-                            "content": text,
-                        }
-                    })
-                except Exception as e:
-                    logger.warning(f"inject_text send failed: {e}")
-                finally:
-                    try:
-                        await self._send({
-                            "contentEnd": {
-                                "promptName": self._prompt_name,
-                                "contentName": content_name,
-                            }
-                        })
-                    except Exception:
-                        pass
-
         try:
-            asyncio.run_coroutine_threadsafe(_inject(), self._loop)
-            self._note_input_sent()  # liveness watchdog: we pushed input
+            asyncio.run_coroutine_threadsafe(self._send_user_text(text, gen), self._loop)
+            self._note_interactive_sent()
+            # NOT liveness input: a quiet body cue or a tool result legitimately
+            # gets no answer from the model (robot, 2026-09-06). Only sustained
+            # speech-level mic audio counts — see feed_audio.
         except Exception as e:
             logger.warning(f"inject_text scheduling failed: {e}")
+            return "dropped-scheduling"
+        return "sent"
+
+    async def _send_user_text(self, text: str, gen: int) -> None:
+        """The one wire path a USER text message takes: start / text / end.
+
+        Shared by ``inject_text`` and the deferred-cue drain so a parked cue
+        reaches Bedrock through *exactly* the same events, under the same
+        ``_inject_lock`` serialisation and the same stale-session check — the
+        deferral changes when a cue is sent, never how.
+        """
+        lock = self._inject_lock
+        if lock is None:
+            # Only reachable before _run_loop armed the lock (tests, a very
+            # early inject); one lock is still enough to serialise, because
+            # every send below runs on the Sonic loop thread.
+            lock = self._inject_lock = asyncio.Lock()
+        content_name = str(uuid.uuid4())
+        async with lock:
+            if not self._active or self._session_gen != gen:
+                return  # session restarted — discard stale inject
+            try:
+                await self._send({
+                    "contentStart": {
+                        "promptName": self._prompt_name,
+                        "contentName": content_name,
+                        "type": "TEXT",
+                        "interactive": True,
+                        "role": "USER",
+                        "textInputConfiguration": {"mediaType": TEXT_MEDIA_TYPE},
+                    }
+                })
+                await self._send({
+                    "textInput": {
+                        "promptName": self._prompt_name,
+                        "contentName": content_name,
+                        "content": text,
+                    }
+                })
+            except Exception as e:
+                logger.warning(f"inject_text send failed: {e}")
+            finally:
+                try:
+                    await self._send({
+                        "contentEnd": {
+                            "promptName": self._prompt_name,
+                            "contentName": content_name,
+                        }
+                    })
+                except Exception:
+                    pass
+
+    # ------------------------------------------------------------------
+    # Deferred cues (see harness/deferred_cues.py)
+    # ------------------------------------------------------------------
+
+    def _on_speaking_ended(self) -> None:
+        """Schedule delivery of any cue parked while the model was generating.
+
+        Called from BOTH places the speaking state ends — the ASSISTANT
+        ``contentEnd`` branch in ``_process_responses`` and the 4 s speaking
+        watchdog in ``_run_loop`` — because a cue parked during an utterance
+        the service never closed properly must still be delivered.
+
+        The drain is *scheduled*, never awaited here: ``_process_responses``
+        is the only reader of the response stream, and a send that blocks
+        (a slow stream, a busy ``_inject_lock``) must not stop it reading.
+
+        A cue can still land in the microsecond window between ``_speaking``
+        going False and the ``pending()`` check below — ``inject_text`` runs
+        on other threads and reads the guard before it parks. Such a cue
+        waits for the *next* transition, by which time the TTL has almost
+        certainly retired it as ``dropped reason=deferred-expired``. That is
+        the intended, named outcome: the moment really has passed.
+        """
+        if not self._deferred.pending():
+            return
+        gen = self._session_gen  # capture at scheduling time
+        try:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None:
+                loop.create_task(self._drain_deferred(gen))
+            elif self._loop is not None:
+                asyncio.run_coroutine_threadsafe(self._drain_deferred(gen), self._loop)
+        except Exception as e:  # noqa: BLE001 - a lost cue must not kill the loop
+            logger.warning(f"deferred drain scheduling failed: {e}")
+
+    async def _drain_deferred(self, gen: int) -> None:
+        """Deliver the parked cues, newest text per sense class, oldest first."""
+        if not self._active or self._session_gen != gen:
+            return  # session restarted — the cues belong to a conversation that is gone
+        cues = self._deferred.drain()
+        if not cues:
+            return
+
+        now = self._deferred.now()  # the slot's clock, not this module's
+        delivered = 0
+        for cue in cues:
+            if delivered >= deferred_cues.MAX_DRAIN_PER_TRANSITION:
+                self._deferred.log_overflow(cue, cue.age(now))
+                continue
+            text = self._deferred.render(cue, now)
+            sensory_stage(
+                "inject", "speech", str(uuid.uuid4()),
+                f"drained class={cue.sense_class} age={cue.age(now):.1f}s "
+                f"text={text[:60]!r}",
+            )
+            # The 3s throttle is deliberately NOT consulted: the cue already
+            # waited out a whole utterance, which is what the throttle exists
+            # to enforce. It is re-armed below so the injects that follow the
+            # drain are spaced normally again.
+            await self._send_user_text(text, gen)
+            if self.on_deferred_delivered is not None:
+                try:
+                    self.on_deferred_delivered(text, cue.sense_class)
+                except Exception as e:  # noqa: BLE001 - a ledger hiccup must not stop the drain
+                    logger.warning(f"on_deferred_delivered raised: {e}")
+            delivered += 1
+
+        if delivered:
+            self._last_inject_time = time.time()
+            self._note_interactive_sent()
+            # NOT liveness input: a quiet body cue or a tool result legitimately
+            # gets no answer from the model (robot, 2026-09-06). Only sustained
+            # speech-level mic audio counts — see feed_audio.
 
     def send_tool_result(self, tool_use_id: str, result: str) -> None:
         """Send a tool result back to the Nova Sonic conversation."""
@@ -970,7 +1574,7 @@ class NovaSonic:
                             "toolResultInputConfiguration": {
                                 "toolUseId": tool_use_id,
                                 "type": "TEXT",
-                                "textInputConfiguration": {"mediaType": "text/plain"},
+                                "textInputConfiguration": {"mediaType": TEXT_MEDIA_TYPE},
                             },
                         }
                     })
@@ -997,5 +1601,9 @@ class NovaSonic:
 
         try:
             asyncio.run_coroutine_threadsafe(_send_result(), self._loop)
+            self._note_interactive_sent()
+            # NOT liveness input: a quiet body cue or a tool result legitimately
+            # gets no answer from the model (robot, 2026-09-06). Only sustained
+            # speech-level mic audio counts — see feed_audio.
         except Exception as e:
             logger.warning(f"send_tool_result scheduling failed: {e}")

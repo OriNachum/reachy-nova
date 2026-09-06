@@ -63,6 +63,14 @@ class ChaosPoster:
             return len(self.attempts)
 
 
+def _no_delete(base_url: str, filename: str) -> None:
+    """Chunk-file cleanup, stubbed out: no test here may dial the daemon.
+
+    Chunked playback (t8) deletes each played chunk file through the daemon's
+    DELETE route; the chaos angle is the POST path, so cleanup is a no-op.
+    """
+
+
 def speak(speaker: SonicSpeaker) -> None:
     """Drive one complete Sonic utterance through the callback wire."""
     speaker.on_state_change("speaking")
@@ -107,8 +115,9 @@ def test_cloud_loss_mid_conversation_purges_and_recovers(stop_event, caplog) -> 
     speaker = SonicSpeaker(
         gate=gate,
         sample_rate=SAMPLE_RATE,
-        base_url="http://localhost:9",  # never dialled — the poster is fake
+        base_url="http://localhost:9",  # never dialled — the transports are fake
         poster=poster,
+        deleter=_no_delete,
         on_playback_failure=lambda: failures.append(time.monotonic()),
     )
     speaker.start(stop_event)
@@ -180,14 +189,27 @@ def test_repeated_cloud_flaps_never_require_a_restart(stop_event, caplog) -> Non
     gate = EchoGate(margin_s=0.01)
     poster = ChaosPoster()
     speaker = SonicSpeaker(
-        gate=gate, sample_rate=SAMPLE_RATE, base_url="http://localhost:9", poster=poster
+        gate=gate,
+        sample_rate=SAMPLE_RATE,
+        base_url="http://localhost:9",
+        poster=poster,
+        deleter=_no_delete,
     )
     speaker.start(stop_event)
 
     for cycle in (1, 2):
         poster.mode = "refuse"
         speak(speaker)
-        assert wait_until(lambda: speaker.playback_failures == cycle), f"cycle {cycle}"
+        # ``playback_failures`` is bumped at the START of the mouth-loss path,
+        # before the gate clear and the queue purge. Healing the poster and
+        # queueing the next utterance on that signal alone races the purge:
+        # under scheduler load the worker can still be inside its purge loop
+        # when the healed utterance lands, and eats it (seen as a ~1-in-3
+        # flake under pytest-xdist on 2026-09-06). ``idle`` flips only after
+        # the whole attempt has resolved (task_done), so wait for both.
+        assert wait_until(
+            lambda: speaker.playback_failures == cycle and speaker.idle
+        ), f"cycle {cycle}"
         assert speaker.worker_alive
         poster.mode = "ok"
         speak(speaker)

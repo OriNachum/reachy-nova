@@ -15,10 +15,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from reachy_nova.harness import app, rules_overlay, statedir
+from reachy_nova.harness import app, mood as mood_module, persona, rules_overlay, statedir
 from reachy_nova.harness.bus import NovaBus
 from reachy_nova.harness.gate import EchoGate
 from reachy_nova.harness.hearing import TeeHearing
+from reachy_nova.harness.lite_reactor import LiteReactor
+from reachy_nova.harness.memory_compactor import MemoryCompactor
 from reachy_nova.harness.sense_history import SenseHistory
 from reachy_nova.harness.speaking import SonicSpeaker
 from reachy_nova.harness.tools import TOOL_SPECS, IntentTools
@@ -31,10 +33,19 @@ import numpy as np
 
 @pytest.fixture(autouse=True)
 def _isolated_composition(monkeypatch, tmp_path):
-    """Isolate the state dir and neutralise ambient feature flags."""
+    """Isolate the state dir and neutralise ambient feature flags.
+
+    The four t14 switches are cleared too: they fail OPEN, so an ambient
+    ``NOVA_MEMORY=0`` in the developer's shell would silently turn the
+    default-build tests into off-path tests.
+    """
     monkeypatch.setenv("REACHY_STATE_DIR", str(tmp_path / "reachy-state"))
     monkeypatch.delenv("NOVA_ACT_ENABLED", raising=False)
     monkeypatch.delenv("NOVA_OMNI_MODEL_ID", raising=False)
+    monkeypatch.delenv("NOVA_CHUNKED_PLAYBACK", raising=False)
+    monkeypatch.delenv("NOVA_LITE_REACTIONS", raising=False)
+    monkeypatch.delenv("NOVA_MEMORY", raising=False)
+    monkeypatch.delenv("NOVA_PERSONA_PATH", raising=False)
     yield
 
 
@@ -44,6 +55,23 @@ def _build():
 
 def _messages(caplog):
     return [r.getMessage() for r in caplog.records]
+
+
+def _sense_lines(caplog):
+    """Only the ``nova.sensory`` records, in order — the journal as shipped."""
+    return [r.getMessage() for r in caplog.records if r.name == "nova.sensory"]
+
+
+def _ledger_records():
+    """Every NDJSON line the composed ledger wrote, parsed, in file order."""
+    path = statedir.ledger_path()
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _boom(*_a, **_k):
+    raise RuntimeError("synthetic construction failure")
 
 
 def _fake_msg(topic: str, payload: dict) -> SimpleNamespace:
@@ -146,7 +174,12 @@ def test_default_build_is_the_core_components_with_named_absences(caplog):
         "IntentTools",
         "NetworkReactor",
         "NetworkUnit",
+        # The Lite reaction tier starts BEFORE the bus that feeds it cues…
+        "LiteReactor",
         "NovaBus",
+        # …and the memory compactor after it: its periodic Lite call is slow
+        # and nothing waits on it, so it must never sit between cue and mouth.
+        "MemoryCompactor",
     ]
     lines = _messages(caplog)
     assert any("component absent name=browser reason=act-disabled" in m for m in lines)
@@ -163,8 +196,10 @@ def test_act_enabled_adds_a_supervised_browser_wired_for_progress(monkeypatch):
     assert isinstance(adapter.browser, NovaBrowser)
     # IntentTools wired the browser handle AND its progress narration.
     assert adapter.browser.on_progress == sonic.inject_text
-    assert hasattr(adapter, "start") and hasattr(adapter, "stop")
-    assert len(components) == 8  # core 3 + tools + network leg (2) + bus + browser
+    assert hasattr(adapter, "start")
+    assert hasattr(adapter, "stop")
+    # core 3 + tools + network leg (2) + lite reactor + bus + compactor + browser
+    assert len(components) == 10
 
 
 def test_browser_component_start_and_stop_never_raise_when_disabled():
@@ -189,8 +224,19 @@ def test_omni_model_set_adds_the_vision_leg_wired_to_bus_and_sonic(monkeypatch):
     assert isinstance(leg._understand.__self__, NovaOmni)
     assert leg._understand.__self__.omni_model_id == "us.amazon.nova-2-omni-v1:0"
     # …and the one answer goes to Sonic's guarded inject.
-    assert leg._on_answer == sonic.inject_text
-    assert len(components) == 8  # core 3 + tools + network leg (2) + bus + vision
+    # The leg's answer reaches Sonic through the brief-cue wrapper, not bare:
+    # a raw 400-850 char Omni description became a 30 s monologue (2026-09-06).
+    seen: list[tuple] = []
+    sonic.inject_text = lambda text, force=False, sense_class=None: seen.append((text, sense_class))
+    leg._on_answer("A person sits at a desk. " * 30)
+    assert len(seen) == 1
+    text, sense_class = seen[0]
+    assert text.startswith("(you glance around: ")
+    assert text.endswith(") (react briefly if at all)")
+    assert sense_class == "vision"
+    assert len(text) < 320
+    # core 3 + tools + network leg (2) + lite reactor + bus + compactor + vision
+    assert len(components) == 10
 
 
 def test_vision_leg_degrades_to_absent_when_the_bus_cannot_build(monkeypatch, caplog):
@@ -199,10 +245,10 @@ def test_vision_leg_degrades_to_absent_when_the_bus_cannot_build(monkeypatch, ca
 
     monkeypatch.setenv("NOVA_OMNI_MODEL_ID", "us.amazon.nova-2-omni-v1:0")
 
-    def _boom(*_a, **_k):
+    def _no_paho(*_a, **_k):
         raise RuntimeError("no paho on this box")
 
-    monkeypatch.setattr(bus_module, "NovaBus", _boom)
+    monkeypatch.setattr(bus_module, "NovaBus", _no_paho)
     with caplog.at_level("INFO", logger="nova.sensory"):
         components = _build()
     names = [type(c).__name__ for c in components]
@@ -213,6 +259,10 @@ def test_vision_leg_degrades_to_absent_when_the_bus_cannot_build(monkeypatch, ca
         "IntentTools",
         "NetworkReactor",
         "NetworkUnit",
+        # The reactor and the compactor are independent of the bus: neither
+        # needs a broker, so an absent bus costs them nothing.
+        "LiteReactor",
+        "MemoryCompactor",
     ]
     lines = _messages(caplog)
     assert any("component absent name=bus" in m for m in lines)
@@ -234,8 +284,14 @@ def test_system_prompt_tells_nova_to_recall_senses():
 
 
 def test_system_prompt_never_narrates_body_mechanics():
-    assert "never describe" in app.HARNESS_SYSTEM_PROMPT
+    """t14 moved this rule from the prompt string into the persona file/default
+    ("Never explain your own workings — 'reflex', 'rule', ... — unless someone
+    asks you why"), so the ASSERTION moved with it. The property is unchanged:
+    the composed prompt still forbids narrating the mechanism."""
+    assert "Never explain your own workings" in app.HARNESS_SYSTEM_PROMPT
     assert "mention what you did" not in app.HARNESS_SYSTEM_PROMPT
+    # …and it is the PERSONA half that carries it, never the tool guide.
+    assert "Never explain your own workings" not in app.TOOL_GUIDE
 
 
 def test_system_prompt_covers_unknown_kind_errors():
@@ -538,7 +594,8 @@ def test_browser_result_callback_reaches_the_conversation(monkeypatch):
     inner = getattr(browser, "browser", None) or getattr(browser, "_browser")
     assert inner.on_result is not None
     inner.on_result("The answer is 42.")
-    assert len(injected) == 1 and "The answer is 42." in injected[0]
+    assert len(injected) == 1
+    assert "The answer is 42." in injected[0]
 
 
 def test_l5_the_prompt_tells_nova_when_to_release_face_and_recall_senses():
@@ -547,3 +604,537 @@ def test_l5_the_prompt_tells_nova_when_to_release_face_and_recall_senses():
     prompt = app.HARNESS_SYSTEM_PROMPT
     assert "stop following or look away, call release_face" in prompt
     assert "call recall_senses before answering" in prompt
+
+
+# --------------------------------------------------------------------------- #
+# t14 — persona + amy voice (c8/h5)                                            #
+# --------------------------------------------------------------------------- #
+
+#: The tool surface EXACTLY as it stood before t14 rewired the composition
+#: root. h5 promises Sonic's toolConfiguration is byte-identical to today's,
+#: and the persona move is the one change most likely to disturb it by
+#: accident — so the names and the count are pinned here as a snapshot rather
+#: than derived from the very list under test.
+PRE_T14_TOOL_NAMES = [
+    "run_behavior",
+    "declare_goal",
+    "set_mode",
+    "set_inhibition",
+    "goto",
+    "create_rule",
+    "browse",
+    "enroll_face",
+    "lock_face",
+    "release_face",
+    "look_at_face",
+    "look_at_sound",
+    "forge",
+    "use_skill",
+    "author_rule",
+    "raise_voice",
+    "lower_voice",
+    "set_voice_level",
+    "recall_senses",
+    "stay_silent",
+    "end_silence",
+]
+
+
+def test_sonic_system_prompt_is_the_persona_text_plus_the_tool_guide():
+    sonic = _build()[0]
+    assert sonic.system_prompt == persona.read().text + "\n\n" + app.TOOL_GUIDE
+    assert sonic.system_prompt.startswith(persona.read().text)
+    assert sonic.system_prompt.endswith(app.TOOL_GUIDE)
+
+
+def test_harness_system_prompt_default_is_the_embedded_persona_plus_the_guide():
+    """The module-level default keeps working for importers (and for the
+    prompt tests above), built from the EMBEDDED persona — build_app() builds
+    the same shape from whatever persona.read() actually resolved."""
+    assert app.HARNESS_SYSTEM_PROMPT == persona.DEFAULT_PERSONA + "\n\n" + app.TOOL_GUIDE
+    assert app.build_system_prompt("WHO") == "WHO\n\n" + app.TOOL_GUIDE
+
+
+def test_the_persona_file_in_force_is_what_sonic_is_given(monkeypatch, tmp_path):
+    """Editing the persona file and restarting changes the next session's
+    system prompt with no code change (c8) — including via NOVA_PERSONA_PATH,
+    which build_app() passes through switches.persona_path."""
+    custom = tmp_path / "another-nova.md"
+    custom.write_text("You are Nova. You say very little, and mean all of it.\n", encoding="utf-8")
+    monkeypatch.setenv("NOVA_PERSONA_PATH", str(custom))
+
+    sonic = _build()[0]
+
+    assert sonic.system_prompt.startswith("You are Nova. You say very little")
+    assert sonic.system_prompt.endswith(app.TOOL_GUIDE)
+    assert persona.DEFAULT_PERSONA not in sonic.system_prompt
+
+
+def test_nothing_in_the_prompt_calls_nova_an_assistant():
+    """The exact register this round removes — AWS's own baseline voice prompt
+    is 'a warm, professional, and helpful AI assistant' (s9)."""
+    sonic = _build()[0]
+    assert "assistant" not in sonic.system_prompt.lower()
+    assert "assistant" not in app.HARNESS_SYSTEM_PROMPT.lower()
+    assert "assistant" not in app.TOOL_GUIDE.lower()
+
+
+def test_the_tool_guide_is_mechanics_only():
+    """Character text lives in the persona file; the guide is the contract."""
+    guide = app.TOOL_GUIDE
+    for tool in (
+        "run_behavior",
+        "goto",
+        "declare_goal",
+        "set_mode",
+        "set_inhibition",
+        "lock_face",
+        "release_face",
+        "create_rule",
+        "recall_senses",
+    ):
+        assert tool in guide
+    assert "did not confirm" in guide
+    assert "unknown-kind" in guide
+    for character_word in ("warm", "curious", "companion", "playful", "teasing", "dry", "sincere"):
+        assert character_word not in guide.lower()
+
+
+def test_sonic_speaks_with_the_amy_voice():
+    assert app.SONIC_VOICE_ID == "amy"
+    assert _build()[0].voice_id == "amy"
+
+
+def test_the_tool_specs_are_unchanged_by_the_persona_move():
+    names = [spec["toolSpec"]["name"] for spec in TOOL_SPECS]
+    assert names == PRE_T14_TOOL_NAMES
+    assert len(TOOL_SPECS) == len(PRE_T14_TOOL_NAMES)
+    assert _build()[0].tools is TOOL_SPECS
+
+
+# --------------------------------------------------------------------------- #
+# t14 — the switches lead the journal and gate the legs (c33/h25)              #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_journal_opens_with_every_switch_then_the_persona_source(caplog):
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        _build()
+    lines = _sense_lines(caplog)
+    assert lines[0].endswith(
+        "switches chunked_playback=on lite_reactions=on memory=on persona=default"
+    )
+    assert "event=switches" in lines[0]
+    assert "event=persona" in lines[1]
+    assert "persona source=file:" in lines[1]
+
+
+def test_the_switch_line_names_every_resolved_value_when_they_are_off(monkeypatch, caplog):
+    monkeypatch.setenv("NOVA_CHUNKED_PLAYBACK", "0")
+    monkeypatch.setenv("NOVA_LITE_REACTIONS", "0")
+    monkeypatch.setenv("NOVA_MEMORY", "0")
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        _build()
+    assert _sense_lines(caplog)[0].endswith(
+        "switches chunked_playback=off lite_reactions=off memory=off persona=default"
+    )
+
+
+def test_chunked_playback_is_on_by_default():
+    assert _build()[1].chunked is True
+
+
+def test_chunked_playback_off_constructs_a_whole_utterance_speaker(monkeypatch):
+    monkeypatch.setenv("NOVA_CHUNKED_PLAYBACK", "0")
+    speaker = _build()[1]
+    assert isinstance(speaker, SonicSpeaker)
+    assert speaker.chunked is False
+
+
+def test_memory_off_builds_no_ledger_and_no_compactor(monkeypatch, caplog):
+    monkeypatch.setenv("NOVA_MEMORY", "0")
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        components = _build()
+
+    sonic = components[0]
+    assert not any(isinstance(c, MemoryCompactor) for c in components)
+    assert sonic._history_provider is None
+    assert any(
+        "component absent name=memory-ledger reason=switch-off" in m for m in _sense_lines(caplog)
+    )
+    # …and no transcript writes anything at all.
+    sonic.on_transcript("USER", "hi")
+    sonic.on_transcript("ASSISTANT", "hello")
+    assert _ledger_records() == []
+
+
+def test_memory_off_still_wires_the_speaker_idle_check(monkeypatch):
+    """A rotation must not cut a chunk in half even with nothing to replay."""
+    monkeypatch.setenv("NOVA_MEMORY", "0")
+    sonic, speaker = _build()[:2]
+    assert sonic._speaker_idle is not None
+    assert sonic._speaker_idle() is speaker.idle
+
+
+def test_lite_reactions_off_builds_the_bus_with_no_reactor(monkeypatch, caplog):
+    monkeypatch.setenv("NOVA_LITE_REACTIONS", "0")
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        components = _build()
+
+    bus_component = next(c for c in components if isinstance(c, NovaBus))
+    assert bus_component._reactor is None
+    assert not any(isinstance(c, LiteReactor) for c in components)
+    assert any(
+        "component absent name=lite-reactor reason=switch-off" in m for m in _sense_lines(caplog)
+    )
+
+
+def test_memory_construction_failure_degrades_to_a_named_absent_line(monkeypatch, caplog):
+    import reachy_nova.harness.memory_compactor as memory_compactor_module
+
+    monkeypatch.setattr(memory_compactor_module, "MemoryCompactor", _boom)
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        components = _build()  # must not raise
+
+    sonic = components[0]
+    assert not any(isinstance(c, MemoryCompactor) for c in components)
+    assert sonic._history_provider is None
+    assert any(
+        "component absent name=memory-ledger reason=synthetic construction failure" in m
+        for m in _sense_lines(caplog)
+    )
+    # The pair is all-or-nothing: no compactor means no orphan ledger either.
+    sonic.on_transcript("USER", "hi")
+    assert _ledger_records() == []
+
+
+def test_lite_reactor_construction_failure_degrades_to_a_named_absent_line(monkeypatch, caplog):
+    import reachy_nova.harness.lite_reactor as lite_reactor_module
+
+    monkeypatch.setattr(lite_reactor_module, "LiteReactor", _boom)
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        components = _build()  # must not raise
+
+    bus_component = next(c for c in components if isinstance(c, NovaBus))
+    assert bus_component._reactor is None
+    assert not any(isinstance(c, LiteReactor) for c in components)
+    assert any(
+        "component absent name=lite-reactor reason=synthetic construction failure" in m
+        for m in _sense_lines(caplog)
+    )
+
+
+# --------------------------------------------------------------------------- #
+# t14 — the ledger, the compactor and the history replay (c13/h11, c12)        #
+# --------------------------------------------------------------------------- #
+
+
+def test_transcripts_are_appended_to_the_ledger():
+    sonic = _build()[0]
+
+    sonic.on_transcript("USER", "hi")
+    sonic.on_transcript("ASSISTANT", "hello")
+
+    records = _ledger_records()
+    assert [r["kind"] for r in records] == ["USER", "ASSISTANT"]
+    assert [r["text"] for r in records] == ["hi", "hello"]
+
+
+def test_a_bus_inject_reaches_sonic_with_its_class_and_lands_in_the_ledger():
+    components = _build()
+    sonic = components[0]
+    bus_component = next(c for c in components if isinstance(c, NovaBus))
+
+    injected = []
+    sonic.inject_text = lambda text, sense_class=None: (injected.append((text, sense_class)), "sent")[1]
+
+    # The bus introspects on_inject ONCE at construction; it must have found a
+    # real ``sense_class`` keyword on the wrapper, or the class never rides.
+    assert bus_component._on_inject_accepts_sense_class is True
+    bus_component._on_inject("(someone is petting you)", sense_class="pat")
+
+    assert injected == [("(someone is petting you)", "pat")]
+    records = _ledger_records()
+    assert len(records) == 1
+    assert records[0]["kind"] == "sense"
+    assert records[0]["text"] == "(someone is petting you)"
+    assert records[0]["sense_class"] == "pat"
+
+
+def test_sonic_replays_the_compactors_history():
+    components = _build()
+    sonic = components[0]
+    compactor = next(c for c in components if isinstance(c, MemoryCompactor))
+
+    provider = sonic._history_provider
+    assert provider is not None
+    # Bound methods compare by (__self__, __func__), never by identity.
+    assert provider.__self__ is compactor
+    assert provider.__func__ is MemoryCompactor.history
+
+
+def test_the_compactor_reads_the_same_ledger_the_transcripts_write():
+    components = _build()
+    sonic = components[0]
+    compactor = next(c for c in components if isinstance(c, MemoryCompactor))
+
+    sonic.on_transcript("USER", "is the tap still dripping")
+    sonic.on_transcript("ASSISTANT", "constantly")
+
+    blocks = compactor.history()
+    # The history opens with the USER context block (a history that opens with
+    # the assistant kills the Bedrock stream — live incident 2026-09-06) and
+    # the first USER line merges into it; then the roles alternate.
+    assert [b["role"] for b in blocks] == ["USER", "ASSISTANT"]
+    assert blocks[0]["text"].startswith("(earlier today")
+    assert blocks[0]["text"].endswith("is the tap still dripping")
+    assert blocks[1]["text"] == "constantly"
+
+
+def test_sonic_sees_the_speakers_idle_state():
+    components = _build()
+    sonic, speaker = components[0], components[1]
+    speaker.poster = lambda *a, **k: None  # never touch the daemon from a test
+
+    assert speaker.idle is True
+    assert sonic._speaker_idle() is True
+
+    speaker.on_audio_chunk(np.zeros(2400, dtype=np.float32))  # a sub-chunk tail
+
+    assert speaker.idle is False
+    assert sonic._speaker_idle() is False
+
+
+def test_the_compactor_and_reactor_are_supervisor_components_started_in_order():
+    components = _build()
+    names = [type(c).__name__ for c in components]
+
+    assert names.index("LiteReactor") < names.index("NovaBus") < names.index("MemoryCompactor")
+    for component in (
+        next(c for c in components if isinstance(c, LiteReactor)),
+        next(c for c in components if isinstance(c, MemoryCompactor)),
+    ):
+        assert callable(component.start)
+        assert callable(component.stop)
+        # Construction is wiring only: no thread of theirs is running yet.
+        assert component.is_alive() is False
+
+
+# --------------------------------------------------------------------------- #
+# t14 — mood and the Lite reactor's context (c9, c28)                          #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_pat_inject_moves_the_mood_the_reactor_reports():
+    components = _build()
+    bus_component = next(c for c in components if isinstance(c, NovaBus))
+    reactor = next(c for c in components if isinstance(c, LiteReactor))
+
+    assert reactor._context_provider()["mood"] == mood_module.NEUTRAL_SENTENCE
+    bus_component._on_inject("(someone is petting you)", sense_class="pat")
+    assert reactor._context_provider()["mood"] == mood_module.CHEEKY_SENTENCE
+
+
+def test_an_unclassed_inject_leaves_the_mood_alone():
+    components = _build()
+    bus_component = next(c for c in components if isinstance(c, NovaBus))
+    reactor = next(c for c in components if isinstance(c, LiteReactor))
+
+    bus_component._on_inject("(a door closed somewhere)", sense_class="sound")
+
+    assert reactor._context_provider()["mood"] == mood_module.NEUTRAL_SENTENCE
+
+
+def test_the_reaction_context_carries_senses_memory_mood_and_exchanges():
+    components = _build()
+    sonic = components[0]
+    bus_component = next(c for c in components if isinstance(c, NovaBus))
+    reactor = next(c for c in components if isinstance(c, LiteReactor))
+
+    memory_path = statedir.memory_path()
+    memory_path.parent.mkdir(parents=True, exist_ok=True)
+    memory_path.write_text(
+        json.dumps(
+            {
+                "topics": [{"text": "the leaking tap", "ts": 1.0}],
+                "items": [{"text": "stop humming at night", "kind": "stop", "ts": 1.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    bus_component.history.record("touch", "pat", "r1", "(someone is petting you)", "pat", None)
+    sonic.on_transcript("USER", "what is that noise")
+    sonic.on_transcript("ASSISTANT", "the tap again")
+
+    context = reactor._context_provider()
+
+    assert context["senses"] == ["(someone is petting you)"]
+    assert "the leaking tap" in context["memory"]
+    assert "stop humming at night" in context["memory"]
+    assert context["mood"]
+    assert context["exchanges"] == [
+        {"role": "USER", "text": "what is that noise"},
+        {"role": "ASSISTANT", "text": "the tap again"},
+    ]
+
+
+def test_the_reaction_context_is_empty_but_shaped_without_memory(monkeypatch):
+    monkeypatch.setenv("NOVA_MEMORY", "0")
+    components = _build()
+    reactor = next(c for c in components if isinstance(c, LiteReactor))
+
+    context = reactor._context_provider()
+
+    assert context["memory"] == ""
+    assert context["exchanges"] == []
+    assert context["senses"] == []
+    assert context["mood"]
+
+
+def test_render_memory_paragraph_is_one_short_paragraph_or_nothing():
+    assert app.render_memory_paragraph({"topics": [], "items": []}) == ""
+    assert app.render_memory_paragraph({}) == ""
+    rendered = app.render_memory_paragraph(
+        {
+            "topics": [{"text": "the tap"}, {"text": "Tuesday"}],
+            "items": [{"text": "stop humming"}],
+        }
+    )
+    assert rendered == "talked about the tap, Tuesday. worth remembering: stop humming"
+
+
+def test_a_lite_planned_gesture_goes_through_the_intents_spool():
+    components = _build()
+    intents = components[3]
+    reactor = next(c for c in components if isinstance(c, LiteReactor))
+    assert isinstance(intents, IntentTools)
+
+    calls = []
+    intents.execute = lambda name, params: calls.append((name, params)) or "{}"
+    reactor._on_gesture("nod")
+
+    assert calls == [("run_behavior", {"name": "nod", "duration": 2.0})]
+
+
+def test_a_failing_lite_gesture_is_a_named_line_not_a_crash(caplog):
+    components = _build()
+    intents = components[3]
+    reactor = next(c for c in components if isinstance(c, LiteReactor))
+    intents.execute = _boom
+
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        reactor._on_gesture("nod")  # must not raise
+
+    assert any(
+        "dropped reason=lite-gesture-failed name=nod" in m for m in _sense_lines(caplog)
+    )
+
+
+def test_a_real_bus_message_lands_in_the_ledger_through_the_composed_wrapper():
+    """End to end through the REAL rules path: on_message -> rules.yaml ->
+    the composed inject wrapper -> sonic + ledger. The generic rule/fire entry
+    carries no ``react: lite``, so it renders and delivers inline."""
+    components = _build()
+    sonic = components[0]
+    bus_component = next(c for c in components if isinstance(c, NovaBus))
+
+    injected = []
+    sonic.inject_text = lambda text, sense_class=None: (injected.append((text, sense_class)), "sent")[1]
+
+    bus_component.on_message(
+        None,
+        None,
+        _fake_msg(
+            "reachy/events/rule/fire",
+            {
+                "t": "rule",
+                "ts": 1718362800.3,
+                "tick": 15,
+                "action": "fire",
+                "rule": "hear",
+                "kind": "react",
+                "field": "speech",
+                "op": "is_true",
+                "reason": "fired",
+                "behavior": "nod",
+                "disable": [],
+            },
+        ),
+    )
+
+    assert len(injected) == 1
+    records = _ledger_records()
+    assert [r["kind"] for r in records] == ["sense"]
+    assert records[0]["text"] == injected[0][0]
+
+
+def test_vision_descriptions_reach_sonic_as_a_brief_capped_cue():
+    """Robot 2026-09-06: raw 400-850 char Omni descriptions became 30 s monologues."""
+    from reachy_nova.harness.app import VISION_CUE_MAX_CHARS, render_vision_cue
+
+    long = ("A person sits at a desk with a laptop, a cup and a lamp. " * 20).strip()
+    cue = render_vision_cue(long)
+    assert cue.startswith("(you glance around: ")
+    assert cue.endswith(") (react briefly if at all)")
+    inner = cue[len("(you glance around: ") : -len(") (react briefly if at all)")]
+    assert len(inner) <= VISION_CUE_MAX_CHARS
+    assert inner.endswith("."), "cut at a sentence end"
+    assert render_vision_cue("  a cat\n on the desk ") == "(you glance around: a cat on the desk) (react briefly if at all)"
+
+
+
+# --------------------------------------------------------------------------- #
+# PR #24 review fixes                                                          #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_ledger_records_only_delivered_senses():
+    """Review thread 5: a throttled/inactive cue never reached the model."""
+    components = _build()
+    sonic = components[0]
+    bus_component = next(c for c in components if isinstance(c, NovaBus))
+    sonic.inject_text = lambda text, sense_class=None: "dropped-throttled"
+    bus_component._on_inject("(someone is petting you)", sense_class="pat")
+    assert _ledger_records() == []
+    sonic.inject_text = lambda text, sense_class=None: "deferred"
+    bus_component._on_inject("(someone is petting you)", sense_class="pat")
+    assert _ledger_records() == [], "a deferred cue is ledgered when the drain sends it, not before"
+    # ...and the drain's hook is what appends it
+    assert sonic.on_deferred_delivered is not None
+    sonic.on_deferred_delivered("(just now, while you were talking: someone petted you)", "pat")
+    records = _ledger_records()
+    assert len(records) == 1
+    assert records[0]["sense_class"] == "pat"
+
+
+def test_vision_cues_go_through_the_ledger_wrapper():
+    """Review thread 7: a glance is a delivered sense like any other."""
+    components = _build()
+    sonic = components[0]
+    seen = []
+    sonic.inject_text = lambda text, force=False, sense_class=None: (seen.append((text, sense_class)), "sent")[1]
+    app_vision = [c for c in components if type(c).__name__ == "VisionLeg"]
+    if not app_vision:
+        pytest.skip("vision leg not built in this environment")
+    app_vision[0]._on_answer("A cat on the desk.")
+    assert seen
+    assert seen[0][1] == "vision"
+    records = _ledger_records()
+    assert records
+    assert records[-1]["sense_class"] == "vision"
+
+
+def test_lite_vocalizations_play_through_the_speaker():
+    """Review thread 4: a purr is synthesised and rides the speaker like a chunk."""
+    from reachy_nova.harness.lite_reactor import LiteReactor
+
+    components = _build()
+    speaker = components[1]
+    reactor = next(c for c in components if isinstance(c, LiteReactor))
+    assert reactor._on_vocalize is not None
+    fed = []
+    speaker.on_audio_chunk = lambda samples: fed.append(samples)
+    reactor._on_vocalize("purr")
+    assert len(fed) == 1
+    assert fed[0].dtype.name == "float32"
+    assert len(fed[0]) > 2400
