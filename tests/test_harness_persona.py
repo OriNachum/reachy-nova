@@ -343,3 +343,14 @@ def test_a_process_with_a_persona_file_reports_that_file(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == f"file:{written}"
+
+
+TOOL_NAME_SENTENCE = "You never say the names of your tools or actions out loud"
+
+
+@pytest.mark.parametrize("text", both_texts())
+def test_persona_forbids_speaking_tool_names_and_writing_parentheses(text):
+    """Live 2026-09-06: replies opened with '(look-at-face)' / 'release_face'
+    spoken as words. The persona now says so in both texts."""
+    assert TOOL_NAME_SENTENCE in text
+    assert "parentheses are for what your body tells you" in text
