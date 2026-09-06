@@ -113,8 +113,8 @@ confirmation; quoted as recorded.
   `REACHY_FACE_DETECT_MAX_WIDTH=640`): 0.5 s on the 640-px frame measured a
   9.9 Hz tick, 41 overruns/min and engine-heartbeat flaps every ~10 s;
   1.0 s measures 27.7 Hz, 11 overruns/min, no flaps. #180 and the device-branch
-  merge `cb1ab7c` predate the every-agent-owns-its-repo rule and are the
-  runtime agent's to keep or drop
+  merge `cb1ab7c` predate the every-agent-owns-its-repo rule; the runtime
+  agent reviewed and merged #180 to main as v0.53.1 (`21847ac`)
 - `d8` — Ori, 11:51 BST: "Is reachy deployed? I don't see it moving." The
   runtime's face lock inhibits its own `feel-alive` base layer, its intents
   driver evicts an inhibited behaviour every tick, and nothing re-seeds the
@@ -196,8 +196,8 @@ confirmation; quoted as recorded.
 - audit: `scratchpad/audit-t14.txt` (session) — no legacy imports under `reachy_nova/harness/`, `nova_browser.py` act path byte-unchanged, daemon paths `/api/media/{play_sound,sounds,sounds/upload,stop_sound}` and `/api/volume/{current,set}` only
 - lint: `markdownlint-cli2` on the touched docs — 0 new findings (pre-existing table-row MD013 in `gaze.md`/`attention.md`, list-style findings in `nova_browser.md`)
 - commits: `a144528..af9276c` on `spec/features-and-bugs-round-25` (spec+plan, 20 task merges, 1 follow-up, 5 Sonar fixes, 3 review-fix merges, 3 live-fix commits, 1 liveness merge, 1 prerequisite for #177, 1 base-layer revive, 1 reflex bypass)
-- runtime commits: `c8e2575..ca64951` on `feat/reachy-nova-25-names-select-face` (PR #178, merged as 0.52.0); device branch `wireless-motor-enable` @ `cb1ab7c` (0.52.1, #180)
-- PRs / issues: OriNachum/reachy-nova#26 (this round), #25 (closed by it), #8 (closed by it), #27 (filed by the runtime agent, landed `67d5d75`); agentculture/reachy-mini-cli#178 (runtime PR, merged), #175 (enrolled-face preference), #176 (camera pipeline failure, two causes), #177 (configurable names, the runtime agent's; shipped as #182, v0.53.0 on main, not yet on the device branch), #179 (detect only in the still period), #180 (detection knobs), #181 (open-loop aim), #183 (base layer never re-seeded after a lock)
+- runtime commits: `c8e2575..ca64951` on `feat/reachy-nova-25-names-select-face` (PR #178, merged as 0.52.0); device branch `wireless-motor-enable` @ `cb1ab7c` (0.52.1, carrying #180's knobs ahead of their merge to main)
+- PRs / issues: OriNachum/reachy-nova#26 (this round), #25 (closed by it), #8 (closed by it), #27 (filed by the runtime agent, landed `67d5d75`); agentculture/reachy-mini-cli#178 (runtime PR, merged), #175 (enrolled-face preference), #176 (camera pipeline failure, two causes), #177 (configurable names, the runtime agent's; shipped as #182, v0.53.0 on main, not yet on the device branch), #180 (detection knobs, merged as v0.53.1 `21847ac`; the device branch `wireless-motor-enable` still `cb1ab7c`), #179 (detect only in the still period), #180 (detection knobs), #181 (open-loop aim), #183 (base layer never re-seeded after a lock)
 - robot journal, harness pid 15925 (round branch `d5f044b`, 09:31 local): `switches ... face_hold=on think_posture=on attention_gate=on`; `persona ... chars=1615`; `face-nod retired id=nova-face-noticed changed=True verdict=reload confirmed`; `start-hygiene release ok=true` / `start-hygiene clear goal ok=true`; `layer wander -> conversation` at 09:31:17, `look at sound ok=true`, `lock face attempt=1..4 ... error=no face known`, `layer conversation -> wander` at 09:32:03 with `lock never held: refusals=4`; `[SENSE stage=vision source=runtime event=frames] dropped reason=no-frames after=60s` at 09:32:15
 - robot journal, runtime pid 12726 (v0.52.0): `release_face ... 'released': False`, `declare_goal ... 'goal': None`, `run_behavior ... look-at-sound`, `lock_face ... dropped reason=no face known` at 09:31:17/21/27/39
 - robot journals 10:48:57–10:53:26 local (harness pid 17745, runtime): `look_at_face` confirmed; `layer wander -> conversation`; `lock_face` refused then `confirmed {"ok":true,"locked":true,"id":"face-lock:lock:1"}` (`locked after=3.3s attempts=2`); `release_face ... reason=requested` at fade; `locked after=0.3s attempts=1` on the next utterance; seven `motion/face-lost` injects; `heard 'nova, look at me.'` → `event=window] opened by=nova`; two `dropped reason=not-addressed`
