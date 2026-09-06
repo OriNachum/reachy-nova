@@ -159,9 +159,9 @@ def conversation_stack(intents, attention=None, clock=None, lock_state=None):
         tick_s=TICK,
     )
     stack.start(threading.Event())
-    # start() submits its two hygiene ops synchronously before the worker
-    # exists, so they are always already on the fake here.
-    assert intents.names() == ["release_face", "declare_goal"]
+    # The hygiene is the WORKER's first action (PR #26 review), so it lands a
+    # moment after start() returns rather than on the caller's thread.
+    wait_for(lambda: intents.names() == ["release_face", "declare_goal"], message="start hygiene")
     return stack
 
 
@@ -460,11 +460,13 @@ def test_start_submits_the_hygiene_exactly_once():
     stack = GazeStack(intents, tick_s=TICK)
     stack.start(threading.Event())
     try:
+        wait_for(lambda: len(intents.snapshot()) >= 2, message="the start hygiene")
         ops = intents.snapshot()
         assert [name for _s, name, _p in ops] == ["release_face", "declare_goal"]
         assert ops[1][2]["goal"] is None
         # A second start() on a live stack is a no-op, hygiene included.
         stack.start(threading.Event())
+        time.sleep(TICK * 5)
         assert len(intents.snapshot()) == 2
     finally:
         stack.stop()
@@ -490,6 +492,48 @@ def test_stop_while_locked_releases_once_and_a_second_stop_is_silent():
     assert intents.since(mark) == ["release_face"]
 
 
+def test_conversation_disabled_never_leaves_the_lower_layers():
+    """PR #26 review (comment 3943444439): with ``NOVA_FACE_HOLD=0`` the app
+    still builds the stack for the BROWSING layer, so the conversation layer
+    has to be off in the stack itself — not merely unwired."""
+    intents = FakeIntents()
+    attention = FakeAttention(live=True)
+    stack = GazeStack(
+        intents, attention=attention, tick_s=TICK, conversation_enabled=False
+    )
+    stack.start(threading.Event())
+    try:
+        wait_for(lambda: len(intents.snapshot()) >= 2, message="the start hygiene")
+        mark = intents.mark()
+        # Transcripts flowing in as well: neither input may raise the layer.
+        for _ in range(5):
+            stack.on_transcript("user", "nova hello")
+            stack.on_sonic_state("speaking")
+            stack.on_sonic_state("idle")
+            time.sleep(TICK * 2)
+        assert stack.layer == LAYER_WANDER
+        assert stack.conversation_live() is False
+        assert stack.status()["conversation_enabled"] is False
+        assert stack.status()["conversation_live"] is False
+
+        # ...and the browsing layer still works underneath it.
+        stack.on_browser_state("busy")
+        wait_for(lambda: stack.layer == LAYER_BROWSING, message="browsing layer")
+        time.sleep(TICK * 5)
+        assert stack.layer == LAYER_BROWSING
+        assert intents.since(mark).count("look_at_sound") == 0
+        assert intents.since(mark).count("lock_face") == 0
+    finally:
+        stack.stop()
+    assert intents.count("look_at_sound") == 0
+    assert intents.count("lock_face") == 0
+
+
+def test_conversation_enabled_is_on_by_default():
+    stack = GazeStack(FakeIntents(), tick_s=TICK)
+    assert stack.status()["conversation_enabled"] is True
+
+
 def test_a_stop_event_mid_conversation_runs_the_hygiene_once():
     clock = FakeClock()
     intents = FakeIntents()
@@ -509,20 +553,24 @@ def test_a_stop_event_mid_conversation_runs_the_hygiene_once():
         # Nobody joins this thread: the worker's own exit path must clean up.
         stop.set()
         wait_for(lambda: not stack.is_alive(), deadline=2.0, message="worker exit")
+        # The give-back of the browsing inhibits is part of the hygiene too
+        # (PR #26 review), so the exit submits three ops, not two.
         wait_for(
-            lambda: sorted(intents.since(mark)) == ["declare_goal", "release_face"],
+            lambda: sorted(intents.since(mark))
+            == ["declare_goal", "release_face", "set_inhibition"],
             message="the exit hygiene",
         )
     finally:
         stack.stop()
     # ...and stop() afterwards adds nothing.
-    assert sorted(intents.since(mark)) == ["declare_goal", "release_face"]
+    assert sorted(intents.since(mark)) == ["declare_goal", "release_face", "set_inhibition"]
 
 
 def test_stop_without_a_lock_or_a_goal_submits_nothing():
     intents = FakeIntents()
     stack = GazeStack(intents, tick_s=TICK)
     stack.start(threading.Event())
+    wait_for(lambda: len(intents.snapshot()) >= 2, message="the start hygiene")
     mark = intents.mark()
     stack.stop()
     assert intents.since(mark) == []

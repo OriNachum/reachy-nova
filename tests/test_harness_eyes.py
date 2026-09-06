@@ -56,10 +56,25 @@ def test_initial_state_is_unknown():
     assert eyes.Eyes().state == "unknown"
 
 
-def test_true_from_unknown_goes_live_silently(caplog):
+def test_first_true_from_unknown_logs_one_first_seen_line(caplog):
+    """PR #26 review (comment 3943444417): the unknown -> live transition is
+    the record that frames ever arrived. Later True samples stay silent — a
+    healthy camera must not cost a line per second."""
     e = eyes.Eyes(dead_after_s_value=60.0)
     with caplog.at_level("INFO"):
         e.note(True, now=0.0)
+    assert e.state == "live"
+    lines = [ln for ln in caplog.text.splitlines() if "frames" in ln and "[SENSE" in ln]
+    assert len(lines) == 1
+    assert "live first_seen" in lines[0]
+
+
+def test_repeated_true_after_the_first_logs_nothing(caplog):
+    e = eyes.Eyes(dead_after_s_value=60.0)
+    e.note(True, now=0.0)
+    with caplog.at_level("INFO"):
+        for i in range(1, 30):
+            e.note(True, now=float(i))
     assert e.state == "live"
     assert "[SENSE" not in caplog.text
 
@@ -285,6 +300,25 @@ def test_broker_unreachable_factory_raises_degrades_to_unknown(caplog):
     lines = [ln for ln in caplog.text.splitlines() if "component absent" in ln]
     assert len(lines) == 1
     assert "reason=broker-unreachable" in lines[0]
+
+
+def test_unparseable_broker_url_degrades_to_unknown(caplog, monkeypatch):
+    """PR #26 review (comment 3943444436): broker lookup and URL parsing sit
+    INSIDE the fail-open boundary, so a malformed setting degrades the
+    component rather than raising into the supervisor's serial start."""
+
+    def exploding_parse(url, **kwargs):
+        raise ValueError(f"unsupported broker url: {url!r}")
+
+    monkeypatch.setattr(eyes.bus, "parse_broker_url", exploding_parse)
+    component, client = make_component(broker="not a url")
+    with caplog.at_level("INFO"):
+        component.start(threading.Event())  # must not raise
+    assert component.eyes.state == "unknown"
+    lines = [ln for ln in caplog.text.splitlines() if "component absent" in ln]
+    assert len(lines) == 1
+    assert client.loop_started is False
+    assert client.disconnected is True  # the half-built client is cleaned up
 
 
 def test_broker_unreachable_connect_failure_degrades_to_unknown(caplog):

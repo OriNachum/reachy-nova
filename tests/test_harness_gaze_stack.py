@@ -52,6 +52,10 @@ class FakeIntents:
     def __init__(self, call_delay: float = 0.0, result: dict | None = None) -> None:
         self._lock = threading.Lock()
         self.ops: list[tuple[int, str, dict]] = []
+        #: Name of the thread each op was submitted from, in op order — the
+        #: seam the "start hygiene runs on the worker, not the caller" test
+        #: (PR #26 review) asserts against.
+        self.threads: list[str] = []
         self.call_delay = call_delay
         self.result = result if result is not None else {"ok": True}
         self._seq = 0
@@ -68,6 +72,7 @@ class FakeIntents:
             if self._active > 1:
                 self.overlaps += 1
             self.ops.append((seq, tool_name, dict(params)))
+            self.threads.append(threading.current_thread().name)
             boom, self.raise_once = self.raise_once, None
         try:
             if self.call_delay:
@@ -91,6 +96,7 @@ class FakeIntents:
         """
         with self._lock:
             self.ops.clear()
+            self.threads.clear()
 
     # -- reads -------------------------------------------------------------- #
 
@@ -136,12 +142,23 @@ def wait_for(predicate, deadline: float = DEADLINE, message: str = "condition") 
     raise AssertionError(f"timed out waiting for {message}")
 
 
+def drain_start_hygiene(intents) -> None:
+    """Wait for the worker's own start hygiene, then forget it.
+
+    The hygiene runs as the WORKER's first action (PR #26 review: it used to
+    run on the caller's thread and could stall the supervisor's serial
+    start), so it is no longer already on the fake when ``start()`` returns.
+    """
+    wait_for(lambda: len(intents.snapshot()) >= 2, message="the start hygiene")
+    intents.forget()  # see FakeIntents.forget
+
+
 def running_stack(intents, **kwargs):
     """A started GazeStack plus its stop event; caller stops it."""
     stack = GazeStack(intents, tick_s=TICK, **kwargs)
     stop = threading.Event()
     stack.start(stop)
-    intents.forget()  # the t9 start hygiene; see FakeIntents.forget
+    drain_start_hygiene(intents)
     return stack, stop
 
 
@@ -349,7 +366,7 @@ def test_conversation_takes_the_top_layer_and_leaves_the_goal_standing():
     attention = FakeAttention(live=False)
     stack = CountingStack(intents, attention=attention, tick_s=TICK)
     stack.start(threading.Event())
-    intents.forget()  # the t9 start hygiene; see FakeIntents.forget
+    drain_start_hygiene(intents)
     try:
         stack.on_browser_state("busy")
         wait_for(lambda: stack.layer == LAYER_BROWSING, message="browsing layer")
@@ -381,7 +398,7 @@ def test_conversation_ending_with_an_idle_browser_clears_the_goal():
     attention = FakeAttention(live=False)
     stack = CountingStack(intents, attention=attention, tick_s=TICK)
     stack.start(threading.Event())
-    intents.forget()  # the t9 start hygiene; see FakeIntents.forget
+    drain_start_hygiene(intents)
     try:
         stack.on_browser_state("busy")
         wait_for(lambda: stack.layer == LAYER_BROWSING, message="browsing layer")
@@ -405,7 +422,7 @@ def test_local_liveness_fallback_when_no_attention_is_wired():
     intents = FakeIntents()
     stack = GazeStack(intents, attention=None, clock=clock, tick_s=TICK)
     stack.start(threading.Event())
-    intents.forget()  # the t9 start hygiene; see FakeIntents.forget
+    drain_start_hygiene(intents)
     try:
         assert stack.status()["conversation_live"] is False
         stack.on_transcript("user", "hello")
@@ -466,6 +483,37 @@ def test_stop_event_stops_the_worker_within_a_tick():
     stop.set()
     wait_for(lambda: not stack.is_alive(), deadline=1.0, message="worker exit")
     stack.stop()
+
+
+def test_start_returns_immediately_and_the_hygiene_runs_on_the_worker():
+    """PR #26 review (comment 3943444414): ``supervisor._start_components``
+    calls ``start()`` serially on its own thread, so a stalled runtime must
+    not be able to delay every later subsystem. The two hygiene ops therefore
+    run as the WORKER's first action — once, before any transition op."""
+    intents = FakeIntents(call_delay=0.5)
+    stack = GazeStack(intents, tick_s=TICK)
+    started_at = time.monotonic()
+    stack.start(threading.Event())
+    elapsed = time.monotonic() - started_at
+    try:
+        assert elapsed < 0.05, f"start() blocked for {elapsed:.3f}s"
+        wait_for(lambda: len(intents.snapshot()) >= 2, message="the start hygiene")
+        assert [n for _s, n, _p in intents.snapshot()[:2]] == [
+            "release_face",
+            "declare_goal",
+        ]
+        assert intents.snapshot()[1][2]["goal"] is None
+        assert intents.threads[:2] == ["nova-gaze", "nova-gaze"]
+
+        # ...and it is submitted BEFORE any transition op, exactly once.
+        stack.on_browser_state("busy")
+        wait_for(lambda: stack.layer == LAYER_BROWSING, message="browsing layer")
+        names = intents.names()
+        assert names[:2] == ["release_face", "declare_goal"]
+        assert names.count("release_face") == 1
+        assert set(intents.threads) == {"nova-gaze"}
+    finally:
+        stack.stop()
 
 
 def test_status_reports_the_core_fields():

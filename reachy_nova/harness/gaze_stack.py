@@ -26,6 +26,9 @@ So postures here are **layered, lowest first**::
 * ``CONVERSATION`` — someone is actually talking. The face lock owns the head;
   the browsing goal is deliberately **left standing** beneath it, because the
   lock wins by recency and the goal simply resumes when the lock releases.
+  This layer exists only when ``conversation_enabled`` is set (the app passes
+  ``NOVA_FACE_HOLD``); with it off the stack is the browsing posture alone and
+  never issues ``look_at_sound`` or ``lock_face``.
 
 **The conversation layer (t9).** Entering it turns the head toward the voice
 (``look_at_sound``) and then asks for a standing face lock (``lock_face``,
@@ -64,11 +67,13 @@ gets there first. So it runs on the CALLER's thread — but through the same
 serialising op lock the worker uses, so it is still exactly one writer at a
 time.
 
-The single-writer rule has exactly two more exceptions, both deliberate and
-both taken under the same :attr:`_op_lock`: :meth:`start` and :meth:`stop`
-run their hygiene (``release_face`` / ``declare_goal`` None) on the CALLER's
-thread, because "the harness leaves the head the way it found it" has to be
-true before the worker exists and after it is gone.
+:meth:`stop` is the one remaining exception, taken under the same
+:attr:`_op_lock`: its hygiene (``release_face`` / ``declare_goal`` None / the
+inhibit give-back) runs on the CALLER's thread, because "the harness leaves
+the head the way it found it" has to be true after the worker is gone. The
+START hygiene, by contrast, runs as the WORKER's own first action — the
+supervisor starts components serially on one thread, so a stalled runtime
+must never be able to hold up every subsystem behind it (PR #26 review).
 
 stdlib only; never imports ``reachy_mini`` or ``reachy``
 (``tests/test_harness_boundary.py``).
@@ -190,6 +195,14 @@ class GazeStack:
         side_yaw_deg: how far aside the browsing pose looks, in degrees. The
             SIGN alternates per browse; this is the magnitude.
         up_pitch_deg: how far up the browsing pose looks, in degrees.
+        conversation_enabled: whether the CONVERSATION layer exists at all.
+            ``False`` (the app passes ``switches.face_hold``) makes
+            :meth:`conversation_live` answer ``False`` unconditionally, so the
+            layer is never entered and no ``look_at_sound`` / ``lock_face`` is
+            ever issued — the stack is then purely the browsing posture. The
+            attention state is deliberately still accepted and still read for
+            nothing else: gating here rather than at the wiring is what makes
+            the local fallback clock harmless too.
         current_inhibitions: reads the runtime's CURRENT inhibited set — the
             live set the browsing layer merges its own additions into and
             restores out of (see :data:`BROWSING_INHIBITS`). Defaults to
@@ -209,6 +222,7 @@ class GazeStack:
         side_yaw_deg: float = DEFAULT_SIDE_YAW_DEG,
         up_pitch_deg: float = DEFAULT_UP_PITCH_DEG,
         current_inhibitions: Callable[[], list[str]] | None = None,
+        conversation_enabled: bool = True,
     ) -> None:
         self._intents = intents
         self._attention = attention
@@ -218,6 +232,7 @@ class GazeStack:
         self.side_yaw_deg = float(side_yaw_deg)
         self.up_pitch_deg = float(up_pitch_deg)
         self._current_inhibitions = current_inhibitions or _runtime_current_inhibitions
+        self.conversation_enabled = bool(conversation_enabled)
 
         #: Guards the PRODUCER flags only — held for microseconds, never
         #: across an op, so a hook can never be blocked behind a spool round
@@ -270,6 +285,9 @@ class GazeStack:
         #: Set once the stop hygiene has run, so the caller's :meth:`stop` and
         #: the worker's own exit path cannot both submit it.
         self._hygiene_done = False
+        #: Set once the START hygiene has run (on the worker), so a restart
+        #: cannot submit it twice.
+        self._start_hygiene_done = False
 
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -279,14 +297,18 @@ class GazeStack:
     # -- lifecycle ---------------------------------------------------------- #
 
     def start(self, stop_event: threading.Event) -> None:
-        """Run the start hygiene, then spawn the single worker thread (idempotent).
+        """Spawn the single worker thread and return immediately (idempotent).
 
-        The hygiene is one ``release_face`` and one ``declare_goal`` None,
-        submitted on the CALLER's thread before the worker exists — a harness
-        that just restarted has no idea what the previous process left
-        standing on the runtime, and both ops are idempotent no-ops when
-        nothing is held (``release_face`` answers ``ok: true`` "not locked").
-        Starting from a known-clean head is worth two spool round trips.
+        The start hygiene — one ``release_face`` and one ``declare_goal``
+        None — is the WORKER's first action, not the caller's: a harness that
+        just restarted has no idea what the previous process left standing on
+        the runtime, and both ops are idempotent no-ops when nothing is held
+        (``release_face`` answers ``ok: true`` "not locked"). Running them
+        here would put two synchronous spool round trips on the supervisor's
+        serial component start, where one stalled runtime delays every later
+        subsystem and the heartbeat loop itself (PR #26 review). So ``start()``
+        only ever spawns a thread; the hygiene still happens exactly once,
+        under :attr:`_op_lock`, before any transition op.
         """
         if self._thread is not None and self._thread.is_alive():
             return
@@ -294,13 +316,20 @@ class GazeStack:
         self._stop.clear()
         with self._op_lock:
             self._hygiene_done = False
+            self._start_hygiene_done = False
             self.lock_held = False
             self._reset_lock_retry()
-            self._op(RELEASE_FACE, {}, "start-hygiene release")
-            self._op(DECLARE_GOAL, {"goal": None}, "start-hygiene clear goal")
-            self.goal_standing = False
         self._thread = threading.Thread(target=self._run, name="nova-gaze", daemon=True)
         self._thread.start()
+
+    def _start_hygiene(self) -> None:
+        """The two idempotent start ops. Caller holds the op lock; once."""
+        if self._start_hygiene_done:
+            return
+        self._start_hygiene_done = True
+        self._op(RELEASE_FACE, {}, "start-hygiene release")
+        self._op(DECLARE_GOAL, {"goal": None}, "start-hygiene clear goal")
+        self.goal_standing = False
 
     def stop(self, timeout: float = 2.0) -> None:
         """Run the stop hygiene, then ask the worker to exit and join it.
@@ -320,7 +349,16 @@ class GazeStack:
             thread.join(timeout=timeout)
 
     def _stop_hygiene(self) -> None:
-        """Give back whatever we still hold. Caller holds the op lock; once."""
+        """Give back whatever we still hold. Caller holds the op lock; once.
+
+        "Whatever we still hold" includes the head reflexes the browsing
+        layer inhibited: stopping mid-browse used to leave ``orient-to-sound``
+        and ``nod`` disabled in the runtime after the stack that disabled them
+        was gone (PR #26 review). The give-back is the same live-set-respecting
+        restore a transition to WANDER does — only the names in
+        :attr:`_browsing_added`, over whatever the runtime says is inhibited
+        now.
+        """
         if self._hygiene_done:
             return
         self._hygiene_done = True
@@ -332,6 +370,7 @@ class GazeStack:
         if self.goal_standing:
             self._op(DECLARE_GOAL, {"goal": None}, "stop-hygiene clear goal")
             self.goal_standing = False
+        self._leave_browsing_inhibits()
 
     def is_alive(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -446,7 +485,15 @@ class GazeStack:
     # -- reads --------------------------------------------------------------- #
 
     def conversation_live(self) -> bool:
-        """Is a conversation live right now? Attention first, fallback second."""
+        """Is a conversation live right now? Attention first, fallback second.
+
+        With :attr:`conversation_enabled` off the answer is always ``False``,
+        whatever attention says and whatever the local fallback clock holds —
+        that is what makes the CONVERSATION layer unreachable (and
+        ``_enter_conversation`` dead code) rather than merely unwired.
+        """
+        if not self.conversation_enabled:
+            return False
         if self._attention is not None:
             try:
                 return bool(self._attention.conversation_live)
@@ -465,6 +512,7 @@ class GazeStack:
         due = self._next_lock_retry_at
         return {
             "layer": self.layer,
+            "conversation_enabled": self.conversation_enabled,
             "browser_busy": self.browser_busy(),
             "conversation_live": self.conversation_live(),
             "goal_standing": self.goal_standing,
@@ -477,6 +525,15 @@ class GazeStack:
     # -- the worker ----------------------------------------------------------- #
 
     def _run(self) -> None:
+        # The start hygiene is the worker's FIRST action (see start()): it
+        # must precede every transition op, and it must not be on the
+        # supervisor's serial start path.
+        try:
+            with self._op_lock:
+                if not self._should_stop():
+                    self._start_hygiene()
+        except Exception as exc:  # noqa: BLE001 - a bad hygiene never kills the loop
+            logger.warning("gaze stack start hygiene raised: %s", exc)
         while not self._should_stop():
             self._wake.wait(self.tick_s)
             self._wake.clear()

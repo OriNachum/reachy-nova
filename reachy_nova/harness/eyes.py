@@ -105,7 +105,17 @@ class Eyes:
     :class:`EyesComponent` with whatever it decoded off the bus, or directly
     by a test with an injected clock.
 
-    A latched line is emitted on exactly two transitions:
+    A latched line is emitted on exactly three transitions — and ONLY on
+    transitions: a healthy camera samples at ~1 Hz and must never cost a line
+    per second, so the transitions are the record and the steady state is
+    silent.
+
+    - the first ``True`` ever seen (``"unknown"`` -> ``"live"``) latches
+      ``"live"`` and logs ONE ``sensory_log.stage("vision", "runtime",
+      "frames", "live first_seen")`` line, so an operator can tell "frames
+      arrived and kept arriving" from "frames never arrived at all" — which,
+      before this line existed, both looked like silence. Every later ``True``
+      while already live logs nothing.
 
     - continuous ``frame_available=False`` for :attr:`dead_after_s` (default
       60s) latches state ``"dead"`` and logs ONE
@@ -118,9 +128,9 @@ class Eyes:
       missing (since the continuous-False stretch began, not since the
       60s latch fired).
 
-    A ``True`` note from ``"unknown"`` moves to ``"live"`` SILENTLY (decision:
-    the harness has no baseline yet to call this a "restoration" of anything —
-    the very first frame the process ever observes is not news). A later
+    A ``True`` note from ``"unknown"`` is a first sighting, not a
+    "restoration": it gets the ``live first_seen`` line above rather than the
+    ``restored after=`` one, because there is no downtime to report. A later
     ``False`` stretch, after a restoration, latches again after another full
     :attr:`dead_after_s` — the false-streak clock resets on every ``True``.
     """
@@ -154,12 +164,17 @@ class Eyes:
 
     def _note_true(self, t: float) -> None:
         was_dead = self._state == "dead"
+        was_unknown = self._state == "unknown"
         downtime = None if self._false_since is None else t - self._false_since
         self._false_since = None
         self._state = "live"
         if was_dead:
             age = downtime if downtime is not None else 0.0
             sensory_log.stage(_STAGE, _SOURCE, _EVENT, f"restored after={age:.2f}s")
+        elif was_unknown:
+            # One line for the unknown -> live transition, never one per
+            # sample: "the camera works" is news exactly once.
+            sensory_log.stage(_STAGE, _SOURCE, _EVENT, "live first_seen")
 
     def _note_false(self, t: float) -> None:
         if self._false_since is None:
@@ -180,6 +195,17 @@ class Eyes:
 # --------------------------------------------------------------------------- #
 # The supervisor component                                                    #
 # --------------------------------------------------------------------------- #
+
+
+def _close_quietly(client: Any) -> None:
+    """Tear a half-built client down; used only on the start fail-open path."""
+    if client is None:
+        return
+    for method in ("loop_stop", "disconnect"):
+        try:
+            getattr(client, method)()
+        except Exception:  # noqa: BLE001 - cleanup never reports
+            pass
 
 
 def _default_client_factory() -> Any:
@@ -242,27 +268,29 @@ class EyesComponent:
     # -- lifecycle ------------------------------------------------------- #
 
     def start(self, stop_event: threading.Event) -> None:
-        """Open our own subscription. Never raises — an unreachable broker
-        degrades to state ``"unknown"`` with one named senselog line."""
+        """Open our own subscription. Never raises — an unreachable broker OR
+        a malformed broker URL degrades to state ``"unknown"`` with one named
+        senselog line."""
         self._stop_event = stop_event
+        client = None
         try:
+            # ONE fail-open boundary around everything that can fail: building
+            # the client, looking the broker up, parsing its URL and
+            # connecting. Broker lookup and parsing used to sit outside it, so
+            # a malformed REACHY_MQTT_URL raised into the supervisor's serial
+            # component start instead of degrading here (PR #26 review).
             client = self._client_factory()
-        except Exception as err:  # paho missing, broker unreachable, ...
-            sensory_log.stage(
-                _STAGE, _SOURCE, _EVENT, f"component absent reason=broker-unreachable detail={err}"
-            )
-            return
-        client.on_message = self._on_message
-        try:
-            client.on_connect = self._on_connect
-        except AttributeError:
-            pass
-        broker = self._broker if self._broker is not None else bus.broker_url()
-        host, port = bus.parse_broker_url(broker)
-        try:
+            client.on_message = self._on_message
+            try:
+                client.on_connect = self._on_connect
+            except AttributeError:
+                pass
+            broker = self._broker if self._broker is not None else bus.broker_url()
+            host, port = bus.parse_broker_url(broker)
             client.connect_async(host, port, KEEPALIVE_S)
             client.loop_start()
-        except Exception as err:
+        except Exception as err:  # paho missing, bad URL, broker unreachable...
+            _close_quietly(client)
             sensory_log.stage(
                 _STAGE,
                 _SOURCE,
