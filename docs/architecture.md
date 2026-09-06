@@ -299,9 +299,9 @@ See §6.4.
 Sonic's `toolConfiguration` is the mind's entire action vocabulary:
 
 `run_behavior · declare_goal · set_mode · set_inhibition · goto · create_rule ·
-browse · enroll_face · lock_face · release_face · raise_voice · lower_voice ·
-set_voice_level · stay_silent · end_silence · recall_senses · forge ·
-use_skill · author_rule`
+browse · enroll_face · lock_face · release_face · look_at_face ·
+look_at_sound · think · raise_voice · lower_voice · set_voice_level ·
+stay_silent · end_silence · recall_senses · forge · use_skill · author_rule`
 
 Every call returns exactly one of three shapes — `{"ok": true, …}` with the
 engine's result verbatim, `{"ok": false, "error": …}` with a pre‑flight or
@@ -327,6 +327,34 @@ corrects itself from that.
 Each leg is optional and degrades to a single named line
 (`component absent name=<leg> reason=<why>`). "We started without seeing" is
 visible, never inferred.
+
+### 5.7 Attention, the gaze stack and eyes
+
+Three more pieces of state answer "is anyone actually here" for the voice,
+the head, and the camera respectively:
+
+- **Attention** (`harness/attention.py`, `AttentionState`) is the cold/warm
+  window a USER transcript naming the robot opens (`nova`, `reachy`, and the
+  ASR mishearings `richie`/`reach`/`noah`); it renews on anything said inside
+  it and closes on its own after `NOVA_ATTENTION_WINDOW_S` (default 45 s) of
+  silence. `warm` gates the voice (a reply to a nameless transcript from cold
+  is dropped at the speaker, never in the model, and is excluded from the
+  ledger); `conversation_live` gates the gaze; `IntentTools` refuses the
+  effectful tools outright while cold and nameless. See
+  `docs/components/attention.md`.
+- **Gaze stack** (`harness/gaze_stack.py`, `GazeStack`) is the single writer
+  of the head's standing posture, layered `wander < browsing < conversation`:
+  a standing `gaze-hold` goal while a browse is in flight, `look_at_sound`
+  then an auto-owned `lock_face` while a conversation is live, with the
+  browsing goal deliberately left standing beneath a conversation lock so it
+  resumes on fade. See `docs/components/gaze.md`.
+- **Eyes** (`harness/eyes.py`, `Eyes`/`EyesComponent`) samples the runtime's
+  `reachy/events/sense/snapshot` at ~1 Hz on its own MQTT connection and
+  latches exactly one line when `frame_available` stays `false` for
+  `NOVA_EYES_DEAD_AFTER_S` (default 60 s) — the runtime's own availability
+  report reflects composition, not liveness, and reported "available" for two
+  days on a camera producing no frames at all. `supervisor.status()` carries
+  `eyes: live|dead|unknown`. See `docs/components/eyes.md`.
 
 ## 6. Cognition tiers
 
@@ -400,7 +428,12 @@ schema, then hands it to the **rules overlay**, the only code allowed to touch
 `rules.toml`. It validates before touching the file, writes the *whole*
 candidate to a temp sibling with operator bytes carried through verbatim,
 re‑parses and re‑validates it, atomically replaces, then submits a reload and
-**reports the verdict**. A `REJECTED` reload means the old rules are still live
+**reports the verdict**. The validator carries its own copies of the
+runtime's schema sets — including the runtime's optional top-level `names`
+table and its `name_mentioned` sense field (reachy-mini-cli #177 and
+issue #27) — so an operator's own entries outside the managed block are
+validated the way the runtime would validate them, never refused for being
+newer than this copy. A `REJECTED` reload means the old rules are still live
 and the tool answers `ok: false` — the robot never believes it has a reflex it
 does not have.
 
@@ -490,11 +523,11 @@ lives under `~/.reachy_nova/skills-active/`.
   `FORGE_WRITER=kiro`, `KIRO_*`, `NOVA_*`; runtime tuning such as the pat
   stillness gate is a systemd drop‑in on the runtime unit. A dropped
   `--env-file` flag once silently removed credentials — treat that flag as
-  load‑bearing. Every switch this round added (`NOVA_CHUNKED_PLAYBACK`,
-  `NOVA_LITE_REACTIONS`, `NOVA_MEMORY`, `NOVA_PERSONA_PATH`) is resolved once
-  at start, fails open to today's new default on an unrecognised value, and
-  is named in one grep‑able switches summary line in the journal — see
-  `.env.sample`.
+  load‑bearing. Every switch added across these rounds (`NOVA_CHUNKED_PLAYBACK`,
+  `NOVA_LITE_REACTIONS`, `NOVA_MEMORY`, `NOVA_PERSONA_PATH`, `NOVA_FACE_HOLD`,
+  `NOVA_THINK_POSTURE`, `NOVA_ATTENTION_GATE`) is resolved once at start,
+  fails open to today's new default on an unrecognised value, and is named in
+  one grep‑able switches summary line in the journal — see `.env.sample`.
 - **Network.** The robot keeps several NetworkManager Wi‑Fi profiles with
   autoconnect priorities: the home network first, a phone hotspot as the
   travelling fallback. mDNS is unreliable on this LAN, so operators reach it by
@@ -582,12 +615,15 @@ directly with no reachy_nova at all.
   `docs/specs/2026-08-19-kiro-writer-pettable-upgrade.md`,
   `docs/deliveries/2026-08-19-kiro-writer-pettable-upgrade.md`,
   `docs/specs/2026-09-05-fast-witty-remembering-nova.md`,
-  `docs/plans/2026-09-05-fast-witty-remembering-nova.md`
+  `docs/plans/2026-09-05-fast-witty-remembering-nova.md`,
+  `docs/specs/2026-09-06-features-and-bugs-round-25.md`,
+  `docs/plans/2026-09-06-features-and-bugs-round-25.md`
 - Trust and security: `docs/security.md`
 - Components: `docs/components/skill-forge.md`, `speech-events.md`,
   `nova_sonic.md`, `nova_vision.md`, `patting.md`, `tracking.md`,
   `vocalize.md`, `nova_browser.md`, `nova_memory.md`, `gaze.md`,
-  `quiet-mode.md`, `persona.md`, `memory.md`, `lite-reactor.md`
+  `quiet-mode.md`, `persona.md`, `memory.md`, `lite-reactor.md`,
+  `attention.md`, `eyes.md`
 - Nervous system rules: `config/nervous-system/rules.yaml`,
   `docs/plans/nervous-system.md`
 - File‑level module map: `CLAUDE.md`

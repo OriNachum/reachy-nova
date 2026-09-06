@@ -67,6 +67,18 @@ the top of ``_play_one``. A dropped-for-quiet utterance is a no-op everywhere
 else: no post, no gate arm, no queue purge, no ``on_playback_failure``. Quiet
 is not mouth loss, and the ear is untouched by it.
 
+The attention gate (``attention.AttentionState``, optional, task t6) is the
+second mouth-only gate and behaves exactly like the quiet one, one step
+earlier: the verdict is taken ONCE per utterance, on the edge INTO
+``"speaking"`` (:meth:`SonicSpeaker.attention_verdict`), and a
+``not-addressed`` utterance — the robot is COLD and the last thing it heard
+was a transcript that did not name it — has every chunk dropped in
+``_enqueue``, before the queue, before the worker, before any HTTP. No post,
+no gate arm, no queue purge, no ``on_playback_failure``, no window renewal,
+and ONE senselog line for the whole utterance. The mic feed to Sonic is
+untouched: only playback is gated, because a robot that stops LISTENING when
+it is not addressed cannot hear its own name.
+
 stdlib + numpy only; never imports ``reachy_mini``
 (``tests/test_harness_boundary.py``).
 """
@@ -86,6 +98,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from reachy_nova import sensory_log
+from reachy_nova.harness.attention import AttentionState
 from reachy_nova.harness.daemon_client import (
     BASE_URL_ENV,
     DEFAULT_BASE_URL,
@@ -116,6 +129,10 @@ _MIN_SPLIT_TARGET_S = _SPLIT_SEARCH_S + _SPLIT_WINDOW_S
 #: is deleted — cover for ``play_sound``'s trigger latency (29-73 ms measured
 #: on the robot 2026-09-06), not for the echo gate's ear-side margin.
 _DELETE_GRACE_S = 0.25
+#: How long after an inject an utterance still counts as a REACTION to it
+#: rather than a reply to speech. See ``attention_grace_s``.
+_DEFAULT_ATTENTION_GRACE_S = 3.0
+
 #: A failed chunk DELETE is retried on later reaps, up to this many attempts,
 #: then abandoned with a named line (PR #24 review: a transient daemon
 #: failure used to orphan the file AND drop it from the outstanding cap).
@@ -272,6 +289,21 @@ class SonicSpeaker:
         parks most of itself here while the first chunks play; at the old
         bound of 8 a 35 s reply dropped every chunk past the eighth pending
         one and skipped words (robot, 2026-09-06 00:38).
+    attention:
+        Optional :class:`~reachy_nova.harness.attention.AttentionState`. When
+        given, the edge into ``"speaking"`` asks it whether anybody was
+        addressing the robot, and a ``not-addressed`` utterance is dropped
+        chunk by chunk in :meth:`_enqueue` — see :meth:`attention_verdict`.
+        ``None`` (the default) means there is no attention gate at all and
+        every utterance plays, which is exactly the behaviour that shipped
+        before task t6.
+    attention_grace_s:
+        How recently an inject (a body cue or a tool result reaching the
+        model) must have landed for the utterance about to start to count as
+        a REACTION to it rather than a reply to the speech in the room. 3 s
+        covers the round trip from ``inject_text`` to Sonic's first audio
+        sample with room to spare, and is short enough that an inject a
+        minute ago cannot licence an unaddressed reply.
     quiet:
         Optional :class:`~reachy_nova.harness.quiet.QuietState`. While it is
         active every chunk is DROPPED before anything else happens — no post,
@@ -313,6 +345,8 @@ class SonicSpeaker:
         queue_size: int = 90,
         stopper: Callable[[str], None] | None = None,
         quiet: QuietState | None = None,
+        attention: AttentionState | None = None,
+        attention_grace_s: float = _DEFAULT_ATTENTION_GRACE_S,
         chunked: bool = True,
         chunk_s: float = 1.0,
         inactivity_s: float = 0.30,
@@ -322,6 +356,8 @@ class SonicSpeaker:
     ) -> None:
         self.gate = gate
         self.quiet = quiet
+        self.attention = attention
+        self.attention_grace_s = attention_grace_s
         self.sample_rate = sample_rate
         self.base_url = base_url or os.environ.get(BASE_URL_ENV, DEFAULT_BASE_URL)
         self.poster = poster or default_poster
@@ -354,6 +390,22 @@ class SonicSpeaker:
         #: Chunks dropped by the quiet deadline since it was armed.
         self.quiet_drops = 0
         self._quiet_drop_logged = False
+        #: Chunks dropped by the attention gate over the speaker's whole life
+        #: (cumulative — unlike ``quiet_drops``, which resets on release,
+        #: because there is no "release" edge for a window that simply goes
+        #: cold on its own).
+        self.attention_drops = 0
+        #: Per-utterance attention state, all reset on the speaking edge.
+        self._utterance_suppressed = False
+        self._utterance_drops = 0
+        self._attention_drop_logged = False
+        #: Why the current utterance was allowed to speak ("" once it is
+        #: suppressed). Only ``no-transcript`` is revisable — see
+        #: :meth:`recheck_attention`.
+        self._allow_reason = ""
+        #: Set on the edge into "speaking"; with :attr:`idle` it is what
+        #: "an utterance is in flight" means.
+        self._edge_seen = False
 
         #: Bumped by every preempt(). The worker snapshots it when it dequeues
         #: an utterance and re-checks before (and after) posting: an utterance
@@ -450,10 +502,15 @@ class SonicSpeaker:
         and inactivity flushes have not claimed) goes to the queue, and the
         chunk numbering restarts for the next utterance. Entering ``"speaking"``
         restarts it too, so an utterance's chunks always begin at ``seq=1``.
+
+        Entering ``"speaking"`` is ALSO where the attention verdict is taken
+        (:meth:`_open_utterance`) — once, for the whole utterance, before a
+        single chunk has been cut.
         """
         previous, self._sonic_state = self._sonic_state, state
         if state == "speaking" and previous != "speaking":
             self._chunk_seq = 0
+            self._open_utterance()
             return
         if previous == "speaking" and state != "speaking":
             with self._buffer_lock:
@@ -464,6 +521,7 @@ class SonicSpeaker:
                     why="state-change" if self.chunked else "utterance-complete",
                 )
             self._chunk_seq = 0
+            self._close_utterance()
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -558,6 +616,13 @@ class SonicSpeaker:
         return self._utterance_seq, self._chunk_seq, filename
 
     def _enqueue(self, samples: np.ndarray, why: str) -> None:
+        if self._utterance_suppressed:
+            # The attention gate's single drop point — the mirror image of
+            # ``_quiet_blocks``, one step earlier in the pipeline. Nothing is
+            # numbered, queued, posted or armed; the chunk simply never
+            # existed as far as the speaker is concerned.
+            self._note_attention_drop(len(samples) / self.sample_rate)
+            return
         utt, seq, filename = self._next_chunk_identity()
         chunk = _Chunk(samples=samples, utt=utt, seq=seq, filename=filename)
         event = f"utt-{utt}"
@@ -644,6 +709,189 @@ class SonicSpeaker:
             self.quiet_drops = 0
             self._quiet_drop_logged = False
         return False
+
+    # -- the attention gate --------------------------------------------------
+
+    def attention_verdict(self, now: float | None = None) -> str:
+        """``"allowed"`` or ``"not-addressed"`` — was anybody talking to us?
+
+        A PURE function of the attention state: it reads
+        :class:`~reachy_nova.harness.attention.AttentionState`, mutates
+        nothing of its own, and returns the same answer as often as it is
+        asked. That is deliberate — ``app.py`` calls exactly this function
+        when the ASSISTANT transcript arrives, to decide whether the line
+        goes in the ledger (``Ledger.append(..., dropped=...)``), and the two
+        answers must be the same answer.
+
+        The utterance is ALLOWED when any of these holds:
+
+        * there is no attention gate at all (``attention is None``);
+        * the window is WARM — somebody named the robot recently, so this is
+          a conversation and replies belong to it;
+        * an inject landed within ``attention_grace_s`` — the utterance is a
+          reaction to a body cue or a tool result, not a reply to speech, and
+          reactions are the robot's own life, not an interruption of someone
+          else's;
+        * nothing was ever transcribed (``last_transcript_at is None``) — a
+          greeting on boot has no misheard sentence behind it;
+        * the last transcript NAMED the robot (the window may have gone cold
+          in the time Sonic took to answer; the person still asked).
+
+        It is NOT-ADDRESSED only in the one case the gate exists for: cold,
+        the last transcript did not name the robot, and that transcript is
+        more recent than any inject — someone in the room said something to
+        somebody else and Sonic decided to join in.
+        """
+        attention = self.attention
+        if attention is None:
+            return "allowed"
+        return self._verdict_from(attention, now)[0]
+
+    def _verdict_from(
+        self, attention: AttentionState, now: float | None
+    ) -> tuple[str, str]:
+        """The verdict plus WHY it came out that way (the allow reason).
+
+        The reason is what makes :meth:`recheck_attention` possible: only an
+        utterance allowed because ``no-transcript`` can be revised by a
+        transcript that turns up late.
+        """
+        if attention.warm:
+            return "allowed", "warm"
+        moment = self._clock() if now is None else now
+        inject_at = attention.last_inject_at
+        if inject_at is not None and moment - inject_at <= self.attention_grace_s:
+            return "allowed", "inject"
+        transcript_at = attention.last_transcript_at
+        if transcript_at is None:
+            return "allowed", "no-transcript"
+        if attention.last_transcript_named:
+            return "allowed", "named"
+        if inject_at is not None and inject_at >= transcript_at:
+            return "allowed", "inject"
+        return "not-addressed", ""
+
+    def _open_utterance(self) -> None:
+        """Speaking edge: take the verdict once, for the whole utterance.
+
+        Taking it HERE rather than per chunk is what makes an utterance an
+        atomic thing: half a sentence spoken because the window closed
+        between chunk 2 and chunk 3 would be worse than either answering or
+        staying quiet.
+        """
+        self._edge_seen = True
+        self._utterance_drops = 0
+        self._attention_drop_logged = False
+        if self.attention is None:
+            self._utterance_suppressed = False
+            self._allow_reason = "no-gate"
+            return
+        verdict, reason = self._verdict_from(self.attention, None)
+        self._utterance_suppressed = verdict == "not-addressed"
+        self._allow_reason = reason
+        if self._utterance_suppressed:
+            # A suppressed utterance must NOT renew the window: a robot that
+            # kept itself warm with the replies it was not allowed to speak
+            # would talk its way back into the conversation from silence.
+            return
+        try:
+            self.attention.note_utterance()
+        except Exception as err:  # noqa: BLE001 - attention must never mute us
+            sensory_log.stage(
+                STAGE_SPEAK, SOURCE, "attention", f"note_utterance raised: {err}"
+            )
+
+    def _close_utterance(self) -> None:
+        """Leaving "speaking": clear the flag and summarise what it cost.
+
+        Mirrors the quiet gate's "speaking again" line — one summary per
+        suppressed utterance, carrying the chunk count, so the journal shows
+        the size of the silence and not just that there was one.
+        """
+        dropped = self._utterance_drops
+        self._utterance_suppressed = False
+        self._utterance_drops = 0
+        self._attention_drop_logged = False
+        self._allow_reason = ""
+        if dropped:
+            sensory_log.stage(
+                STAGE_SPEAK,
+                SOURCE,
+                "attention-resume",
+                f"utterance dropped count={dropped} reason=not-addressed "
+                "(cold window, nameless transcript)",
+            )
+
+    def _note_attention_drop(self, duration_s: float) -> None:
+        """Count a gate-dropped chunk; name only the first one per utterance."""
+        self.attention_drops += 1
+        self._utterance_drops += 1
+        if not self._attention_drop_logged:
+            self._attention_drop_logged = True
+            sensory_log.stage(
+                STAGE_SPEAK,
+                SOURCE,
+                "attention",
+                f"dropped reason=not-addressed duration={duration_s:.2f}s "
+                "(further chunks of this utterance counted, not logged)",
+            )
+
+    def recheck_attention(self) -> None:
+        """Late-transcript fallback — call right after ``note_transcript``.
+
+        Sonic sometimes emits its first audio BEFORE the transcript of the
+        speech that provoked it reaches the harness. The speaking edge then
+        sees no transcript at all and correctly allows the utterance; a
+        moment later a nameless transcript lands and the same utterance
+        should never have been spoken. ``app.py`` calls this immediately
+        after :meth:`AttentionState.note_transcript`, and if an utterance
+        allowed ONLY for want of a transcript is still in flight and the
+        verdict has now flipped, it is cut with a single :meth:`preempt` and
+        marked suppressed so every remaining chunk drops.
+
+        The cost is at most ONE clipped chunk — roughly a second of audio
+        that was already posted when the transcript arrived. That is the
+        price of the race, and a second of a sentence nobody asked for is a
+        far smaller failure than the whole sentence.
+
+        A no-op in every other case: no attention gate, nothing in flight, an
+        already-suppressed utterance, an utterance allowed for any other
+        reason (warm, named, a body cue), or a verdict that is still
+        ``allowed``. Idempotent — a second call for the same utterance never
+        preempts twice.
+        """
+        if self.attention is None or self._utterance_suppressed:
+            return
+        if self._allow_reason != "no-transcript":
+            return
+        if not self._in_flight():
+            return
+        if self._verdict_from(self.attention, None)[0] != "not-addressed":
+            return
+        self._utterance_suppressed = True
+        sensory_log.stage(
+            STAGE_SPEAK,
+            SOURCE,
+            "attention",
+            "dropped reason=not-addressed (late transcript; utterance cut mid-flight)",
+        )
+        self._attention_drop_logged = True
+        self._utterance_drops += 1
+        self.attention_drops += 1
+        self.preempt()
+
+    def _in_flight(self) -> bool:
+        """Is an utterance still between its speaking edge and silence?
+
+        "Still speaking" is not enough on its own: the chunks of a finished
+        utterance can still be queued when Sonic has already left the state,
+        and those are exactly the ones a late transcript wants to stop.
+        """
+        if not self._edge_seen:
+            return False
+        if self._sonic_state == "speaking":
+            return True
+        return not self.idle
 
     def _wait_for_the_speaker(self) -> bool:
         """Hold until the previous playback has left the speaker. False = stop.

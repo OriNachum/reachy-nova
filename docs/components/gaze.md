@@ -27,6 +27,7 @@ out of scope for this repo), `reachy_nova/harness/lock_state.py`
 | `run_behavior("look-at-face")` | one-shot: glance at the person in front of you | yes — an ordinary `run_behavior` intent |
 | `lock_face` | standing: keep the gaze on whoever the runtime already knows, until released | yes — its own intent kind |
 | `release_face` | stop a standing lock, return to normal look-around | yes — its own intent kind |
+| `think` | one-shot: look up and aside for a moment, as if thinking; optional `side` ('left'/'right'), alternates by default | yes — an ordinary `run_behavior` intent (`"thoughtful"`) |
 
 The two glances are ordinary `run_behavior` calls naming a gesture the
 runtime's library ships — the gaze one-shots default to about 2 seconds and
@@ -106,3 +107,291 @@ runtime support degrades honestly (an `"unknown kind"` refusal, or a
 `run_behavior` refusal naming valid behaviors that don't include the gaze
 one-shots yet) rather than silently — but the intended order is runtime
 first, harness second.
+
+## Gaze stack — the posture layer
+
+`reachy_nova/harness/gaze_stack.py` (`GazeStack`) is the one component that
+owns the head between reflexes. Three parts of the harness want it at once —
+the browser leg while a browse is in flight, the conversation layer while
+someone is talking, the runtime's own feel-alive base the rest of the time —
+so the postures are **layered, lowest first**:
+
+| Layer | When | What the harness declares |
+| :--- | :--- | :--- |
+| `wander` | nothing to do | nothing — the runtime's feel-alive base owns the head |
+| `browsing` | the browser is busy | a standing `declare_goal` of `gaze-hold`, `{pitch: 10, yaw: ±15}` |
+| `conversation` | `AttentionState.conversation_live` | `look_at_sound`, then an `auto`-owned `lock_face`; the browsing goal is left standing beneath it |
+
+The desired top layer is a **pure function of two inputs**:
+`attention.conversation_live` and "is the browser busy". The aside yaw's sign
+alternates per browse, so two browses in a row don't look identical.
+`gaze-hold` claims only the head channel, so antennas and body yaw keep
+feel-alive's sway underneath it.
+
+### Single writer
+
+Producers only ever set a flag under a short-lived lock and wake an event —
+`on_browser_state(state)` (`"busy"` raises the browsing layer, `"idle"` /
+`"error"` / anything else lowers it), `on_transcript(role, text)` (USER lines
+only), `on_sonic_state(state)` (the rising edge into `speaking`) and
+`on_speaker_idle()` (recorded for t9). ONE worker thread (`nova-gaze`)
+computes the top layer on each wake or `tick_s` timeout and, on a transition,
+issues **only the transition ops**, serially, each waiting out its own
+`IntentTools.execute` round trip. That is what makes the op list on the spool
+causally ordered rather than a race between whichever producer fired last.
+
+Transitions issue the minimum:
+
+- `wander -> browsing` — declare the `gaze-hold` goal.
+- `browsing -> wander` — `declare_goal` with no goal (only if one is standing).
+- `* -> conversation` — `look_at_sound`, then `lock_face`; the browsing goal is
+  **not** cleared, because the lock owns the head by recency and the goal
+  simply resumes when the lock releases.
+- `conversation -> browsing` — `release_face`, then re-declare the goal only if
+  it is not still standing.
+- `conversation -> wander` — `release_face` and clear the goal.
+
+Every transition costs exactly one `[SENSE stage=gaze source=nova
+event=layer]` line naming `old -> new reason=...`, and every op one
+`event=op` line carrying `ok=true` / `ok=false` / `ok=unknown` — the third
+shape (on disk, unconfirmed) is named rather than silently read as success.
+A degraded declare still counts as standing; only an explicit refusal does
+not.
+
+### `clear_for_result()` — the one synchronous op
+
+The app calls `clear_for_result()` immediately before injecting a browse
+result, so the head is demonstrably out of the thinking pose *before* Nova
+starts talking about what it found. A promise like that cannot be kept by
+setting a flag and hoping the worker gets there first, so this one runs on
+the **caller's** thread — but through the same op lock the worker uses, so
+"synchronous" never means "concurrent". It returns whether it cleared
+anything, and leaves the layer alone: while the browser is still busy the
+stack stays in `browsing` with nothing standing, so the later `idle`
+transition issues no second clear.
+
+### The conversation layer
+
+When a conversation goes live — a USER transcript, named or not; never Nova's
+own voice, which only ever *renews* a conversation somebody else opened (see
+[attention](attention.md)), in the wired `AttentionState` and in the local
+fallback clock alike — the head **turns
+toward the voice and then locks on the face**: one `look_at_sound`, then
+`lock_face`, in that order, within one worker tick. That is the order a person
+does it in, and it also gives the runtime's face detector the best possible
+frame to answer `lock_face` from.
+
+The lock is held straight through Nova's replies and the listening gaps in
+between. It is given back only when the conversation itself **fades** (the
+attention window closes) — one `release_face`, and `LockState.mark_released
+("auto-fade")` on the engine's `ok: true`.
+
+**No face-presence belief lives in the harness.** The engine's own refusal,
+`{"ok": false, "error": "no face known"}`, *is* the presence check. A refused
+lock is simply retried while the conversation stays live, on a backoff of
+**3, 6, 12, 24, 30, 30, … seconds** (`LOCK_RETRY_BACKOFF_S`, whose last value
+repeats), so a conversation that starts with nobody in frame still locks on the
+moment somebody leans in. A degraded `{"ok": null}` counts as **unknown**: the
+belief is left exactly as it was, never read as locked, and the retry continues
+on the same schedule.
+
+Refusals cost one log line per *conversation*, not per attempt: the first logs
+`[SENSE stage=gaze source=nova event=lock] no face known — retrying with
+backoff`, the rest are counted, and the fade logs either
+`locked after=Xs attempts=N` (it locked) or `lock never held: refusals=N` (it
+never did).
+
+**Ownership.** The automatic hold is taken as `owner="auto"`. A lock the MODEL
+took (`LockState.owner == "model"`, via its own `lock_face` tool call) is never
+re-taken and never released by this layer — the model asked for that lock
+deliberately, and an automatic hold overruling it would be the harness
+overruling the mind it serves. Entering a conversation under a model lock logs
+`model lock standing — auto hold not taken` and takes no hold of its own.
+
+**Losing the lock.** `on_lock_released(reason)` — wire it from the bus's
+`motion/lock-released` tap — clears the belief, submits nothing, and drops the
+retry deadline so the backoff re-arms and the hold is taken back while the
+conversation is still live. The same happens when the ENGINE goes away and
+`LockState.locked` falls to `None` under us. Believing a lock we no longer hold
+is the one failure that cannot fix itself, so every ambiguous answer resolves
+toward "not held": an *unconfirmed* `release_face` still clears the belief,
+because the runtime drops a standing lock on its own max-hold timer regardless
+of what the harness believes, and a stale "held" would suppress the next lock
+attempt forever. The cost of being wrong the other way is one redundant
+release.
+
+**Liveness under the hold.** The runtime's face lock inhibits `feel-alive` and
+`orient-to-sound` for as long as it is held, so a held lock is a robot that
+does not breathe, does not sway and does not wander — which is exactly what the
+live robot felt like (2026-09-06, Ori: "It feels rigid now. No liveness.";
+`state.json` active = only `face-lock`, inhibitions
+`['feel-alive', 'orient-to-sound']`). The hold itself is right; the stillness
+is not. So while an AUTO-owned lock is held and the layer stays `conversation`,
+this layer keeps one bounded `run_behavior` of `antenna-sway` running
+underneath it — `SWAY_PARAMS = {"amp": 10.0, "period": 5.0}`,
+`SWAY_DURATION_S = 60.0`, re-issued once fewer than `SWAY_REISSUE_MARGIN_S`
+(10 s) of the last one remain, logged as
+`[SENSE stage=gaze source=nova event=op] liveness sway ok=…`. The behaviour
+claims the ANTENNAS channel only, so it never competes with the lock for the
+head; it is a bounded one-shot rather than a standing goal so it cannot outlive
+the harness that asked for it. It is never issued for a MODEL-owned lock (what
+the body does under the model's own hold is the model's business), never after
+the release, and never in `browsing` or `wander` — where feel-alive owns the
+body and needs no help. `lock_liveness=False` turns it off entirely;
+`status()["sway_until"]` is the monotonic deadline of the sway in flight, or
+`None`.
+
+**Liveness after the hold — reviving the base layer.** The runtime seeds its
+`feel-alive` idle layer once, at engine start; a face lock inhibits it; the
+runtime's intents driver *evicts* an inhibited behaviour every tick; and
+nothing re-seeds the base layer once the inhibition clears
+(reachy-mini-cli #183). Live, 2026-09-06 11:51 BST, Ori: "I don't see it
+moving" —
+`state.json` `active: []`, head parked, until a runtime restart. So every
+tick, in every layer, `_tick_base_layer()` reads the runtime's active list
+(`tools.current_active_names()`, the `active` entries of `state.json`,
+injectable as `active_names=`) and, when `BASE_LAYER_BEHAVIOR` (`feel-alive`)
+is missing and not inhibited, re-issues it as one bounded PASSIVE
+`run_behavior` — `BASE_REVIVE_DURATION_S = 300.0` — logged as
+`[SENSE stage=gaze source=nova event=op] revive feel-alive ok=…`. A passive
+newcomer evicts nothing and yields to every reaction, exactly like the seeded
+layer it stands in for, and it keeps the antennas alive under the browsing
+posture too. It is never issued under a held automatic lock (the runtime
+would refuse it; the sway covers the hold) and never while the runtime lists
+the behaviour. It is rate-limited by a not-before deadline: a stale or
+unreadable list re-issues only once fewer than `BASE_REVIVE_MARGIN_S` (15 s)
+of the last revive remain, a refusal waits `BASE_REVIVE_RETRY_S` (30 s), and
+every release — the fade, or the runtime's own `motion/lock-released` —
+resets the deadline so the robot wakes the tick after the hold ends.
+`lock_liveness=False` turns this off with the sway;
+`status()["base_revive_until"]` is the deadline of the revive believed
+running, or `None`. Every op this layer submits is a *reflex* (`IntentTools.execute(...,
+reflex=True)`): the attention gate's cold-and-nameless refusal is for the
+model, not for the body keeping itself alive or turning toward whoever is
+speaking — see [attention.md](attention.md). This is a workaround for the runtime's promise, not a
+replacement for it; it goes when #183 lands.
+
+### Start and stop hygiene
+
+`start()` returns immediately and the worker submits one `release_face` and one
+`declare_goal` None as its **first action**, under the op lock and before any
+transition op: a harness that just restarted has no idea what the previous
+process left standing on the runtime, and both ops are idempotent no-ops when
+nothing is held (`release_face` answers `ok: true` "not locked"). The hygiene
+runs on the worker rather than the caller because `supervisor._start_components`
+starts components serially on one thread, where two synchronous spool round
+trips against a stalled runtime would delay every later subsystem and the
+heartbeat loop itself. `stop()` mirrors it on the caller's thread — a
+`release_face` only if an `auto`-owned lock is held, a `declare_goal` None only
+if a goal is standing, and a `set_inhibition` giving back exactly the names in
+`_browsing_added` (the same live-set-respecting restore a transition to
+`wander` does, so stopping mid-browse never leaves `orient-to-sound` and `nod`
+disabled behind us) — before joining the worker. The worker's own exit path
+(for a `stop_event` set from outside, where nobody ever calls `stop()`) runs the
+same hygiene behind the same one-shot flag, so a stop mid-conversation costs
+exactly one release either way and a second `stop()` submits nothing.
+
+### Head reflexes under a held head (task t10)
+
+A standing `gaze-hold` goal is not the whole story: the runtime's own
+`orient-to-sound` and `nod` reflexes still compete for the head by recency,
+just like the older `nova-face-noticed` rule did before a face lock existed
+(it nodded on every face sighting — the wrong reflex once something can *hold*
+the head by recency instead). So entering `browsing` also merges
+`BROWSING_INHIBITS = ("orient-to-sound", "nod")` into the runtime's CURRENT
+inhibited set via `set_inhibition` (which **replaces** the whole set — see
+`tools.current_inhibitions()`), remembering exactly which names it added.
+Leaving `browsing` for `wander` re-reads the live set and gives back only
+those names, so a later-wins operator change (say, an inhibition the operator
+added meanwhile) survives the restore. A conversation in between leaves the
+names standing — the face lock re-asserts its own runtime inhibitions on
+every replacement anyway — and returning from conversation to browsing
+re-reads the live set again and re-adds only whatever went missing, since
+`nod` is the harness's own addition and is not guaranteed to survive a lock's
+replacement the way the runtime's own `orient-to-sound` is.
+
+Retiring the old reflex is a one-line call:
+`rules_overlay.retire_rule("nova-face-noticed")` writes a tombstone —
+`{"id": "nova-face-noticed", "enabled": false}` — into the managed block,
+through the same validated/atomic/re-parsed write path `upsert_rule` uses, and
+submits a reload. A tombstone id needs no `nova-` prefix: the point is to be
+able to disable a shipped or operator rule of that id too, not only one of
+nova's own. A second `retire_rule` call for an already-tombstoned id is a
+no-op — nothing written, no reload submitted.
+
+### Status
+
+`status()` reports `{"layer", "browser_busy", "conversation_live",
+"goal_standing", "browsing_inhibits", "lock_held", "lock_attempts",
+"next_lock_retry_s", "sway_until"}` — `browsing_inhibits` is the list of
+`BROWSING_INHIBITS` names the stack currently believes it added itself;
+`lock_attempts` and `next_lock_retry_s` are per-conversation and reset at every
+fade; `next_lock_retry_s` is `None` when no retry is pending. No hook and no
+worker tick ever raises — a broken `AttentionState` degrades to "not live", a
+broken `LockState` to "not the model's", a failed op is logged and the loop
+continues — and the worker exits within one tick of its stop event.
+
+### Runtime facts this layer relies on (reachy-mini-cli, `face_lock.py`)
+
+The gaze stack keeps no belief of its own about any of these — they live on
+the runtime side and the harness only reacts to what the engine's result
+already tells it:
+
+- **Presence.** `lock_face` refuses `"no face known"` unless
+  `face_bbox` is present AND fresher than `MAX_FACE_AGE_S = 1.5 s`. That
+  refusal *is* the presence check the retry backoff above is built around.
+- **Its own inhibitions.** A held lock inhibits the runtime's own
+  `feel-alive` and `orient-to-sound` reflexes on its own account — the
+  `BROWSING_INHIBITS` merge above is a *separate* concern (keeping those same
+  reflexes off a `gaze-hold` goal, which the lock does not otherwise cover).
+- **Max hold.** The runtime releases any lock on its own after
+  `MAX_HOLD_S = 1800.0` (30 minutes), regardless of what the harness or the
+  model believes — the ceiling `_stop_hygiene` and the `motion/lock-released`
+  tap both exist to make redundant, never to replace.
+- **Mind-offline release is inert on this device.** The engine also releases
+  a lock after `mind_offline_grace_s` of `mind_online()` reading `False`
+  (`reason: "mind-offline"`) — but on the deployed runtime that presence
+  signal never fires (`"mind presence dropped reason=client-incompatible"` at
+  every start), so this release path never triggers here. That is exactly why
+  `GazeStack.start()`/`.stop()` run their own release/clear hygiene: the
+  runtime cannot be relied on to notice a crashed harness and give the head
+  back on its own, and without the harness-side hygiene a crash would leave
+  the head locked until `MAX_HOLD_S`.
+
+## Configuration
+
+| Env | Default | Meaning |
+| --- | --- | --- |
+| `NOVA_FACE_HOLD` | on | kill switch (`harness/switches.py`) — the gaze stack's CONVERSATION layer, plus retiring `nova-face-noticed` (see below). Off restores the pre-round nod-on-every-face reflex and no automatic hold. |
+| `NOVA_THINK_POSTURE` | on | kill switch — the gaze stack's BROWSING layer (the standing `gaze-hold` while a browse is in flight). |
+
+Both off means no `GazeStack` is built at all (one `component absent
+name=gaze reason=switch-off` line); either one on builds it, with only that
+layer's producers wired — and with `NOVA_FACE_HOLD` off the stack is
+constructed `conversation_enabled=False`, which makes `conversation_live()`
+answer `False` whatever attention (or the local fallback clock) says, so the
+CONVERSATION layer is unreachable rather than merely unwired. `app.py` only
+calls `gaze.on_sonic_state` / `gaze.on_transcript` under
+`switches.face_hold`, and only wires
+`browser.on_state_change = gaze.on_browser_state` under
+`switches.think_posture`.
+
+## Wiring (`app.py`)
+
+`app.py` builds `GazeStack(intents, attention=attention, lock_state=lock_state,
+conversation_enabled=switches.face_hold)` whenever either switch is on, and:
+
+- with `NOVA_FACE_HOLD` on: wires `sonic.on_state_change` to
+  `gaze.on_sonic_state` and the `_on_transcript` callback to
+  `gaze.on_transcript`; the runtime bus's `motion/lock-released` tap calls
+  `gaze.on_lock_released(reason)`; and — since the automatic hold now owns
+  the face-noticed cue — `retire_face_nod_rule()` tombstones
+  `nova-face-noticed` at startup instead of `ensure_face_rule()` installing
+  it (see [Retiring the old reflex](#head-reflexes-under-a-held-head-task-t10)
+  above).
+- with `NOVA_THINK_POSTURE` on: wires `browser.on_state_change =
+  gaze.on_browser_state`.
+- the browse result path calls `gaze.clear_for_result()` — see
+  [nova_browser.md](nova_browser.md)'s "Browse result path, end to end".
+- `gaze.start(stop_event)` / `gaze.stop()` run alongside the other
+  supervisor units.

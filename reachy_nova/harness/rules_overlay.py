@@ -82,6 +82,10 @@ SENSE_FIELDS: frozenset[str] = frozenset(
         "frame_available",
         "transcript",
         "self_moving",
+        # A one-tick latch: the transcript gate admitted an utterance BY NAME
+        # (reachy-mini-cli #177). Mirrored here so an operator rule keyed on it
+        # does not make every later nova write fail (issue #27).
+        "name_mentioned",
     }
 )
 
@@ -102,7 +106,21 @@ _REACT_FIELDS = frozenset(
 _REACT_REQUIRED = ("id", "when", "run")
 _INHIBIT_FIELDS = frozenset({"id", "enabled", "when", "disable", "cooldown_s", "hysteresis"})
 _INHIBIT_REQUIRED = ("id", "when", "disable")
-_TOP_LEVEL_FIELDS = frozenset({"active_mode", "react", "inhibit", "modes"})
+#: The runtime's optional top-level ``names = [...]`` table (reachy-mini-cli
+#: #177): ADDITIONS to the names the robot answers to, written by the operator
+#: (or by nova, in the operator head) and picked up on ``behavior reload``. It
+#: is how the box learns a peer's name without the runtime ever spelling it.
+#: The bounds are the runtime's own (``reachy/behavior/rules.py``), pinned by
+#: test, because this validator refuses the WHOLE candidate file the way the
+#: runtime would — a table the runtime will not load must never reach it.
+NAMES_TABLE = "names"
+#: At most this many configured names — every one is another word the fuzzy
+#: matcher tests every heard utterance against.
+MAX_CONFIGURED_NAMES = 8
+#: The shortest word that may be a name; below it a fuzzy match cannot tell a
+#: name from ordinary speech.
+MIN_NAME_LENGTH = 3
+_TOP_LEVEL_FIELDS = frozenset({"active_mode", "react", "inhibit", "modes", NAMES_TABLE})
 
 #: Rendered key order — the shipped rules files read in this order, so a hand
 #: inspection of the managed block looks like the file it lives in.
@@ -220,6 +238,16 @@ def validate_rule(raw: object, *, kind: str = "react", require_prefix: bool = Tr
     """
     if not isinstance(raw, Mapping):
         raise RuleRefused(f"a rule must be an object (got {raw!r})")
+    if set(raw) == {"id", "enabled"} and raw.get("enabled") is False:
+        # A pure tombstone: disables a shipped/operator (or nova-authored)
+        # rule of this id. It deliberately carries none of the required
+        # react/inhibit fields — see retire_rule, the only writer of this
+        # shape.
+        path = f"[[{kind}]]"
+        return {
+            "id": _validate_id(raw["id"], path, require_prefix=require_prefix),
+            "enabled": False,
+        }
     allowed = _REACT_FIELDS if kind == "react" else _INHIBIT_FIELDS
     required = _REACT_REQUIRED if kind == "react" else _INHIBIT_REQUIRED
     path = f"[[{kind}]]"
@@ -271,6 +299,50 @@ def validate_rule(raw: object, *, kind: str = "react", require_prefix: bool = Tr
     return entry
 
 
+def validate_names(raw: object) -> tuple[str, ...]:
+    """Validate the optional ``names`` table; return the normalised additions.
+
+    A restatement of the runtime's own ``_validate_names`` (reachy-mini-cli
+    #177): an absent table is "no additions" (an empty tuple — the shipped
+    names are the runtime's to spell, never this module's); otherwise a list
+    of at most :data:`MAX_CONFIGURED_NAMES` strings, each letters-only after
+    stripping and lower-casing and at least :data:`MIN_NAME_LENGTH` long,
+    de-duplicated silently in order. Anything else raises :class:`RuleRefused`
+    naming the entry and the bound it broke — fail-closed, the whole file,
+    exactly as the runtime refuses it.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise RuleRefused(
+            f"'{NAMES_TABLE}' must be a list of strings (got {raw!r}); "
+            f'write {NAMES_TABLE} = ["<name>"] — a TOML array, even for one name'
+        )
+    if len(raw) > MAX_CONFIGURED_NAMES:
+        raise RuleRefused(
+            f"'{NAMES_TABLE}' has {len(raw)} entries, over the {MAX_CONFIGURED_NAMES}-entry "
+            "limit; every one is a word every heard utterance is matched against"
+        )
+    names: list[str] = []
+    for index, item in enumerate(raw):
+        path = f"{NAMES_TABLE}[{index}]"
+        if isinstance(item, bool) or not isinstance(item, str):
+            raise RuleRefused(f"{path}: every name must be a string (got {item!r})")
+        name = item.strip().lower()
+        if not name.isalpha():
+            raise RuleRefused(
+                f"{path}: name {item!r} must be letters only (a-z) after lower-casing; "
+                "a name is one word: no digits, spaces, punctuation, or blanks"
+            )
+        if len(name) < MIN_NAME_LENGTH:
+            raise RuleRefused(
+                f"{path}: name {item!r} is shorter than the {MIN_NAME_LENGTH}-character minimum"
+            )
+        if name not in names:
+            names.append(name)
+    return tuple(names)
+
+
 def validate_rules_document(data: object) -> None:
     """Validate a whole parsed rules file — the candidate gate before ``os.replace``."""
     if not isinstance(data, Mapping):
@@ -281,6 +353,7 @@ def validate_rules_document(data: object) -> None:
             f"rules file has unexpected top-level field(s) {unexpected}; allowed: "
             f"{sorted(_TOP_LEVEL_FIELDS)}"
         )
+    validate_names(data.get(NAMES_TABLE))
     if data.get("active_mode") is not None and not isinstance(data["active_mode"], str):
         raise RuleRefused("rules file 'active_mode' must be a string")
     seen: set[str] = set()
@@ -507,6 +580,49 @@ def upsert_rule(
 
     _install(target, candidate)
     return True, _reload_verdict(reload_timeout)
+
+
+def retire_rule(
+    rule_id: str,
+    *,
+    reload: bool = True,
+    path: Path | str | None = None,
+    reload_timeout: float = DEFAULT_RELOAD_TIMEOUT,
+) -> dict:
+    """Write (or update) a tombstone for *rule_id*: ``{"id": rule_id, "enabled": false}``.
+
+    Uses the SAME validated, atomic, re-parsed write path as :func:`upsert_rule`
+    — the tombstone is merged into the managed block by id (replacing whatever
+    was there for that id, nova-authored or not), the candidate file is
+    re-validated before ``os.replace``, and — when *reload* is True — a reload
+    command is submitted and its verdict returned, exactly like the existing
+    writer.
+
+    A tombstone id need not carry the ``nova-`` prefix on purpose: the whole
+    point of a tombstone is to be able to disable a SHIPPED or OPERATOR rule
+    of that id, not only one of nova's own.
+
+    Returns ``{"changed": bool, "verdict": str | None}``. A second call for an
+    id already tombstoned is a no-op — ``changed`` is False, nothing is
+    written, and no reload is submitted.
+    """
+    entry = validate_rule({"id": rule_id, "enabled": False}, kind="react", require_prefix=False)
+
+    target = Path(path) if path is not None else statedir.rules_overlay_path()
+    try:
+        current = target.read_text(encoding="utf-8")
+    except OSError:
+        current = ""
+
+    head, managed, tail = _split_overlay(current)
+    merged = _merge_entry(_managed_entries(managed), entry)
+    candidate = _join_overlay(head, _render_managed(merged), tail)
+    if candidate == current:
+        return {"changed": False, "verdict": None}
+
+    _install(target, candidate)
+    verdict = _reload_verdict(reload_timeout) if reload else None
+    return {"changed": True, "verdict": verdict}
 
 
 def _install(target: Path, text: str) -> None:

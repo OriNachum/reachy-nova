@@ -44,7 +44,7 @@ NovaSonic(
 
 - `start(stop_event: threading.Event)`: Launches the background thread that maintains the connection loop.
 - `feed_audio(samples: np.ndarray)`: Sends raw microphone audio (float32, 16kHz) to the model. Automatically handles mono conversion and int16 PCM encoding.
-- `inject_text(text: str)`: Allows the system to inject non-voice context (like "I see a cat") into the conversation stream as if it were a user message.
+- `inject_text(text: str, force=False, sense_class=None, must_deliver=False)`: Allows the system to inject non-voice context (like "I see a cat") into the conversation stream as if it were a user message. See [Must-deliver injects](#must-deliver-injects).
 - `send_tool_result(tool_use_id: str, result: str)`: Sends the output of a tool execution back to the model.
 
 ### Connection Protocol
@@ -147,6 +147,63 @@ ordinary reply.
 playback exactly as it shipped before this round: one buffer per utterance,
 the single reused `tts_synth.wav`, no per-chunk cleanup, and the gate wait
 includes its full margin again.
+
+## Must-deliver injects
+
+Most injects are *body cues* — a pat, a face, a scene description — and the
+anti-flood machinery around them (a 3 s throttle, the speaking guard, the
+"no session, no inject" rule) is right for that traffic. It is wrong for an
+**answer**: on 2026-09-06 the browser's result inject ("Your web browsing
+finished. Tell the user what you found: ...") landed 0 ms after its own
+progress inject and the journal logged it away three times as
+`dropped reason=throttled interval=0.0s`, and a result that arrived during a
+1-3 s session rotation was answered `dropped-inactive` and lost outright.
+
+`inject_text(..., must_deliver=True)` marks a text as an answer:
+
+- **Throttle-exempt.** The 3 s interval is skipped, then re-armed, so the
+  plain injects that follow are spaced exactly as before.
+- **Queued, not dropped, across a session gap.** With no live session the
+  text goes into a bounded FIFO (`MUST_DELIVER_QUEUE_MAX = 8`, oldest
+  evicted) and `inject_text` returns `"queued-inactive"`. `_start_session`
+  drains it — in order, exactly once, through the same `_send_user_text`
+  path — right after the session starts listening, appending each item's age
+  (`... (this arrived 4s ago)`) so a late answer is delivered as a late
+  answer. Each drained item gets one `drained-queued age=...` senselog line.
+- **Still subject to the speaking guard.** Injecting into a generating
+  Bedrock stream can hang it, so the text is parked in the deferred slot like
+  any cue. Callers should pass a distinctive `sense_class` (the browse caller
+  passes `browse`) so the latest-wins slot cannot let an unrelated cue
+  overwrite the answer.
+- **A failed or stale send goes back on the queue.** Reaching a live session
+  is not the same as reaching the wire, and `inject_text` returns `"sent"` as
+  soon as the send is *scheduled* — its caller is a callback that cannot wait.
+  `_send_user_text` therefore returns a real verdict: `True` only when
+  `contentStart`, `textInput` and `contentEnd` all left without raising under
+  a matching session generation. When it returns `False` for a must-deliver
+  text — the session rotated between scheduling and running, or the transport
+  raised — the **original, un-annotated** text goes back on the same bounded
+  FIFO with one `dropped reason=stale-session|send-failed requeued=true`
+  senselog line, and the drain counts only `True` results as delivered. The
+  marker follows the text down every path, including the speaking-deferred
+  one: `DeferredCue.must_deliver` is what lets a parked answer whose drain
+  lands under a rotated generation re-queue while a parked body cue is
+  discarded as before. The age annotation is applied at send time only, so a
+  retried answer is annotated once, with the age it actually has.
+- **Exhausted, not endless.** Each item carries an `attempts` counter, bumped
+  on every re-queue and capped at `MUST_DELIVER_MAX_ATTEMPTS = 5`: an answer a
+  permanently broken wire keeps refusing is dropped after its fifth attempt
+  with one `dropped reason=must-deliver-exhausted attempts=5` line, rather than
+  being retried at every session start forever. "Exhausted" means exactly
+  that — five wire attempts spent, the answer given up on and named in the
+  journal.
+
+A plain (non-must-deliver) inject keeps every previous behaviour, including
+`dropped-inactive`, `dropped-throttled`, and a discarded (never queued) text
+when its send fails or its generation has rotated.
+
+See [nova_browser.md](nova_browser.md)'s "Browse result path, end to end" for
+the full chain a browse answer travels through before it reaches this path.
 
 ## Usage Example
 

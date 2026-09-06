@@ -15,7 +15,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from reachy_nova.harness import app, mood as mood_module, persona, rules_overlay, statedir
+from reachy_nova.harness import (
+    app,
+    mood as mood_module,
+    persona,
+    rules_overlay,
+    statedir,
+    supervisor,
+)
+from reachy_nova.harness.attention import AttentionState
+from reachy_nova.harness.eyes import EyesComponent
+from reachy_nova.harness.gaze_stack import GazeStack
 from reachy_nova.harness.bus import NovaBus
 from reachy_nova.harness.gate import EchoGate
 from reachy_nova.harness.hearing import TeeHearing
@@ -35,7 +45,7 @@ import numpy as np
 def _isolated_composition(monkeypatch, tmp_path):
     """Isolate the state dir and neutralise ambient feature flags.
 
-    The four t14 switches are cleared too: they fail OPEN, so an ambient
+    The t14/t12 switches are cleared too: they fail OPEN, so an ambient
     ``NOVA_MEMORY=0`` in the developer's shell would silently turn the
     default-build tests into off-path tests.
     """
@@ -46,6 +56,9 @@ def _isolated_composition(monkeypatch, tmp_path):
     monkeypatch.delenv("NOVA_LITE_REACTIONS", raising=False)
     monkeypatch.delenv("NOVA_MEMORY", raising=False)
     monkeypatch.delenv("NOVA_PERSONA_PATH", raising=False)
+    monkeypatch.delenv("NOVA_FACE_HOLD", raising=False)
+    monkeypatch.delenv("NOVA_THINK_POSTURE", raising=False)
+    monkeypatch.delenv("NOVA_ATTENTION_GATE", raising=False)
     yield
 
 
@@ -180,6 +193,11 @@ def test_default_build_is_the_core_components_with_named_absences(caplog):
         # …and the memory compactor after it: its periodic Lite call is slow
         # and nothing waits on it, so it must never sit between cue and mouth.
         "MemoryCompactor",
+        # The posture layer (t12): after the bus whose tap reaches it, before
+        # the browser whose state raises its browsing layer.
+        "GazeStack",
+        # The eyes' own ~1 Hz snapshot subscription, last.
+        "EyesComponent",
     ]
     lines = _messages(caplog)
     assert any("component absent name=browser reason=act-disabled" in m for m in lines)
@@ -198,8 +216,9 @@ def test_act_enabled_adds_a_supervised_browser_wired_for_progress(monkeypatch):
     assert adapter.browser.on_progress == sonic.inject_text
     assert hasattr(adapter, "start")
     assert hasattr(adapter, "stop")
-    # core 3 + tools + network leg (2) + lite reactor + bus + compactor + browser
-    assert len(components) == 10
+    # core 3 + tools + network (2) + lite reactor + bus + compactor + gaze
+    # + browser + eyes
+    assert len(components) == 12
 
 
 def test_browser_component_start_and_stop_never_raise_when_disabled():
@@ -235,8 +254,9 @@ def test_omni_model_set_adds_the_vision_leg_wired_to_bus_and_sonic(monkeypatch):
     assert text.endswith(") (react briefly if at all)")
     assert sense_class == "vision"
     assert len(text) < 320
-    # core 3 + tools + network leg (2) + lite reactor + bus + compactor + vision
-    assert len(components) == 10
+    # core 3 + tools + network (2) + lite reactor + bus + compactor + gaze
+    # + vision + eyes
+    assert len(components) == 12
 
 
 def test_vision_leg_degrades_to_absent_when_the_bus_cannot_build(monkeypatch, caplog):
@@ -263,6 +283,8 @@ def test_vision_leg_degrades_to_absent_when_the_bus_cannot_build(monkeypatch, ca
         # needs a broker, so an absent bus costs them nothing.
         "LiteReactor",
         "MemoryCompactor",
+        "GazeStack",
+        "EyesComponent",
     ]
     lines = _messages(caplog)
     assert any("component absent name=bus" in m for m in lines)
@@ -438,11 +460,19 @@ def test_face_rule_matches_the_engine_grammar():
     assert entry["cooldown_s"] == 30.0  # the runtime's own face re-announce cooldown
 
 
-def test_build_app_runs_the_ensure_face_rule_step(monkeypatch):
+def test_build_app_runs_the_ensure_face_rule_step_only_without_the_hold(monkeypatch):
+    """With the face hold OFF the nod rule is the only face reflex, so it is
+    installed; with the hold ON (the default) it is never installed, only
+    retired — installing then tombstoning every boot was two overlay writes
+    and two reloads for nothing."""
     calls = []
     monkeypatch.setattr(app, "ensure_face_rule", lambda **kw: calls.append(kw) or True)
+    monkeypatch.setenv("NOVA_FACE_HOLD", "0")
     _build()
     assert len(calls) == 1
+    monkeypatch.setenv("NOVA_FACE_HOLD", "1")
+    _build()
+    assert len(calls) == 1  # unchanged: not installed when the hold is on
 
 
 def test_ensure_face_rule_degrades_absent_without_a_state_dir(caplog):
@@ -589,13 +619,16 @@ def test_browser_result_callback_reaches_the_conversation(monkeypatch):
     components = app.build_app()
     sonic = components[0]
     injected = []
-    sonic.inject_text = injected.append
+    sonic.inject_text = lambda text, **kwargs: injected.append((text, kwargs))
     browser = next(c for c in components if type(c).__name__ == "BrowserComponent")
     inner = getattr(browser, "browser", None) or getattr(browser, "_browser")
     assert inner.on_result is not None
     inner.on_result("The answer is 42.")
     assert len(injected) == 1
-    assert "The answer is 42." in injected[0]
+    text, kwargs = injected[0]
+    assert "The answer is 42." in text
+    # An answer the user asked for minutes ago is not an ambient cue (t12).
+    assert kwargs == {"must_deliver": True, "sense_class": "browse"}
 
 
 def test_l5_the_prompt_tells_nova_when_to_release_face_and_recall_senses():
@@ -628,6 +661,7 @@ PRE_T14_TOOL_NAMES = [
     "release_face",
     "look_at_face",
     "look_at_sound",
+    "think",
     "forge",
     "use_skill",
     "author_rule",
@@ -722,7 +756,8 @@ def test_the_journal_opens_with_every_switch_then_the_persona_source(caplog):
         _build()
     lines = _sense_lines(caplog)
     assert lines[0].endswith(
-        "switches chunked_playback=on lite_reactions=on memory=on persona=default"
+        "switches chunked_playback=on lite_reactions=on memory=on face_hold=on "
+        "think_posture=on attention_gate=on persona=default"
     )
     assert "event=switches" in lines[0]
     assert "event=persona" in lines[1]
@@ -733,10 +768,14 @@ def test_the_switch_line_names_every_resolved_value_when_they_are_off(monkeypatc
     monkeypatch.setenv("NOVA_CHUNKED_PLAYBACK", "0")
     monkeypatch.setenv("NOVA_LITE_REACTIONS", "0")
     monkeypatch.setenv("NOVA_MEMORY", "0")
+    monkeypatch.setenv("NOVA_FACE_HOLD", "0")
+    monkeypatch.setenv("NOVA_THINK_POSTURE", "0")
+    monkeypatch.setenv("NOVA_ATTENTION_GATE", "0")
     with caplog.at_level("INFO", logger="nova.sensory"):
         _build()
     assert _sense_lines(caplog)[0].endswith(
-        "switches chunked_playback=off lite_reactions=off memory=off persona=default"
+        "switches chunked_playback=off lite_reactions=off memory=off face_hold=off "
+        "think_posture=off attention_gate=off persona=default"
     )
 
 
@@ -832,12 +871,15 @@ def test_lite_reactor_construction_failure_degrades_to_a_named_absent_line(monke
 def test_transcripts_are_appended_to_the_ledger():
     sonic = _build()[0]
 
-    sonic.on_transcript("USER", "hi")
+    # NAMED, because the attention gate is on by default (t12): a reply given
+    # while nobody addressed the robot is not remembered — see
+    # test_an_unaddressed_reply_is_appended_as_dropped below.
+    sonic.on_transcript("USER", "nova hi")
     sonic.on_transcript("ASSISTANT", "hello")
 
     records = _ledger_records()
     assert [r["kind"] for r in records] == ["USER", "ASSISTANT"]
-    assert [r["text"] for r in records] == ["hi", "hello"]
+    assert [r["text"] for r in records] == ["nova hi", "hello"]
 
 
 def test_a_bus_inject_reaches_sonic_with_its_class_and_lands_in_the_ledger():
@@ -878,7 +920,7 @@ def test_the_compactor_reads_the_same_ledger_the_transcripts_write():
     sonic = components[0]
     compactor = next(c for c in components if isinstance(c, MemoryCompactor))
 
-    sonic.on_transcript("USER", "is the tap still dripping")
+    sonic.on_transcript("USER", "nova is the tap still dripping")
     sonic.on_transcript("ASSISTANT", "constantly")
 
     blocks = compactor.history()
@@ -887,7 +929,7 @@ def test_the_compactor_reads_the_same_ledger_the_transcripts_write():
     # the first USER line merges into it; then the roles alternate.
     assert [b["role"] for b in blocks] == ["USER", "ASSISTANT"]
     assert blocks[0]["text"].startswith("(earlier today")
-    assert blocks[0]["text"].endswith("is the tap still dripping")
+    assert blocks[0]["text"].endswith("nova is the tap still dripping")
     assert blocks[1]["text"] == "constantly"
 
 
@@ -963,7 +1005,7 @@ def test_the_reaction_context_carries_senses_memory_mood_and_exchanges():
         encoding="utf-8",
     )
     bus_component.history.record("touch", "pat", "r1", "(someone is petting you)", "pat", None)
-    sonic.on_transcript("USER", "what is that noise")
+    sonic.on_transcript("USER", "nova what is that noise")
     sonic.on_transcript("ASSISTANT", "the tap again")
 
     context = reactor._context_provider()
@@ -973,7 +1015,7 @@ def test_the_reaction_context_carries_senses_memory_mood_and_exchanges():
     assert "stop humming at night" in context["memory"]
     assert context["mood"]
     assert context["exchanges"] == [
-        {"role": "USER", "text": "what is that noise"},
+        {"role": "USER", "text": "nova what is that noise"},
         {"role": "ASSISTANT", "text": "the tap again"},
     ]
 
@@ -1010,7 +1052,7 @@ def test_a_lite_planned_gesture_goes_through_the_intents_spool():
     assert isinstance(intents, IntentTools)
 
     calls = []
-    intents.execute = lambda name, params: calls.append((name, params)) or "{}"
+    intents.execute = lambda name, params, **_kw: calls.append((name, params)) or "{}"
     reactor._on_gesture("nod")
 
     assert calls == [("run_behavior", {"name": "nod", "duration": 2.0})]
@@ -1138,3 +1180,301 @@ def test_lite_vocalizations_play_through_the_speaker():
     assert len(fed) == 1
     assert fed[0].dtype.name == "float32"
     assert len(fed[0]) > 2400
+
+
+# --------------------------------------------------------------------------- #
+# t12 — attention, the gaze stack, the eyes and the must-deliver browse result #
+# --------------------------------------------------------------------------- #
+
+
+def _gaze(components):
+    return next((c for c in components if isinstance(c, GazeStack)), None)
+
+
+def test_all_switches_on_compose_the_gaze_stack_and_the_eyes():
+    components = _build()
+    gaze = _gaze(components)
+    eyes = next(c for c in components if isinstance(c, EyesComponent))
+    assert gaze is not None
+    assert gaze.name == "gaze"
+    assert eyes.name == "eyes"
+    # Both carry the supervisor's lifecycle…
+    for component in (gaze, eyes):
+        assert hasattr(component, "start")
+        assert hasattr(component, "stop")
+    # …and the eyes belief is discoverable exactly the way the lock one is
+    # (supervisor.run takes no eyes_state kwarg — _find_eyes_state is the seam).
+    assert supervisor._find_eyes_state(components) is eyes.eyes
+    assert eyes.eyes.state == "unknown"
+
+
+def test_the_gaze_stack_shares_the_attention_and_lock_state_of_the_harness():
+    components = _build()
+    gaze = _gaze(components)
+    speaker, intents = components[1], components[3]
+    assert gaze._attention is speaker.attention
+    assert gaze.lock_state is intents.lock_state
+    assert gaze._intents is intents
+
+
+def test_act_enabled_wires_the_browser_state_to_the_gaze_stack(monkeypatch):
+    monkeypatch.setenv("NOVA_ACT_ENABLED", "1")
+    components = _build()
+    gaze = _gaze(components)
+    browser = next(c for c in components if isinstance(c, app.BrowserComponent)).browser
+    assert browser.on_state_change == gaze.on_browser_state
+
+
+def test_think_posture_off_leaves_the_browser_state_unwired(monkeypatch):
+    monkeypatch.setenv("NOVA_ACT_ENABLED", "1")
+    monkeypatch.setenv("NOVA_THINK_POSTURE", "0")
+    components = _build()
+    assert _gaze(components) is not None  # face_hold alone still builds it
+    browser = next(c for c in components if isinstance(c, app.BrowserComponent)).browser
+    assert browser.on_state_change is None
+
+
+def test_face_hold_off_builds_the_stack_with_the_conversation_layer_disabled(monkeypatch):
+    """PR #26 review (comment 3943444439): with only the browse posture on,
+    the stack must not be able to enter the conversation layer at all — the
+    shared attention it still carries would otherwise raise it."""
+    monkeypatch.setenv("NOVA_FACE_HOLD", "0")
+    monkeypatch.setenv("NOVA_THINK_POSTURE", "1")
+    gaze = _gaze(_build())
+    assert gaze is not None
+    assert gaze.status()["conversation_enabled"] is False
+    assert gaze.conversation_live() is False
+
+
+def test_both_gaze_switches_on_enable_the_conversation_layer(monkeypatch):
+    monkeypatch.setenv("NOVA_FACE_HOLD", "1")
+    monkeypatch.setenv("NOVA_THINK_POSTURE", "1")
+    gaze = _gaze(_build())
+    assert gaze is not None
+    assert gaze.status()["conversation_enabled"] is True
+
+
+def test_both_gaze_switches_off_build_no_stack_with_one_named_absence(monkeypatch, caplog):
+    monkeypatch.setenv("NOVA_FACE_HOLD", "0")
+    monkeypatch.setenv("NOVA_THINK_POSTURE", "0")
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        components = _build()
+    assert _gaze(components) is None
+    lines = _sense_lines(caplog)
+    assert [m for m in lines if "component absent name=gaze reason=switch-off" in m]
+
+
+def test_face_hold_off_keeps_the_stack_but_not_the_conversation_producers(monkeypatch):
+    """The stack still exists for the browsing layer, but a USER transcript and
+    Sonic's speaking edge no longer reach it — the switch gates the WIRING."""
+    monkeypatch.setenv("NOVA_FACE_HOLD", "0")
+    components = _build()
+    sonic, gaze = components[0], _gaze(components)
+    assert gaze is not None
+    seen: list = []
+    gaze.on_transcript = lambda role, text: seen.append(("transcript", role))
+    gaze.on_sonic_state = lambda state: seen.append(("sonic", state))
+
+    sonic.on_transcript("USER", "nova hello")
+    sonic.on_state_change("speaking")
+
+    assert seen == []
+
+
+def test_face_hold_on_feeds_the_stack_transcripts_and_the_speaking_edge():
+    components = _build()
+    sonic, gaze = components[0], _gaze(components)
+    seen: list = []
+    gaze.on_transcript = lambda role, text: seen.append(("transcript", role, text))
+    gaze.on_sonic_state = lambda state: seen.append(("sonic", state))
+
+    sonic.on_transcript("USER", "nova hello")
+    sonic.on_state_change("speaking")
+
+    assert seen == [("transcript", "USER", "nova hello"), ("sonic", "speaking")]
+
+
+def test_attention_gate_on_shares_one_state_between_speaker_and_tools():
+    components = _build()
+    speaker, intents = components[1], components[3]
+    assert isinstance(speaker.attention, AttentionState)
+    assert intents._attention is speaker.attention
+
+
+def test_attention_gate_off_leaves_every_reader_ungated(monkeypatch, caplog):
+    monkeypatch.setenv("NOVA_ATTENTION_GATE", "0")
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        components = _build()
+    speaker, intents, gaze = components[1], components[3], _gaze(components)
+    assert speaker.attention is None
+    assert intents._attention is None
+    assert gaze._attention is None
+    assert [
+        m for m in _sense_lines(caplog) if "component absent name=attention reason=switch-off" in m
+    ]
+
+
+def test_a_user_transcript_notes_attention_then_rechecks_the_speaker():
+    components = _build()
+    sonic, speaker = components[0], components[1]
+    order: list = []
+    speaker.attention.note_transcript = lambda text: order.append(("note", text))
+    speaker.recheck_attention = lambda: order.append(("recheck",))
+
+    sonic.on_transcript("USER", "nova are you there")
+
+    assert order == [("note", "nova are you there"), ("recheck",)]
+
+
+def test_an_addressed_reply_is_remembered_and_an_unaddressed_one_is_dropped():
+    """``Ledger.append(dropped=...)`` carries the speaker's own verdict."""
+    components = _build()
+    sonic = components[0]
+    appended: list = []
+    # The composed ledger is reachable only through what it wrote, so spy on
+    # the seam instead: the ASSISTANT branch must pass `dropped` explicitly.
+    import reachy_nova.harness.ledger as ledger_module
+
+    real_append = ledger_module.Ledger.append
+
+    def _spy(self, kind, text, ts=None, *, dropped=False, **fields):
+        appended.append((kind, text, dropped))
+        return real_append(self, kind, text, ts, dropped=dropped, **fields)
+
+    ledger_module.Ledger.append = _spy
+    try:
+        # Ambient, nameless speech: the reply to it is one nobody heard…
+        sonic.on_transcript("USER", "so anyway the tap is dripping")
+        sonic.on_transcript("ASSISTANT", "nobody asked me")
+        # …and after the robot IS named, the reply is a real turn again.
+        sonic.on_transcript("USER", "nova hello")
+        sonic.on_transcript("ASSISTANT", "hello yourself")
+    finally:
+        ledger_module.Ledger.append = real_append
+
+    assert ("ASSISTANT", "nobody asked me", True) in appended
+    assert ("ASSISTANT", "hello yourself", False) in appended
+    assert [r["text"] for r in _ledger_records()] == [
+        "so anyway the tap is dripping",
+        "nova hello",
+        "hello yourself",
+    ]
+
+
+def test_a_delivered_inject_renews_the_attention_window():
+    components = _build()
+    sonic, speaker = components[0], components[1]
+    bus_component = next(c for c in components if isinstance(c, NovaBus))
+    noted: list = []
+    speaker.attention.note_inject = lambda: noted.append(1)
+
+    sonic.inject_text = lambda text, sense_class=None: "sent"
+    bus_component._on_inject("(someone is petting you)", sense_class="pat")
+    sonic.inject_text = lambda text, sense_class=None: "deferred"
+    bus_component._on_inject("(someone is petting you)", sense_class="pat")
+    sonic.inject_text = lambda text, sense_class=None: "throttled"
+    bus_component._on_inject("(someone is petting you)", sense_class="pat")
+
+    assert len(noted) == 2  # sent + deferred; a throttled cue reached nobody
+
+
+def test_a_browse_result_clears_the_thinking_pose_before_it_speaks(monkeypatch):
+    """The head must be out of the gaze-hold BEFORE Nova talks about what it
+    found — so the clear is synchronous and strictly first."""
+    monkeypatch.setenv("NOVA_ACT_ENABLED", "1")
+    components = _build()
+    sonic, gaze = components[0], _gaze(components)
+    browser = next(c for c in components if isinstance(c, app.BrowserComponent)).browser
+
+    order: list = []
+    gaze._intents = SimpleNamespace(
+        execute=lambda name, params, **_kw: order.append(("op", name, params.get("goal")))
+        or '{"ok": true}'
+    )
+    gaze.goal_standing = True  # a browse was in flight
+    sonic.inject_text = lambda text, **kwargs: order.append(("inject", text, kwargs))
+
+    browser.on_result("x")
+
+    assert order[0] == ("op", "declare_goal", None)
+    assert order[1][0] == "inject"
+    assert order[1][2] == {"must_deliver": True, "sense_class": "browse"}
+    assert "x" in order[1][1]
+    assert gaze.goal_standing is False
+
+
+def test_the_bus_tap_reaches_both_the_lock_state_and_the_gaze_stack():
+    components = _build()
+    gaze = _gaze(components)
+    intents = components[3]
+    bus_component = next(c for c in components if isinstance(c, NovaBus))
+    released: list = []
+    gaze.on_lock_released = released.append
+    intents.lock_state.mark_locked("model")
+
+    bus_component.on_message(
+        None,
+        None,
+        _fake_msg(
+            "reachy/events/motion/lock-released",
+            {"t": "motion", "id": "p1", "reason": "max-hold"},
+        ),
+    )
+
+    assert intents.lock_state.locked is False
+    assert released == ["max-hold"]
+
+
+def test_the_bus_tap_is_the_bare_lock_state_when_there_is_no_stack(monkeypatch):
+    monkeypatch.setenv("NOVA_FACE_HOLD", "0")
+    monkeypatch.setenv("NOVA_THINK_POSTURE", "0")
+    components = _build()
+    bus_component = next(c for c in components if isinstance(c, NovaBus))
+    intents = components[3]
+    assert bus_component._on_event == intents.lock_state.on_bus_event
+
+
+def test_face_hold_retires_the_face_nod_rule(caplog):
+    """The hold and the runtime's nod fight for the same channel, so the rule
+    this module installs for the no-hold world is tombstoned when it is on."""
+    statedir.behavior_dir().mkdir(parents=True, exist_ok=True)
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        _build()
+    overlay = statedir.rules_overlay_path().read_text(encoding="utf-8")
+    assert f'id = "{app.FACE_RULE_ID}"' in overlay
+    assert "enabled = false" in overlay
+    assert '"nod"' not in overlay
+    assert [m for m in _sense_lines(caplog) if "face-nod retired id=nova-face-noticed" in m]
+
+
+def test_face_hold_off_leaves_the_face_nod_rule_alone(monkeypatch, caplog):
+    monkeypatch.setenv("NOVA_FACE_HOLD", "0")
+    statedir.behavior_dir().mkdir(parents=True, exist_ok=True)
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        _build()
+    lines = _sense_lines(caplog)
+    assert not [m for m in lines if "face-nod retired" in m]
+
+
+def test_a_failing_retire_rule_never_breaks_the_build(monkeypatch, caplog):
+    monkeypatch.setattr(app, "retire_rule", _boom)
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        components = _build()  # must not raise
+    assert components
+    assert [
+        m
+        for m in _sense_lines(caplog)
+        if "component absent name=face-nod-retire reason=synthetic construction failure" in m
+    ]
+
+
+def test_a_failing_eyes_component_degrades_to_a_named_absent_line(monkeypatch, caplog):
+    monkeypatch.setattr(app.eyes_module, "build_component", _boom)
+    with caplog.at_level("INFO", logger="nova.sensory"):
+        components = _build()  # must not raise
+    assert not [c for c in components if isinstance(c, EyesComponent)]
+    assert [
+        m
+        for m in _sense_lines(caplog)
+        if "component absent name=eyes reason=synthetic construction failure" in m
+    ]

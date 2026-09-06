@@ -58,6 +58,75 @@ NovaBrowser(
 
 Browser automation is inherently slow. The component uses a dedicated worker thread to ensure that automation steps (like page loads) do not block the main application loop.
 
+### Progress Narration and Duplicate-Task Dedupe (issue #8)
+
+`_emit_progress` is the single emission point for progress narration and
+always logs a `[Browser progress] ...` line, but the `on_progress` callback
+itself only fires for two phases — `PROGRESS_PHASE_START` and
+`PROGRESS_PHASE_WORKING` — each worded as a status, never a request (e.g.
+`"Status: your browser is working on '<instruction>' — no action needed."`).
+This matters because a fresh Sonic session (after a mid-flight restart)
+could otherwise read a bare `"Working on: X..."` line as an instruction and
+call the browse tool again. The callback is additionally rate-limited to at
+most once per `PROGRESS_RATE_LIMIT_S` (10 s) per task, tracked via an
+injectable `clock` (defaults to `time.monotonic`) and reset at the start of
+each `_execute_task` call; `"Done! Reading results..."` is a `logger.info`
+line only and never reaches `on_progress`.
+
+`queue_task` normalises the instruction (lower-cased, collapsed whitespace)
+and drops a duplicate — logging one `sensory_log.stage("act", "browser",
+"queue_task", "dropped reason=duplicate ...")` line and returning
+`{"ok": True, "queued": False, "duplicate": True, ...}` — when it matches
+either the currently running task (regardless of how long it's been
+running) or any queued/recently-enqueued task within `DEDUPE_WINDOW_S`
+(300 s). A non-duplicate call returns `{"ok": True, "queued": True, ...}`;
+the disabled-flag early return returns `{"ok": False, "queued": False,
+"reason": "nova-act-disabled"}`. The `_act_on_agentcore` NovaAct/
+`browser_session`/`act_get` usage itself is unchanged by any of this.
+
+`queue_task` has two independent callers — the voice tool and the dashboard
+API (`api_routes.py`'s `submit_browser_task`) — so pruning, the
+running/recent duplicate comparisons, the recent-list insertion, and the
+queue insertion all run inside one `self._dedupe_lock` critical section
+(PR #26 review); `submit_browser_task` in turn uses that typed result
+directly for its HTTP response and only calls `ctx.state.update(...)` when
+`queued` is `True`, so a duplicate or disabled request is reported as such
+and never churns the shared dashboard state.
+
+## Browse result path, end to end
+
+A spoken "look up X" and the answer Nova eventually speaks are separated by
+30-90 s and several components; this is the whole chain, task t2/t8's
+integration (`reachy_nova/harness/app.py`):
+
+1. **`queue_task`** — the browse tool call. Deduped against the running task
+   and any queued/recently-enqueued task within `DEDUPE_WINDOW_S` (300 s); a
+   duplicate returns `{"ok": true, "queued": false, "duplicate": true}` and
+   opens no second AgentCore session (see above).
+2. **Status cues** — `_execute_task` calls `_emit_progress` at each phase;
+   `on_progress` (wired to `sonic.inject_text`, a PLAIN, throttled inject)
+   fires at most once per `PROGRESS_RATE_LIMIT_S` (10 s) for the start and
+   working phases, worded as status so a fresh session can't read it as an
+   instruction. `browser.on_state_change = gaze.on_browser_state` (under
+   `NOVA_THINK_POSTURE`) raises the gaze stack's BROWSING layer the moment
+   the state turns `"busy"` — see [gaze.md](gaze.md).
+3. **`clear_for_result()`** — the app's `_on_browse_result` callback calls
+   this on `GazeStack` *before* anything else, synchronously, so the head is
+   demonstrably out of the thinking pose before Nova starts talking about
+   what it found (see gaze.md's `clear_for_result()` section). A no-op when
+   nothing was standing (`NOVA_THINK_POSTURE` off, or no browse was in
+   flight).
+4. **Must-deliver inject** — `sonic.inject_text(..., must_deliver=True,
+   sense_class="browse")`. This is what makes item 1 of the round's success
+   signals true: throttle-exempt, queued (not dropped) across a session
+   rotation gap, and parked under its own `sense_class` in the speaking-guard
+   deferred slot so an unrelated cue can never overwrite the answer while
+   Nova is still talking — see [nova_sonic.md](nova_sonic.md)'s "Must-deliver
+   injects".
+5. **Spoken.** Sonic reads the injected text and speaks the answer; the
+   attention window is renewed (`attention.note_inject()`) as with any other
+   inject.
+
 ## Usage Example
 
 ```python

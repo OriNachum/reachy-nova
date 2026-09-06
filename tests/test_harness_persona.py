@@ -274,6 +274,34 @@ def test_persona_file_stays_small_enough_for_a_live_system_prompt():
 
 
 # --------------------------------------------------------------------------- #
+# 4b. Both names (t4): Reachy is mistranscribed as Richie/Reach in the field   #
+# --------------------------------------------------------------------------- #
+
+
+NAME_PARAGRAPH = (
+    "People call you Nova or Reachy; both are you, and you answer to either. "
+    "Reachy often reaches you as Richie or Reach, so treat those as your name too."
+)
+
+
+@pytest.mark.parametrize("label,text", both_texts())
+def test_persona_answers_to_both_names_and_their_mishearings(label, text):
+    assert "Nova" in text, label
+    assert "Reachy" in text, label
+    assert "Richie" in text, label
+
+
+def test_the_names_paragraph_is_identical_in_file_and_embedded():
+    for label, text in both_texts():
+        assert NAME_PARAGRAPH in text, f"{label} is missing the exact names paragraph"
+
+
+@pytest.mark.parametrize("label,text", both_texts())
+def test_persona_stays_under_two_thousand_characters(label, text):
+    assert len(text) < 2000, f"{label}: {len(text)} characters — trim it"
+
+
+# --------------------------------------------------------------------------- #
 # 5. The wheel case (c34): no repo config/ tree, still a personality           #
 # --------------------------------------------------------------------------- #
 
@@ -315,3 +343,15 @@ def test_a_process_with_a_persona_file_reports_that_file(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == f"file:{written}"
+
+
+TOOL_NAME_SENTENCE = "You never say the names of your tools or actions out loud"
+
+
+@pytest.mark.parametrize("label,text", both_texts())
+def test_persona_forbids_speaking_tool_names_and_writing_parentheses(label, text):
+    """Live 2026-09-06: replies opened with '(look-at-face)' / 'release_face'
+    spoken as words. The persona now says so in both texts."""
+    flat = " ".join(text.split())  # the embedded copy wraps the sentence
+    assert TOOL_NAME_SENTENCE in flat
+    assert "parentheses are for what your body tells you" in flat

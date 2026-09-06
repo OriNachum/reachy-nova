@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "reachy-nova"
-version = "0.4.0"
+version = "0.5.0"
 description = "Reachy Nova - Voice, Vision & Browser AI for Reachy Mini"
 readme = "README.md"
 requires-python = ">=3.12"

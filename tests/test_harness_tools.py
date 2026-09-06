@@ -27,9 +27,11 @@ from reachy_nova.harness import statedir
 from reachy_nova.harness import tools as tools_module
 from reachy_nova.harness.daemon_client import restore_volume
 from reachy_nova.harness.quiet import QuietState
+from reachy_nova.harness.attention import AttentionState
 from reachy_nova.harness.tools import (
     BROWSE_DISABLED_REASON,
     BROWSE_NOT_WIRED_REASON,
+    COLD_REFUSED_TOOLS,
     DEFAULT_RECALL_SENSES_N,
     DEFAULT_VOICE_STEP,
     DEGRADED_NOTE,
@@ -46,7 +48,13 @@ from reachy_nova.harness.tools import (
     MIN_QUIET_MINUTES,
     MIN_RECALL_SENSES_N,
     MIN_VOICE_LEVEL,
+    NOT_ADDRESSED_REASON,
     QUIET_NOT_WIRED_REASON,
+    THINK_BEHAVIOR,
+    THINK_DURATION_S,
+    THINK_SIDE_INVALID_REASON,
+    THINK_YAW_LEFT,
+    THINK_YAW_RIGHT,
     TOOL_SPECS,
     VOICE_NOT_WIRED_REASON,
     IntentTools,
@@ -72,6 +80,9 @@ EXPECTED_TOOLS = (
     # the underscored names Sonic actually reached for on the robot.
     "look_at_face",
     "look_at_sound",
+    # think (task t7) — published like look_at_face for the same reason
+    # (finding L4): a thin run_behavior alias over the runtime's 'thoughtful'.
+    "think",
     # the kiro-writer pair (deviation d1) — refused unless a ForgeLeg is wired
     "forge",
     "use_skill",
@@ -1976,3 +1987,303 @@ def test_l5_descriptions_name_the_phrases_people_actually_say(tool_name, phrases
     description = _spec_for(tool_name)["description"].lower()
     for phrase in phrases:
         assert phrase in description, f"{tool_name} description never names {phrase!r}"
+
+
+# --------------------------------------------------------------------------- #
+# think (task t7) — a run_behavior alias over the runtime's 'thoughtful'      #
+# --------------------------------------------------------------------------- #
+
+
+def test_think_tool_spec_is_published():
+    (spec,) = [s for s in TOOL_SPECS if s["toolSpec"]["name"] == "think"]
+    schema = json.loads(spec["toolSpec"]["inputSchema"]["json"])
+    assert schema["required"] == []
+    assert set(schema["properties"]) == {"side"}
+    assert schema["properties"]["side"]["enum"] == ["left", "right"]
+    assert "thinking" in spec["toolSpec"]["description"].lower()
+
+
+def test_think_left_spools_the_thoughtful_behavior_with_positive_yaw(tools):
+    with intents_engine() as engine:
+        result = json.loads(tools.execute("think", {"side": "left"}))
+    assert result["ok"] is True
+    (payload,) = engine.seen
+    assert payload["op"] == "run_behavior"
+    assert payload["name"] == THINK_BEHAVIOR
+    assert payload["params"] == {"yaw": THINK_YAW_LEFT}
+    assert payload["lifetime"] == {"duration": THINK_DURATION_S}
+    assert THINK_YAW_LEFT > 0
+
+
+def test_think_right_uses_the_opposite_sign(tools):
+    with intents_engine() as engine:
+        tools.execute("think", {"side": "right"})
+    payload = engine.seen[0]
+    assert payload["params"]["yaw"] == THINK_YAW_RIGHT
+    assert THINK_YAW_RIGHT == -THINK_YAW_LEFT
+
+
+def test_think_without_a_side_alternates_across_calls(tools):
+    with intents_engine() as engine:
+        tools.execute("think", {})
+        tools.execute("think", {})
+        tools.execute("think", {})
+    yaws = [p["params"]["yaw"] for p in engine.seen]
+    assert yaws[0] != yaws[1]
+    assert yaws[0] == yaws[2]
+    assert set(yaws) == {THINK_YAW_LEFT, THINK_YAW_RIGHT}
+
+
+def test_think_rejects_a_bad_side_before_the_spool_write(tools):
+    result = json.loads(tools.execute("think", {"side": "up"}))
+    assert result["ok"] is False
+    assert result["error"] == THINK_SIDE_INVALID_REASON
+    assert spooled() == []
+
+
+def test_think_is_in_the_action_set_right_after_look_at_sound():
+    names = tuple(spec["toolSpec"]["name"] for spec in TOOL_SPECS)
+    assert names[names.index("look_at_sound") + 1] == "think"
+
+
+# --------------------------------------------------------------------------- #
+# browse (task t7) — a typed queue_task result (including a duplicate) passes #
+# through unchanged; an older None-returning stub still gets the old shape   #
+# --------------------------------------------------------------------------- #
+
+
+class TypedFakeBrowser:
+    """A ``queue_task`` double that returns NovaBrowser's own typed dict."""
+
+    def __init__(self, response):
+        self.response = response
+        self.calls: list[tuple[str, str | None]] = []
+        self.on_progress = None
+
+    def queue_task(self, instruction, url=None):
+        self.calls.append((instruction, url))
+        return self.response
+
+
+def test_browse_duplicate_is_passed_through_unchanged(state_dir, monkeypatch):
+    monkeypatch.setenv("NOVA_ACT_ENABLED", "1")
+    duplicate = {
+        "ok": True,
+        "queued": False,
+        "duplicate": True,
+        "instruction": "find a recipe",
+        "url": None,
+    }
+    browser = TypedFakeBrowser(duplicate)
+    tools = IntentTools(await_timeout=0.05, browser=browser)
+
+    result = json.loads(tools.execute("browse", {"instruction": "find a recipe"}))
+
+    assert result == duplicate
+    assert browser.calls == [("find a recipe", None)]
+
+
+def test_browse_disabled_result_from_the_browser_is_passed_through(state_dir, monkeypatch):
+    monkeypatch.setenv("NOVA_ACT_ENABLED", "1")
+    disabled = {"ok": False, "queued": False, "reason": "nova-act-disabled"}
+    browser = TypedFakeBrowser(disabled)
+    tools = IntentTools(await_timeout=0.05, browser=browser)
+
+    result = json.loads(tools.execute("browse", {"instruction": "find a recipe"}))
+
+    assert result == disabled
+
+
+def test_browse_none_returning_browser_still_gets_the_old_queued_dict(state_dir, monkeypatch):
+    # Mirrors test_browse_queues_the_instruction_when_enabled_and_wired's
+    # FakeBrowser (queue_task returns None implicitly) — the pre-typed-return
+    # shape an older NovaBrowser stub would still produce.
+    monkeypatch.setenv("NOVA_ACT_ENABLED", "1")
+    browser = FakeBrowser()
+    tools = IntentTools(await_timeout=0.05, browser=browser)
+
+    result = json.loads(
+        tools.execute("browse", {"instruction": "find a recipe", "url": "https://example.com"})
+    )
+
+    assert result == {
+        "ok": True,
+        "queued": True,
+        "instruction": "find a recipe",
+        "url": "https://example.com",
+    }
+
+
+# --------------------------------------------------------------------------- #
+# lock_face marks the belief owner "model" (task t7)                          #
+# --------------------------------------------------------------------------- #
+
+
+def test_confirmed_lock_face_marks_the_belief_owner_model(tools_with_lock):
+    tools, lock_state = tools_with_lock
+    with intents_engine(response={"ok": True, "op": "lock_face", "locked": True}):
+        tools.execute("lock_face", {})
+    assert lock_state.locked is True
+    assert lock_state.owner == "model"
+
+
+# --------------------------------------------------------------------------- #
+# Cold refusal of effectful tools (task t7)                                   #
+# --------------------------------------------------------------------------- #
+
+
+class _StepClock:
+    """A tiny monotonic-seconds clock a test can move by hand."""
+
+    def __init__(self, now: float = 1_000.0) -> None:
+        self.now = float(now)
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += float(seconds)
+
+
+@pytest.fixture
+def cold_clock():
+    return _StepClock()
+
+
+@pytest.fixture
+def cold_attention(cold_clock):
+    return AttentionState(clock=cold_clock)
+
+
+def test_cold_and_nameless_browse_is_refused_and_never_touches_the_browser(
+    state_dir, cold_attention
+):
+    assert cold_attention.note_transcript("what time is it") == "ignored"
+    browser = FakeBrowser()
+    tools = IntentTools(await_timeout=0.05, browser=browser, attention=cold_attention)
+
+    result = json.loads(tools.execute("browse", {"instruction": "find a recipe"}))
+
+    assert result["ok"] is False
+    assert "not addressed" in result["error"]
+    assert result["error"] == NOT_ADDRESSED_REASON
+    assert browser.queued == []
+
+
+def test_cold_and_nameless_run_behavior_is_refused_without_spooling(state_dir, cold_attention):
+    cold_attention.note_transcript("what time is it")
+    tools = IntentTools(await_timeout=0.05, attention=cold_attention)
+
+    result = json.loads(tools.execute("run_behavior", {"name": "nod"}))
+
+    assert result["ok"] is False
+    assert result["error"] == NOT_ADDRESSED_REASON
+    assert spooled() == []
+
+
+def test_cold_and_nameless_reflex_run_behavior_is_not_refused(state_dir, cold_attention):
+    """The gaze stack's own ops (lock, sway, base-layer revive) bypass the
+    cold refusal: it exists for the MODEL acting on overheard speech, and
+    gating the body's reflexes left the robot rigid and lock-less for as long
+    as people talked near it without naming it (live, 2026-09-06 12:28 BST).
+    """
+    cold_attention.note_transcript("what time is it")
+    tools = IntentTools(await_timeout=0.05, attention=cold_attention)
+
+    refused = json.loads(tools.execute("run_behavior", {"name": "nod"}))
+    assert refused["error"] == NOT_ADDRESSED_REASON
+    assert spooled() == []
+
+    result = json.loads(tools.execute("run_behavior", {"name": "nod"}, reflex=True))
+
+    assert "error" not in result or result["error"] != NOT_ADDRESSED_REASON
+    assert len(spooled()) == 1
+    assert spool_payloads()[0]["op"] == "run_behavior"
+
+
+def test_cold_and_nameless_reflex_lock_face_is_not_refused(state_dir, cold_attention):
+    cold_attention.note_transcript("what time is it")
+    tools = IntentTools(await_timeout=0.05, attention=cold_attention)
+
+    result = json.loads(tools.execute("lock_face", {}, reflex=True))
+
+    assert result.get("error") != NOT_ADDRESSED_REASON
+    assert len(spooled()) == 1
+    assert spool_payloads()[0]["op"] == "lock_face"
+
+
+def test_cold_and_nameless_recall_senses_still_executes(state_dir, cold_attention):
+    cold_attention.note_transcript("what time is it")
+    history = FakeSenseHistory(entries=[])
+    tools = IntentTools(await_timeout=0.05, attention=cold_attention, history=history)
+
+    result = json.loads(tools.execute("recall_senses", {}))
+
+    assert result["ok"] is True
+    assert history.recent_calls == [DEFAULT_RECALL_SENSES_N]
+
+
+def test_warm_after_a_named_transcript_allows_browse(state_dir, monkeypatch, cold_attention):
+    monkeypatch.setenv("NOVA_ACT_ENABLED", "1")
+    assert cold_attention.note_transcript("nova, look it up") == "opened"
+    browser = FakeBrowser()
+    tools = IntentTools(await_timeout=0.05, browser=browser, attention=cold_attention)
+
+    result = json.loads(tools.execute("browse", {"instruction": "find a recipe"}))
+
+    assert result["ok"] is True
+    assert browser.queued == [("find a recipe", None)]
+
+
+def test_cold_with_an_inject_after_the_nameless_transcript_is_allowed(
+    state_dir, monkeypatch, cold_attention
+):
+    monkeypatch.setenv("NOVA_ACT_ENABLED", "1")
+    cold_attention.note_transcript("what time is it")
+    cold_attention.note_inject()
+    browser = FakeBrowser()
+    tools = IntentTools(await_timeout=0.05, browser=browser, attention=cold_attention)
+
+    result = json.loads(tools.execute("browse", {"instruction": "find a recipe"}))
+
+    assert result["ok"] is True
+    assert browser.queued == [("find a recipe", None)]
+
+
+def test_no_attention_wired_allows_everything_as_before(tools):
+    # The plain `tools` fixture builds IntentTools() with attention=None.
+    with intents_engine() as engine:
+        result = json.loads(tools.execute("run_behavior", {"name": "nod"}))
+    assert result["ok"] is True
+    assert engine.seen
+
+
+def test_cold_refused_tools_are_exactly_the_effectful_set():
+    assert COLD_REFUSED_TOOLS == {
+        "browse",
+        "forge",
+        "use_skill",
+        "author_rule",
+        "goto",
+        "run_behavior",
+        "declare_goal",
+        "set_mode",
+        "set_inhibition",
+        "create_rule",
+        "enroll_face",
+        "lock_face",
+        "look_at_face",
+        "look_at_sound",
+        "think",
+    }
+
+
+def test_cold_refusal_logs_the_same_one_sense_line_shape(state_dir, cold_attention, caplog):
+    cold_attention.note_transcript("what time is it")
+    tools = IntentTools(await_timeout=0.05, attention=cold_attention)
+    with caplog.at_level(logging.INFO, logger="nova.sensory"):
+        tools.execute("run_behavior", {"name": "nod"})
+    (line,) = _sense_lines(caplog)
+    assert "[SENSE stage=act source=nova event=run_behavior]" in line
+    assert "refused" in line
+    assert NOT_ADDRESSED_REASON in line

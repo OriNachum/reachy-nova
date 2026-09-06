@@ -312,3 +312,53 @@ def test_the_quiet_decision_is_taken_under_the_write_lock(tmp_path):
     assert quiet.checked_under_lock is True
     assert ledger.skipped_quiet == 1
     assert not (tmp_path / "l.jsonl").exists()
+
+
+# --------------------------------------------------------------------------- #
+# 5. Memory hygiene (t6): a gate-dropped reply never reaches the ledger.      #
+# --------------------------------------------------------------------------- #
+
+
+def test_append_with_dropped_true_writes_nothing_and_counts_the_skip(tmp_path):
+    """app.py passes ``dropped=(speaker.attention_verdict() == "not-addressed")``
+    for ASSISTANT lines: a reply nobody heard must never be distilled."""
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path=path, clock=FakeClock())
+
+    assert ledger.append("ASSISTANT", "a reply the gate dropped", dropped=True) is False
+
+    assert ledger.attention_skips == 1
+    assert ledger.appended == 0
+    assert ledger.skipped_quiet == 0
+    assert not path.exists() or path.read_text(encoding="utf-8") == ""
+
+
+def test_append_with_dropped_false_behaves_exactly_as_before(tmp_path):
+    path = tmp_path / "ledger.jsonl"
+    clock = FakeClock()
+    ledger = Ledger(path=path, clock=clock)
+
+    assert ledger.append("ASSISTANT", "a reply that was heard", dropped=False) is True
+    assert ledger.append("USER", "and one more", source="sonic") is True
+
+    records = ledger.read()
+    assert [r["kind"] for r in records] == ["ASSISTANT", "USER"]
+    assert records[1]["source"] == "sonic"
+    assert ledger.appended == 2
+    assert ledger.attention_skips == 0
+
+
+def test_the_two_skips_are_counted_separately(tmp_path, state_dir):
+    """A quiet skip and a gate skip are different facts about the same file."""
+    path = tmp_path / "ledger.jsonl"
+    clock = FakeClock()
+    quiet = QuietState(clock=clock)
+    ledger = Ledger(path=path, quiet=quiet, clock=clock)
+
+    assert ledger.append("ASSISTANT", "gate-dropped", dropped=True) is False
+    quiet.arm(10.0)
+    assert ledger.append("USER", "quiet-skipped") is False
+
+    assert ledger.attention_skips == 1
+    assert ledger.skipped_quiet == 1
+    assert ledger.appended == 0

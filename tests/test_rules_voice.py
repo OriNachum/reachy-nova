@@ -182,17 +182,17 @@ def test_route_event_free_voice_appends_nothing():
     assert text == "context"
 
 
-def test_face_lost_is_a_quiet_brief_face_sense(rules_cfg, raw_rules):
-    """t13: face-lost is worth a quiet cue (the lock persists), not narration."""
-    assert raw_rules["rules"]["motion/face-lost"].get("voice") == "brief"
+def test_face_lost_is_history_only_face_sense(rules_cfg, raw_rules):
+    """t13 made face-lost a quiet brief cue; live on 2026-09-06 the CM4 ticked
+    at ~7 Hz under face detection and the runtime reported face-lost every
+    20-40 s while the person sat there, each one a spoken "they wandered
+    off". History-only (voice: none) until reachy-mini-cli #179."""
+    assert raw_rules["rules"]["motion/face-lost"].get("voice") == "none"
     assert raw_rules["rules"]["motion/face-lost"].get("sense") == "face"
 
     text, reason = bus.route_event(rules_cfg, "motion", "face-lost", {"id": "p1", "absent_s": 4})
     assert reason == bus.REASON_INJECT
-    assert text.endswith(bus.VOICE_MARKERS["brief"])
-    lowered = text.lower()
-    for forbidden in FORBIDDEN_SUBSTRINGS:
-        assert forbidden not in lowered
+    assert text == "(the person you were watching is out of view)"  # no voice marker: none is muted one layer up
 
 
 def test_lock_released_is_silent_and_names_the_reason_in_plain_words(rules_cfg, raw_rules):

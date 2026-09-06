@@ -54,10 +54,13 @@ from .. import config
 from ..nova_browser import act_enabled
 from ..sensory_log import stage as _stage
 from ..skill_forge import resolve_writer
+from . import eyes as eyes_module
 from . import statedir
+from .attention import AttentionState
 from .cognition_feed import CognitionFeed
 from .daemon_client import DaemonClient, restore_volume
 from .gate import EchoGate, resolve_policy
+from .gaze_stack import GazeStack
 from .hearing import TeeHearing
 from .ledger import Ledger
 from .lock_state import LockState
@@ -66,7 +69,7 @@ from .network import NetworkUnit
 from .persona import DEFAULT_PERSONA
 from .persona import read as read_persona
 from .quiet import QuietState
-from .rules_overlay import upsert_rule
+from .rules_overlay import retire_rule, upsert_rule
 from .sense_history import SenseHistory
 from .speaking import SonicSpeaker
 from .switches import Switches
@@ -176,6 +179,40 @@ FACE_RULE: dict = {
 #: Seconds :func:`ensure_face_rule` waits for the engine's reload verdict when
 #: the overlay actually changed (an unchanged overlay submits no reload).
 FACE_RULE_RELOAD_TIMEOUT = 1.0
+
+
+def retire_face_nod_rule() -> None:
+    """Tombstone :data:`FACE_RULE_ID` — the face-nod reflex the hold replaces.
+
+    ``NOVA_FACE_HOLD`` on means the gaze stack takes a standing face lock the
+    moment a conversation is live, and a runtime reflex that nods the head at
+    every recognised face fights that hold for the same channel by recency
+    (the same competition task t10 found for ``orient-to-sound``). So the rule
+    this module itself installs for the no-hold world is retired when the hold
+    is on.
+
+    Total, like :func:`ensure_face_rule`: a state dir that does not exist on
+    this box (a dev machine), an unwritable overlay or a refused reload all
+    degrade to one ``component absent name=face-nod-retire reason=<why>``
+    line. It never raises.
+    """
+    try:
+        result = retire_rule(FACE_RULE_ID)
+    except Exception as err:  # noqa: BLE001 - a rules problem must not stop the voice
+        _stage(
+            "supervise",
+            "nova",
+            "component",
+            f"component absent name=face-nod-retire reason={err}",
+        )
+        return
+    _stage(
+        "supervise",
+        "nova",
+        "component",
+        f"face-nod retired id={FACE_RULE_ID} changed={result.get('changed')} "
+        f"verdict={result.get('verdict')}",
+    )
 
 
 def ensure_face_rule(*, reload_timeout: float | None = None) -> bool:
@@ -520,7 +557,26 @@ def build_app() -> list[object]:
     # transcripts (user/assistant turns), read by the Lite reactor's context.
     mood = Mood()
 
-    speaker = SonicSpeaker(gate=gate, quiet=quiet, chunked=switches.chunked_playback)
+    # attention (t6/t12) — the cold/warm window the robot's own name opens.
+    # ONE object, three readers: the speaker gates an utterance on it, the
+    # tools refuse effectful moves taken off ambient nameless speech, and the
+    # gaze stack reads its conversation liveness. Off (NOVA_ATTENTION_GATE=0)
+    # means None everywhere, which is exactly the answer-everything robot of
+    # every previous round — every reader already treats None as "no gate".
+    attention: AttentionState | None = None
+    if switches.attention_gate:
+        attention = AttentionState(quiet=quiet)
+    else:
+        _stage(
+            "supervise", "nova", "component", "component absent name=attention reason=switch-off"
+        )
+
+    speaker = SonicSpeaker(
+        gate=gate,
+        quiet=quiet,
+        chunked=switches.chunked_playback,
+        attention=attention,
+    )
 
     # memory (t4/t10, c13) — the raw ledger and the Lite compactor that
     # distils it. Built BEFORE Sonic because Sonic takes the compactor's
@@ -547,8 +603,17 @@ def build_app() -> list[object]:
     sonic.on_audio_output = speaker.on_audio_chunk
     sonic.on_interruption = speaker.preempt
 
+    # ``gaze`` is bound further down (it needs ``intents``), but this tap is
+    # only ever CALLED at runtime, long after build_app returned — so the
+    # closure reads whatever the stack ended up being, or None.
+    gaze: GazeStack | None = None
+
     def _on_state_change(state: str) -> None:
         speaker.on_state_change(state)
+        # Nova starting to speak is a conversation tick for the CONVERSATION
+        # layer only, so it is wired behind that layer's own switch.
+        if gaze is not None and switches.face_hold:
+            gaze.on_sonic_state(state)
 
     sonic.on_state_change = _on_state_change
 
@@ -627,7 +692,29 @@ def build_app() -> list[object]:
         history=history,
         quiet=quiet,
         lock_state=lock_state,
+        attention=attention,
     )
+
+    # gaze stack (t8/t9/t10) — the harness's single-writer posture layer. It
+    # exists when EITHER layer is wanted: face_hold owns the CONVERSATION
+    # layer, think_posture the BROWSING one. The producers below are wired
+    # per-switch, so "the stack exists" never means "both layers move the
+    # head" — with only one switch on the other layer simply never has a
+    # producer to raise it.
+    # ``conversation_enabled`` is the face_hold switch itself, not just the
+    # wiring: the stack carries the shared attention (and has its own fallback
+    # liveness clock), so leaving the layer merely unwired would still let it
+    # enter conversation and issue look_at_sound/lock_face with the hold off
+    # (PR #26 review).
+    if switches.face_hold or switches.think_posture:
+        gaze = GazeStack(
+            intents,
+            attention=attention,
+            lock_state=lock_state,
+            conversation_enabled=switches.face_hold,
+        )
+    else:
+        _stage("supervise", "nova", "component", "component absent name=gaze reason=switch-off")
 
     # volume restore (t10) — re-apply a persisted level if the daemon disagrees.
     # Never raises: no persisted file, an unreachable daemon, or a bad payload
@@ -644,9 +731,25 @@ def build_app() -> list[object]:
         # the ANSWER arrives minutes later on the worker thread, and reaches
         # the conversation only through this callback.
         def _on_browse_result(text: str) -> None:
-            sonic.inject_text(f"Your web browsing finished. Tell the user what you found: {text}")
+            # Order is the point: the head comes OUT of the thinking pose
+            # (synchronously, on this thread) before Nova starts talking
+            # about what it found — otherwise it delivers the answer staring
+            # up and away. ``must_deliver`` because this is an ANSWER the
+            # user asked for minutes ago, not an ambient cue: it must survive
+            # a throttle, a cold attention window and an inactive stream.
+            if gaze is not None:
+                gaze.clear_for_result()
+            sonic.inject_text(
+                f"Your web browsing finished. Tell the user what you found: {text}",
+                must_deliver=True,
+                sense_class="browse",
+            )
+            if attention is not None:
+                attention.note_inject()
 
         browser.on_result = _on_browse_result
+        if switches.think_posture and gaze is not None:
+            browser.on_state_change = gaze.on_browser_state
 
     # act leg — tool calls run off Sonic's response thread, result posted back
     def _on_tool_use(tool_name: str, tool_use_id: str, params: dict) -> None:
@@ -667,10 +770,28 @@ def build_app() -> list[object]:
         if role == "ASSISTANT" and text.strip():
             feed.message(text)
             if ledger is not None:
-                ledger.append("ASSISTANT", text)
+                # A reply the attention gate refused to play was never heard
+                # by anyone, so it is not part of the conversation and must
+                # not be distilled into memory (Ledger.append's `dropped`).
+                # The cognition feed and the mood are deliberately NOT gated
+                # the same way: the feed is the journal of what Nova produced
+                # (a dropped reply is exactly what an operator wants to see),
+                # and the mood is about having taken a turn at all.
+                ledger.append(
+                    "ASSISTANT", text, dropped=(speaker.attention_verdict() == "not-addressed")
+                )
             mood.note("assistant_turn")
         elif role == "USER" and text.strip():
             _stage("hear", "nova", "transcript", f"heard {text[:120]!r}")
+            # Attention FIRST: note_transcript is what opens (or renews) the
+            # warm window, and recheck_attention immediately re-reads the
+            # verdict for an utterance already in flight — a name arriving
+            # mid-sentence un-mutes the rest of it.
+            if attention is not None:
+                attention.note_transcript(text)
+                speaker.recheck_attention()
+            if gaze is not None and switches.face_hold:
+                gaze.on_transcript(role, text)
             if ledger is not None:
                 ledger.append("USER", text)
             mood.note("user_turn")
@@ -700,6 +821,11 @@ def build_app() -> list[object]:
         status = sonic.inject_text(text, sense_class=sense_class)
         if status == "sent" and ledger is not None:
             ledger.append("sense", text, sense_class=sense_class)
+        # A cue that REACHED the model (now, or parked for the drain) is the
+        # conversation still happening: it renews the attention window, so a
+        # body cue Nova answers keeps the robot warm for the reply.
+        if attention is not None and status in ("sent", "deferred"):
+            attention.note_inject()
         if sense_class in MOOD_SENSE_CLASSES:
             mood.note(sense_class)
 
@@ -811,6 +937,16 @@ def build_app() -> list[object]:
             "supervise", "nova", "component", "component absent name=lite-reactor reason=switch-off"
         )
 
+    # The bus's event tap: the lock belief ALWAYS, plus — when a gaze stack
+    # exists — the stack's own clear of a hold the runtime just dropped. Two
+    # readers of one event, composed here rather than inside either of them.
+    def _bus_tap(event: dict) -> None:
+        lock_state.on_bus_event(event)
+        if gaze is None:
+            return
+        if event.get("source") == "motion" and event.get("type") == "lock-released":
+            gaze.on_lock_released(event.get("reason"))
+
     # read leg — bus is optional-degraded: no broker means named drops, not death
     bus_component = None
     try:
@@ -818,7 +954,7 @@ def build_app() -> list[object]:
 
         bus_component = NovaBus(
             on_inject=_inject,
-            on_event=lock_state.on_bus_event,
+            on_event=_bus_tap if gaze is not None else lock_state.on_bus_event,
             history=history,
             quiet=quiet,
             reactor=lite_reactor,
@@ -832,6 +968,11 @@ def build_app() -> list[object]:
     # mouth. Its own thread does the work; Sonic only reads its history().
     if compactor is not None:
         components.append(compactor)
+
+    # gaze stack — after the bus (its tap may reach the stack) and before the
+    # browser, whose state changes raise the browsing layer.
+    if gaze is not None:
+        components.append(gaze)
 
     if browser is not None:
         components.append(BrowserComponent(browser))
@@ -875,7 +1016,27 @@ def build_app() -> list[object]:
     except Exception as err:  # noqa: BLE001
         _stage("supervise", "nova", "component", f"component absent name=memory reason={err}")
 
-    # standing reflexes — the face cue crosses the bus only through this rule
-    ensure_face_rule()
+    # eyes (t11) — its own ~1 Hz subscription to the runtime's snapshot topic,
+    # so a camera that stops producing frames is NAMED once instead of being
+    # inferred from silence. Construction opens no socket (start() does), but
+    # it is wrapped like every other optional leg so a missing dependency is
+    # an absent component rather than a harness that will not compose. Its
+    # ``.eyes`` attribute is what supervisor._find_eyes_state discovers on the
+    # component list run() already receives — supervisor.run takes no
+    # eyes_state kwarg, so there is nothing to pass.
+    try:
+        components.append(eyes_module.build_component())
+    except Exception as err:  # noqa: BLE001
+        _stage("supervise", "nova", "component", f"component absent name=eyes reason={err}")
+
+    # standing reflexes — with the hold OFF the face cue crosses the bus only
+    # through this rule, so it is (re)installed; with the hold ON the nod that
+    # rule runs would fight the hold for the head, so the rule is tombstoned
+    # instead and never re-installed (installing then retiring on every boot
+    # cost two overlay writes and two reloads for nothing — t12 review).
+    if switches.face_hold:
+        retire_face_nod_rule()
+    else:
+        ensure_face_rule()
 
     return components
