@@ -2,7 +2,7 @@
   "plan_slug": "features-and-bugs-round-25",
   "schema_version": 2,
   "created": "2026-09-06T07:50:25Z",
-  "updated": "2026-09-06T11:06:53Z",
+  "updated": "2026-09-06T11:44:22Z",
   "deviations": [
     {
       "id": "d1",
@@ -97,6 +97,20 @@
       "status": "proposed",
       "classification": "needs-follow-up",
       "seq": 52
+    },
+    {
+      "id": "d9",
+      "what": "t7's cold-and-nameless refusal (COLD_REFUSED_TOOLS) also refused the gaze stack's own ops: while people talked near the robot without naming it and nothing injected in between, every lock_face (conversation entry and retries) and every feel-alive revive came back 'not addressed', so the robot neither turned to the voices nor breathed. Fix af9276c: IntentTools.execute(..., reflex=True) skips only that check; GazeStack._op marks every op a reflex; the model's tool calls stay gated",
+      "task_ref": "t7",
+      "reason": "the plan wrote t7's gate for the model acting on overheard speech and t8/t9's gaze layer for exactly that speech (q1: turn to speech, lock the face even without the name); the two met only live, 2026-09-06 12:28-12:36 BST, in a nameless Hebrew conversation at the desk",
+      "affects": [
+        "t9",
+        "t20"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable",
+      "seq": 55
     }
   ],
   "evidence": [
@@ -973,6 +987,44 @@
       "status": "proposed",
       "superseded": false,
       "seq": 54
+    },
+    {
+      "id": "e47",
+      "obligation_ref": "o26",
+      "test_ref": "tests/test_harness_tools.py::test_cold_and_nameless_reflex_run_behavior_is_not_refused, ::test_cold_and_nameless_reflex_lock_face_is_not_refused, tests/test_harness_gaze_stack_liveness.py::test_every_gaze_op_is_a_reflex_not_a_model_tool_call",
+      "behavior_text": "with the attention cold and the last transcript nameless, execute(..., reflex=True) spools run_behavior and lock_face while the same calls without the keyword are refused 'not addressed'; every op the gaze stack submits carries reflex=True",
+      "contract_text": "effectful tools refused 'not addressed' while cold and nameless \u2014 for the model; the body's own reflexes are not the model",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "three tests red before af9276c, green after; full suite 2117 passed; gaze and app fakes accept the keyword",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T11:40:00Z",
+        "commit": "af9276c"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 56
+    },
+    {
+      "id": "e48",
+      "obligation_ref": "o4",
+      "test_ref": "robot journal 12:28:34-12:36:45 BST @ 9aab323 and 12:43:29-12:43:50 BST @ af9276c, nameless Hebrew conversation at the desk",
+      "behavior_text": "before: lock face attempt=1..7 ok=false error=not addressed and revive feel-alive ok=false error=not addressed every 30 s, state.json active without feel-alive; after the restart at 12:43:29: revive feel-alive ok=true at 12:43:36, the next nameless transcript at 12:43:43 opened the conversation layer and its lock_face reached the runtime (ok=false error=no face known, i.e. gated by the face detector, not by attention), active [feel-alive intent:run:feel-alive:4], head moving (yaw 1.0 -> 8.1)",
+      "contract_text": "first transcript or utterance -> look_at_sound then lock_face, retried with backoff \u2014 whoever is speaking, named or not",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "live journal, state and daemon reads before and after the named commit",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T11:43:43Z",
+        "commit": "af9276c"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 57
     }
   ],
   "deltas": [
@@ -1126,6 +1178,21 @@
       "evidence_refs": [
         "e45",
         "e46"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false
+    },
+    {
+      "id": "b12",
+      "kind": "amended",
+      "behavior_text": "the gaze stack's ops are reflexes that bypass the attention gate's cold-and-nameless refusal; the refusal gates the model's tool calls only",
+      "caused_by": [
+        "c40"
+      ],
+      "evidence_refs": [
+        "e47",
+        "e48"
       ],
       "origin": "llm",
       "status": "proposed",
