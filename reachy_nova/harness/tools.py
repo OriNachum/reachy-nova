@@ -1757,6 +1757,31 @@ def current_inhibitions() -> list[str]:
     return [name for name in names if isinstance(name, str)]
 
 
+def current_active_names() -> list[str]:
+    """The names of the runtime's ACTIVE behaviours, from its published state.
+
+    The engine writes its active set to ``state.json`` under ``active`` — one
+    entry per running behaviour with its ``name`` (and ``base`` for the
+    seeded ``feel-alive`` layer). Read by the gaze stack's base-layer revive
+    to tell "the runtime lost feel-alive" from "it is running fine". Absent,
+    stale, unreadable or malformed all read as an empty list — the caller
+    treats that as "nothing known active" and rate-limits itself, so a bad
+    status file costs one quiet op every few minutes, never one per tick.
+    """
+    try:
+        payload = json.loads(statedir.state_json_path().read_text(encoding="utf-8"))
+        entries = payload["active"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    if not isinstance(entries, list):
+        return []
+    names: list[str] = []
+    for entry in entries:
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+            names.append(entry["name"])
+    return names
+
+
 def _atomic_write(path: Path, text: str) -> None:
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
     tmp.write_text(text, encoding="utf-8")

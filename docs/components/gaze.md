@@ -241,6 +241,33 @@ body and needs no help. `lock_liveness=False` turns it off entirely;
 `status()["sway_until"]` is the monotonic deadline of the sway in flight, or
 `None`.
 
+**Liveness after the hold — reviving the base layer.** The runtime seeds its
+`feel-alive` idle layer once, at engine start; a face lock inhibits it; the
+runtime's intents driver *evicts* an inhibited behaviour every tick; and
+nothing re-seeds the base layer once the inhibition clears
+(reachy-mini-cli #183). Live, 2026-09-06 11:51 BST, Ori: "I don't see it
+moving" —
+`state.json` `active: []`, head parked, until a runtime restart. So every
+tick, in every layer, `_tick_base_layer()` reads the runtime's active list
+(`tools.current_active_names()`, the `active` entries of `state.json`,
+injectable as `active_names=`) and, when `BASE_LAYER_BEHAVIOR` (`feel-alive`)
+is missing and not inhibited, re-issues it as one bounded PASSIVE
+`run_behavior` — `BASE_REVIVE_DURATION_S = 300.0` — logged as
+`[SENSE stage=gaze source=nova event=op] revive feel-alive ok=…`. A passive
+newcomer evicts nothing and yields to every reaction, exactly like the seeded
+layer it stands in for, and it keeps the antennas alive under the browsing
+posture too. It is never issued under a held automatic lock (the runtime
+would refuse it; the sway covers the hold) and never while the runtime lists
+the behaviour. It is rate-limited by a not-before deadline: a stale or
+unreadable list re-issues only once fewer than `BASE_REVIVE_MARGIN_S` (15 s)
+of the last revive remain, a refusal waits `BASE_REVIVE_RETRY_S` (30 s), and
+every release — the fade, or the runtime's own `motion/lock-released` —
+resets the deadline so the robot wakes the tick after the hold ends.
+`lock_liveness=False` turns this off with the sway;
+`status()["base_revive_until"]` is the deadline of the revive believed
+running, or `None`. This is a workaround for the runtime's promise, not a
+replacement for it; it goes when #183 lands.
+
 ### Start and stop hygiene
 
 `start()` returns immediately and the worker submits one `release_face` and one

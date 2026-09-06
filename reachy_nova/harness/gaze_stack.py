@@ -108,6 +108,7 @@ from .tools import (
     SET_INHIBITION,
     IntentTools,
 )
+from .tools import current_active_names as _runtime_current_active_names
 from .tools import current_inhibitions as _runtime_current_inhibitions
 
 logger = logging.getLogger(__name__)
@@ -198,6 +199,31 @@ SWAY_REISSUE_MARGIN_S = 10.0
 #: slow — this is idle breathing under a lock, not a reaction.
 SWAY_PARAMS: dict[str, float] = {"amp": 10.0, "period": 5.0}
 
+#: The runtime's own idle layer — breathing, slow gaze wander, antenna sway —
+#: seeded ONCE at engine start. LIVE FINDING (2026-09-06 11:51 BST, "I don't
+#: see it moving"): a face lock inhibits it, the runtime's intents driver
+#: evicts an inhibited behaviour every tick, and nothing re-seeds the base
+#: layer once the inhibition clears (reachy-mini-cli #183) — so after the
+#: first lock of a session the robot is still for good. Until the runtime
+#: re-seeds it, this layer re-issues it as a bounded PASSIVE ``run_behavior``
+#: whenever the runtime's active list lacks it and nothing inhibits it.
+BASE_LAYER_BEHAVIOR = "feel-alive"
+
+#: How long one revived base layer runs. Bounded for the same reason the sway
+#: is (an unbounded loop is an engine-side refusal, and a standing goal would
+#: outlive the harness); long, because it is the robot's resting state, not a
+#: reaction — one op every five minutes is the whole cost.
+BASE_REVIVE_DURATION_S = 300.0
+
+#: Re-issue when fewer than this many seconds of the last revive remain and
+#: the runtime STILL does not list the behaviour (a stale or unreadable
+#: ``state.json``); when the list does show it, nothing is issued at all.
+BASE_REVIVE_MARGIN_S = 15.0
+
+#: After a refused or failed revive, wait this long before the next attempt:
+#: one quiet retry, never one op per tick.
+BASE_REVIVE_RETRY_S = 30.0
+
 #: Default browsing pose: up, and aside by this much (degrees).
 DEFAULT_UP_PITCH_DEG = 10.0
 DEFAULT_SIDE_YAW_DEG = 15.0
@@ -258,6 +284,7 @@ class GazeStack:
         current_inhibitions: Callable[[], list[str]] | None = None,
         conversation_enabled: bool = True,
         lock_liveness: bool = True,
+        active_names: Callable[[], list[str]] | None = None,
     ) -> None:
         self._intents = intents
         self._attention = attention
@@ -267,6 +294,7 @@ class GazeStack:
         self.side_yaw_deg = float(side_yaw_deg)
         self.up_pitch_deg = float(up_pitch_deg)
         self._current_inhibitions = current_inhibitions or _runtime_current_inhibitions
+        self._active_names = active_names or _runtime_current_active_names
         self.conversation_enabled = bool(conversation_enabled)
         self.lock_liveness = bool(lock_liveness)
 
@@ -320,6 +348,12 @@ class GazeStack:
         #: When the current liveness sway runs out (monotonic), or ``None``
         #: when none is in flight. Written only under :attr:`_op_lock`.
         self._sway_until: float | None = None
+        #: When the revived base layer runs out (monotonic), or ``None`` when
+        #: none is believed running. See :meth:`_tick_base_layer`.
+        self._base_revive_until: float | None = None
+        #: Not before this (monotonic) is another revive attempted, or ``None``
+        #: for "at the next tick that finds it missing".
+        self._base_revive_not_before: float | None = None
 
         #: Set once the stop hygiene has run, so the caller's :meth:`stop` and
         #: the worker's own exit path cannot both submit it.
@@ -489,7 +523,12 @@ class GazeStack:
         hold back while the conversation is still live.
         """
         try:
+            # Whoever owned it, the runtime just evicted everything the lock
+            # inhibited — the base layer included (reachy-mini-cli #183). Let
+            # the next tick revive it at once rather than at the old deadline.
+            self._base_revive_not_before = None
             if self._model_owns_lock():
+                self._wake.set()
                 return
             self.lock_held = False
             self._next_lock_retry_at = None
@@ -574,6 +613,7 @@ class GazeStack:
             "lock_attempts": self._lock_attempts,
             "next_lock_retry_s": None if due is None else max(0.0, due - self._clock()),
             "sway_until": self._sway_until,
+            "base_revive_until": self._base_revive_until,
         }
 
     # -- the worker ----------------------------------------------------------- #
@@ -630,6 +670,7 @@ class GazeStack:
             if self.layer == LAYER_CONVERSATION:
                 self._tick_lock()
                 self._tick_sway()
+            self._tick_base_layer()
 
     def _transition(self, old: str, new: str) -> None:
         """Issue ONLY the ops this transition needs. Caller holds the op lock."""
@@ -693,6 +734,7 @@ class GazeStack:
             return
         if self.lock_held:
             result = self._op(RELEASE_FACE, {}, "release face reason=fade")
+            self._base_revive_not_before = None  # the lock evicted the base layer
             if _confirmed(result):
                 self._mark_released("auto-fade")
             else:
@@ -781,6 +823,55 @@ class GazeStack:
             "liveness sway",
         )
         self._sway_until = self._clock() + SWAY_DURATION_S
+
+    def _tick_base_layer(self) -> None:
+        """Keep the runtime's idle layer alive after a lock evicted it.
+
+        Every tick, in every layer: if :data:`BASE_LAYER_BEHAVIOR` is not in
+        the runtime's active list (``state.json``) and nothing inhibits it,
+        re-issue it as one bounded PASSIVE ``run_behavior`` — the same shape
+        as the sway, on all of its channels. A passive newcomer never evicts
+        anything and yields to every reaction, exactly like the seeded base
+        layer it stands in for.
+
+        Never under a held automatic lock: the lock inhibits the behaviour, so
+        the runtime would refuse it, and the sway covers the hold. Never when
+        the runtime lists it (seeded or revived). Rate-limited by
+        :attr:`_base_revive_not_before` so a stale list, an unreadable file or
+        a refusal costs one quiet op, never one per tick — and reset to "now"
+        by every release, so the robot wakes the tick after the hold ends.
+
+        Caller holds the op lock.
+        """
+        if not self.lock_liveness:
+            return
+        if self.layer == LAYER_CONVERSATION and self.lock_held:
+            return
+        now = self._clock()
+        not_before = self._base_revive_not_before
+        if not_before is not None and now < not_before:
+            return
+        if BASE_LAYER_BEHAVIOR in self._read_inhibitions():
+            return
+        try:
+            active = list(self._active_names())
+        except Exception as exc:  # noqa: BLE001 - degrade to "nothing known active"
+            logger.warning("gaze stack could not read the active behaviours: %s", exc)
+            active = []
+        if BASE_LAYER_BEHAVIOR in active:
+            return
+        result = self._op(
+            RUN_BEHAVIOR,
+            {"name": BASE_LAYER_BEHAVIOR, "duration": BASE_REVIVE_DURATION_S},
+            "revive feel-alive",
+        )
+        ok = result.get("ok") if isinstance(result, dict) else False
+        if ok is True or ok is None:
+            self._base_revive_until = now + BASE_REVIVE_DURATION_S
+            self._base_revive_not_before = self._base_revive_until - BASE_REVIVE_MARGIN_S
+        else:
+            self._base_revive_until = None
+            self._base_revive_not_before = now + BASE_REVIVE_RETRY_S
 
     def _attempt_lock(self, why: str) -> bool:
         """One ``lock_face``. Returns whether the lock is now believed held."""

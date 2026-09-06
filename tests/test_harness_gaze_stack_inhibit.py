@@ -26,6 +26,7 @@ import time
 
 import pytest
 
+from reachy_nova.harness import gaze_stack as gaze_stack_module
 from reachy_nova.harness.gaze_stack import (
     BROWSING_INHIBITS,
     LAYER_BROWSING,
@@ -41,6 +42,18 @@ DEADLINE = 5.0
 # --------------------------------------------------------------------------- #
 # Fakes                                                                        #
 # --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(autouse=True)
+def _healthy_base_layer(monkeypatch):
+    """This file describes a runtime whose ``feel-alive`` base layer is alive,
+    so the stack's base-layer revive (``_tick_base_layer``) stays silent and
+    every op list below counts exactly what it always counted. The revive has
+    its own file: ``test_harness_gaze_stack_liveness.py``.
+    """
+    monkeypatch.setattr(
+        gaze_stack_module, "_runtime_current_active_names", lambda: ["feel-alive"]
+    )
 
 
 class FakeIntents:
