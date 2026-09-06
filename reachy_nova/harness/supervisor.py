@@ -296,6 +296,21 @@ def _find_lock_state(components: Sequence[object]) -> object | None:
     return None
 
 
+def _find_eyes_state(components: Sequence[object]) -> object | None:
+    """The first component exposing a non-``None`` ``.eyes`` attribute.
+
+    Mirrors :func:`_find_lock_state`: :class:`~reachy_nova.harness.eyes.
+    EyesComponent` carries the harness's one :class:`~reachy_nova.harness.
+    eyes.Eyes` belief as a public attribute, discovered the same way on
+    whatever component list a caller already has (task t11).
+    """
+    for component in components:
+        candidate = getattr(component, "eyes", None)
+        if candidate is not None:
+            return candidate
+    return None
+
+
 def run(
     components: Sequence[object],
     stop_event: threading.Event,
@@ -486,6 +501,7 @@ def cmd_run(env_file: str | None = None) -> int:
 def status(
     quiet: "quiet_mod.QuietState | None" = None,
     lock_state: object | None = None,
+    eyes_state: object | None = None,
 ) -> dict[str, object]:
     """Engine / embody / own-PID liveness — the whole attachment picture.
 
@@ -502,11 +518,18 @@ def status(
     so an out-of-process ``status`` CLI call always reports ``locked: None``
     (unknown), which is the honest answer for a belief that lives only inside
     the running harness's own memory.
+
+    *eyes_state* is the running harness's own (in-process)
+    :class:`~reachy_nova.harness.eyes.Eyes`, same seam as *lock_state* (task
+    t11) — no on-disk mirror either, so an out-of-process ``status`` call
+    reports ``eyes: "unknown"`` (:class:`Eyes`'s own initial state) rather
+    than guessing.
     """
     pid = read_pid()
     running = pid is not None and _is_alive(pid) and _is_our_harness(pid)
     quiet_until = quiet.until_iso() if quiet is not None else quiet_mod.peek_until_iso()
     locked = lock_state.locked if lock_state is not None else None  # type: ignore[attr-defined]
+    eyes = eyes_state.state if eyes_state is not None else "unknown"  # type: ignore[attr-defined]
     return {
         "state_dir": str(statedir.state_dir()),
         "engine_live": statedir.engine_is_live(),
@@ -515,6 +538,7 @@ def status(
         "harness_running": running,
         "quiet_until": quiet_until,
         "locked": locked,
+        "eyes": eyes,
         "unit": unit.HARNESS_UNIT,
     }
 
