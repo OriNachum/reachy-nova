@@ -79,6 +79,19 @@ class FakeIntents:
             with self._lock:
                 self._active -= 1
 
+    def forget(self) -> None:
+        """Drop the ops recorded so far, keeping the sequence counter running.
+
+        Called right after ``start()``, which submits its two idempotent
+        start-hygiene ops (``release_face`` + ``declare_goal`` None, task t9)
+        before the worker exists. Those are not what any test in THIS file is
+        about — the hygiene has its own tests in
+        ``test_harness_gaze_stack_conversation.py`` — so forgetting them keeps
+        every assertion below counting exactly the ops it always counted.
+        """
+        with self._lock:
+            self.ops.clear()
+
     # -- reads -------------------------------------------------------------- #
 
     def snapshot(self) -> list[tuple[int, str, dict]]:
@@ -121,6 +134,7 @@ def running_stack(intents, **kwargs):
     stack = GazeStack(intents, tick_s=TICK, **kwargs)
     stop = threading.Event()
     stack.start(stop)
+    intents.forget()  # the t9 start hygiene; see FakeIntents.forget
     return stack, stop
 
 
@@ -326,16 +340,18 @@ def test_conversation_takes_the_top_layer_and_leaves_the_goal_standing():
     attention = FakeAttention(live=False)
     stack = CountingStack(intents, attention=attention, tick_s=TICK)
     stack.start(threading.Event())
+    intents.forget()  # the t9 start hygiene; see FakeIntents.forget
     try:
         stack.on_browser_state("busy")
         wait_for(lambda: stack.layer == LAYER_BROWSING, message="browsing layer")
-        assert len(intents.snapshot()) == 1
+        assert intents.goals() == [GAZE_HOLD_BEHAVIOR]
 
         attention.conversation_live = True
         wait_for(lambda: stack.layer == LAYER_CONVERSATION, message="conversation layer")
         time.sleep(TICK * 5)
         # The lock owns the head by recency; the browsing goal is NOT cleared.
-        assert len(intents.snapshot()) == 1
+        # (t9's own lock ops ride alongside it, so this counts declare_goal.)
+        assert intents.goals() == [GAZE_HOLD_BEHAVIOR]
         assert stack.status()["goal_standing"] is True
         assert stack.entered == 1
 
@@ -344,7 +360,7 @@ def test_conversation_takes_the_top_layer_and_leaves_the_goal_standing():
         attention.conversation_live = False
         wait_for(lambda: stack.layer == LAYER_BROWSING, message="browsing again")
         time.sleep(TICK * 5)
-        assert len(intents.snapshot()) == 1
+        assert intents.goals() == [GAZE_HOLD_BEHAVIOR]
         assert stack.left == 1
         assert stack.entered == 1
     finally:
@@ -356,6 +372,7 @@ def test_conversation_ending_with_an_idle_browser_clears_the_goal():
     attention = FakeAttention(live=False)
     stack = CountingStack(intents, attention=attention, tick_s=TICK)
     stack.start(threading.Event())
+    intents.forget()  # the t9 start hygiene; see FakeIntents.forget
     try:
         stack.on_browser_state("busy")
         wait_for(lambda: stack.layer == LAYER_BROWSING, message="browsing layer")
@@ -365,7 +382,7 @@ def test_conversation_ending_with_an_idle_browser_clears_the_goal():
         stack.on_browser_state("idle")
         attention.conversation_live = False
         wait_for(lambda: stack.layer == LAYER_WANDER, message="wander layer")
-        wait_for(lambda: len(intents.snapshot()) == 2, message="the clear op")
+        wait_for(lambda: len(intents.goals()) == 2, message="the clear op")
     finally:
         stack.stop()
 
@@ -379,6 +396,7 @@ def test_local_liveness_fallback_when_no_attention_is_wired():
     intents = FakeIntents()
     stack = GazeStack(intents, attention=None, clock=clock, tick_s=TICK)
     stack.start(threading.Event())
+    intents.forget()  # the t9 start hygiene; see FakeIntents.forget
     try:
         assert stack.status()["conversation_live"] is False
         stack.on_transcript("user", "hello")
@@ -397,8 +415,10 @@ def test_local_liveness_fallback_when_no_attention_is_wired():
 
 def test_a_raising_op_does_not_kill_the_worker():
     intents = FakeIntents()
-    intents.raise_once = RuntimeError("spool exploded")
     stack, _stop = running_stack(intents)
+    # Armed AFTER start(), so it lands on a real transition op rather than on
+    # the start hygiene.
+    intents.raise_once = RuntimeError("spool exploded")
     try:
         stack.on_browser_state("busy")
         wait_for(lambda: len(intents.snapshot()) == 1, message="the failed declare")
@@ -439,11 +459,13 @@ def test_stop_event_stops_the_worker_within_a_tick():
     stack.stop()
 
 
-def test_status_reports_the_four_fields():
+def test_status_reports_the_core_fields():
     intents = FakeIntents()
     stack = GazeStack(intents, tick_s=TICK)
     status = stack.status()
-    assert set(status) == {"layer", "browser_busy", "conversation_live", "goal_standing"}
+    # t9 added the three lock fields on top; they are asserted in
+    # test_harness_gaze_stack_conversation.py.
+    assert set(status) >= {"layer", "browser_busy", "conversation_live", "goal_standing"}
     assert status["layer"] == LAYER_WANDER
     assert status["browser_busy"] is False
     assert status["goal_standing"] is False
