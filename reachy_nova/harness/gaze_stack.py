@@ -41,6 +41,14 @@ while the conversation stays live, on the :data:`LOCK_RETRY_BACKOFF_S`
 schedule, so a conversation that starts with nobody in frame still locks on
 the moment somebody leans in.
 
+**Liveness under the hold.** The runtime's face lock inhibits ``feel-alive``
+and ``orient-to-sound`` while it is held, which is how a held lock turned into
+a robot that stopped breathing entirely (2026-09-06: "It feels rigid now. No
+liveness."). So while an AUTO-owned lock is held, this layer keeps one bounded
+``antenna-sway`` running on the antennas channel underneath it, re-issued a
+little before it runs out. The eyes stay on the person; the rest of the robot
+keeps moving.
+
 A lock the MODEL took (``lock_state.owner == "model"``) is never touched by
 this layer: not re-taken, not released. The model asked for that lock
 deliberately, and an automatic hold quietly stealing or dropping it would be
@@ -96,6 +104,7 @@ from .tools import (
     LOCK_FACE,
     LOOK_AT_SOUND,
     RELEASE_FACE,
+    RUN_BEHAVIOR,
     SET_INHIBITION,
     IntentTools,
 )
@@ -168,6 +177,27 @@ LOCK_RETRY_BACKOFF_S = (3.0, 6.0, 12.0, 24.0, 30.0)
 OWNER_AUTO = "auto"
 OWNER_MODEL = "model"
 
+#: The runtime behaviour that keeps the robot visibly alive under a held face
+#: lock. It claims the ANTENNAS channel only, so it never competes with the
+#: lock for the head — which is the whole point: the lock is what makes the
+#: robot go still, and the antennas are the one thing left that can move.
+SWAY_BEHAVIOR = "antenna-sway"
+
+#: How long one liveness sway runs, in seconds. The runtime's library entry is
+#: a looping behaviour and therefore needs an explicit duration (an unbounded
+#: loop is an engine-side refusal), so the hold is kept alive by re-issuing a
+#: bounded minute rather than declaring a standing goal — a standing goal would
+#: outlive the lock if the harness died mid-conversation.
+SWAY_DURATION_S = 60.0
+
+#: Re-issue the sway when fewer than this many seconds of the last one remain,
+#: so the antennas never stop between two of them.
+SWAY_REISSUE_MARGIN_S = 10.0
+
+#: The sway's own numbers: degrees of amplitude, seconds per cycle. Small and
+#: slow — this is idle breathing under a lock, not a reaction.
+SWAY_PARAMS: dict[str, float] = {"amp": 10.0, "period": 5.0}
+
 #: Default browsing pose: up, and aside by this much (degrees).
 DEFAULT_UP_PITCH_DEG = 10.0
 DEFAULT_SIDE_YAW_DEG = 15.0
@@ -208,6 +238,10 @@ class GazeStack:
             restores out of (see :data:`BROWSING_INHIBITS`). Defaults to
             :func:`reachy_nova.harness.tools.current_inhibitions`; injectable
             for tests so they never touch a real state dir.
+        lock_liveness: whether an AUTO-owned face lock keeps the antennas
+            swaying underneath it (see :meth:`_tick_sway`). ``False`` turns the
+            sway off entirely and leaves the held head exactly as still as the
+            runtime's inhibitions make it.
     """
 
     name = "gaze"
@@ -223,6 +257,7 @@ class GazeStack:
         up_pitch_deg: float = DEFAULT_UP_PITCH_DEG,
         current_inhibitions: Callable[[], list[str]] | None = None,
         conversation_enabled: bool = True,
+        lock_liveness: bool = True,
     ) -> None:
         self._intents = intents
         self._attention = attention
@@ -233,6 +268,7 @@ class GazeStack:
         self.up_pitch_deg = float(up_pitch_deg)
         self._current_inhibitions = current_inhibitions or _runtime_current_inhibitions
         self.conversation_enabled = bool(conversation_enabled)
+        self.lock_liveness = bool(lock_liveness)
 
         #: Guards the PRODUCER flags only — held for microseconds, never
         #: across an op, so a hook can never be blocked behind a spool round
@@ -281,6 +317,9 @@ class GazeStack:
         self._conversation_started_at: float | None = None
         self._next_lock_retry_at: float | None = None
         self._retry_index = 0
+        #: When the current liveness sway runs out (monotonic), or ``None``
+        #: when none is in flight. Written only under :attr:`_op_lock`.
+        self._sway_until: float | None = None
 
         #: Set once the stop hygiene has run, so the caller's :meth:`stop` and
         #: the worker's own exit path cannot both submit it.
@@ -410,13 +449,23 @@ class GazeStack:
             logger.warning("gaze stack on_transcript raised: %s", exc)
 
     def on_sonic_state(self, state: str) -> None:
-        """Nova starting to speak is also a conversation tick (rising edge only)."""
+        """Nova starting to speak RENEWS a live conversation (rising edge only).
+
+        It can never OPEN one. Her own voice keeps a conversation alive but
+        cannot start one — the same rule
+        :meth:`~reachy_nova.harness.attention.AttentionState.note_utterance`
+        follows, restated here so the local fallback clock is not a second,
+        looser policy that only shows up in degraded wiring. Without it, Nova
+        reacting aloud to a body cue (or her opening line at session start)
+        would raise the conversation layer with nobody in the room talking,
+        take a face lock, and hold it by speaking into it.
+        """
         try:
             current = state.strip().lower() if isinstance(state, str) else None
             with self._flag_lock:
                 previous, self._last_sonic_state = self._last_sonic_state, current
             if current == SPEAKING_STATE and previous != SPEAKING_STATE:
-                self._note_conversation_tick()
+                self._note_conversation_tick(renew_only=True)
         except Exception as exc:  # noqa: BLE001
             logger.warning("gaze stack on_sonic_state raised: %s", exc)
 
@@ -451,9 +500,13 @@ class GazeStack:
         except Exception as exc:  # noqa: BLE001 - a hook must never raise
             logger.warning("gaze stack on_lock_released raised: %s", exc)
 
-    def _note_conversation_tick(self) -> None:
+    def _note_conversation_tick(self, renew_only: bool = False) -> None:
+        """Push the local fallback clock out. *renew_only* never opens it."""
         with self._flag_lock:
-            self._live_until = self._clock() + FALLBACK_LIVE_S
+            now = self._clock()
+            if renew_only and now >= self._live_until:
+                return
+            self._live_until = now + FALLBACK_LIVE_S
         self._wake.set()
 
     # -- the synchronous escape hatch --------------------------------------- #
@@ -520,6 +573,7 @@ class GazeStack:
             "lock_held": self.lock_held,
             "lock_attempts": self._lock_attempts,
             "next_lock_retry_s": None if due is None else max(0.0, due - self._clock()),
+            "sway_until": self._sway_until,
         }
 
     # -- the worker ----------------------------------------------------------- #
@@ -575,6 +629,7 @@ class GazeStack:
                 self.layer = desired
             if self.layer == LAYER_CONVERSATION:
                 self._tick_lock()
+                self._tick_sway()
 
     def _transition(self, old: str, new: str) -> None:
         """Issue ONLY the ops this transition needs. Caller holds the op lock."""
@@ -680,6 +735,53 @@ class GazeStack:
         if self._clock() >= self._next_lock_retry_at:
             self._attempt_lock("retry")
 
+    def _tick_sway(self) -> None:
+        """Keep the antennas moving under an AUTO-owned hold.
+
+        The live finding this exists for (2026-09-06, "It feels rigid now. No
+        liveness."): the runtime's face lock inhibits ``feel-alive`` and
+        ``orient-to-sound`` while it is held, so a held lock is a robot that
+        does not breathe, does not sway and does not wander. The hold itself is
+        right — the eyes should stay on the person — but nothing else about the
+        robot should stop.
+
+        So while the layer is ``conversation`` and an auto lock is believed
+        held, one bounded :data:`SWAY_BEHAVIOR` is kept running on the ANTENNAS
+        channel, re-issued when fewer than :data:`SWAY_REISSUE_MARGIN_S`
+        seconds of the last one remain. Never for a MODEL-owned lock (that hold
+        is the model's, and so is what the body does under it), never once the
+        lock is gone, and never in ``browsing`` or ``wander`` — where
+        feel-alive owns the body itself and needs no help.
+
+        Caller holds the op lock and has already confirmed the layer.
+        """
+        if not self.lock_liveness or not self.lock_held:
+            return
+        if self._model_owns_lock():
+            return
+        until = self._sway_until
+        if until is not None and self._clock() < until - SWAY_REISSUE_MARGIN_S:
+            return
+        self._issue_sway()
+
+    def _issue_sway(self) -> None:
+        """One bounded ``run_behavior`` sway. Caller holds the op lock.
+
+        The deadline is recorded whatever came back: a refusal that re-issued
+        every tick would put one op per tick on the spool, and the honest cost
+        of a refusal is one quiet retry a minute later.
+        """
+        self._op(
+            RUN_BEHAVIOR,
+            {
+                "name": SWAY_BEHAVIOR,
+                "params": dict(SWAY_PARAMS),
+                "duration": SWAY_DURATION_S,
+            },
+            "liveness sway",
+        )
+        self._sway_until = self._clock() + SWAY_DURATION_S
+
     def _attempt_lock(self, why: str) -> bool:
         """One ``lock_face``. Returns whether the lock is now believed held."""
         self._lock_attempts += 1
@@ -733,6 +835,7 @@ class GazeStack:
         self._retry_index = 0
         self._next_lock_retry_at = None
         self._conversation_started_at = None
+        self._sway_until = None
 
     def _model_owns_lock(self) -> bool:
         if self.lock_state is None:

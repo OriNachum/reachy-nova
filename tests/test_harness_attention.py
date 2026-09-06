@@ -227,11 +227,39 @@ def test_conversation_live_expires_on_the_same_window_without_a_name(attention, 
     assert attention.conversation_live is False
 
 
-def test_conversation_live_after_an_utterance_alone(attention, clock):
+def test_an_utterance_alone_never_opens_the_conversation(attention, clock):
+    """Live finding, 2026-09-06 ("It feels rigid now. No liveness.").
+
+    Nova's own reactions to body cues — and her opening line at every session
+    start — used to open ``conversation_live`` from cold, which raised the gaze
+    stack's conversation layer, took a face lock, and inhibited ``feel-alive``
+    and ``orient-to-sound`` with nobody in the room talking. Her own voice
+    keeps a conversation alive but can never start one.
+    """
     attention.note_utterance()
+    assert attention.conversation_live is False
+    assert attention.warm is False
+    assert attention.last_utterance_at is not None  # still recorded
+
+
+def test_an_utterance_renews_a_conversation_a_nameless_transcript_opened(attention, clock):
+    attention.note_transcript("what time is it")
     assert attention.conversation_live is True
     assert attention.warm is False
+    clock.advance(40.0)
+    attention.note_utterance()
+    clock.advance(40.0)  # 80 s after the transcript — expired without the renewal
+    assert attention.conversation_live is True
+    assert attention.warm is False
+    clock.advance(6.0)
+    assert attention.conversation_live is False
+
+
+def test_an_utterance_after_the_conversation_lapsed_does_not_revive_it(attention, clock):
+    attention.note_transcript("what time is it")
     clock.advance(46.0)
+    assert attention.conversation_live is False
+    attention.note_utterance()
     assert attention.conversation_live is False
 
 
