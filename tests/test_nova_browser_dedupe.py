@@ -10,6 +10,8 @@ running task, or any queued/recently-enqueued task within a 300 s window.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 
 from reachy_nova import nova_browser
 from reachy_nova.nova_browser import NovaBrowser
@@ -111,6 +113,60 @@ def test_matches_currently_running_task_regardless_of_time_elapsed(monkeypatch, 
     assert result["duplicate"] is True
     assert browser._task_queue.qsize() == 0
     assert len(_sensory_records(caplog)) == 1
+
+
+def test_concurrent_same_instruction_enqueues_exactly_once(monkeypatch):
+    """PR #26 review, finding 6: queue_task must be one synchronized step.
+
+    20 threads racing queue_task with the identical instruction must not
+    both pass the duplicate test before either records it — exactly one
+    task lands on the queue and exactly one caller sees ``queued: True``.
+    """
+    browser = _make_browser(monkeypatch, clock=time.monotonic)
+    n = 20
+    barrier = threading.Barrier(n)
+    results: list[dict] = [None] * n  # type: ignore[list-item]
+
+    def worker(i: int) -> None:
+        barrier.wait()
+        results[i] = browser.queue_task("search for the weather")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5.0)
+
+    assert browser._task_queue.qsize() == 1
+    queued_results = [r for r in results if r.get("queued") is True]
+    duplicate_results = [r for r in results if r.get("duplicate") is True]
+    assert len(queued_results) == 1
+    assert len(duplicate_results) == n - 1
+
+
+def test_concurrent_different_instruction_still_queues(monkeypatch):
+    """A different instruction racing alongside duplicates of another must
+    still queue — the lock serializes access, it doesn't block distinct
+    instructions from ever landing."""
+    browser = _make_browser(monkeypatch, clock=time.monotonic)
+    n = 10
+    barrier = threading.Barrier(n)
+    results: list[dict] = [None] * n  # type: ignore[list-item]
+
+    def worker(i: int) -> None:
+        instruction = "search for restaurants nearby" if i == 0 else "search for the weather"
+        barrier.wait()
+        results[i] = browser.queue_task(instruction)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5.0)
+
+    assert browser._task_queue.qsize() == 2
+    assert results[0]["queued"] is True
+    assert sum(1 for r in results[1:] if r.get("queued") is True) == 1
 
 
 def test_queue_task_while_disabled_returns_ok_false_without_enqueueing(monkeypatch, caplog):
