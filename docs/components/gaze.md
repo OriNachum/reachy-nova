@@ -120,7 +120,7 @@ so the postures are **layered, lowest first**:
 | :--- | :--- | :--- |
 | `wander` | nothing to do | nothing — the runtime's feel-alive base owns the head |
 | `browsing` | the browser is busy | a standing `declare_goal` of `gaze-hold`, `{pitch: 10, yaw: ±15}` |
-| `conversation` | `AttentionState.conversation_live` | the face lock (task t9); the browsing goal is left standing beneath it |
+| `conversation` | `AttentionState.conversation_live` | `look_at_sound`, then an `auto`-owned `lock_face`; the browsing goal is left standing beneath it |
 
 The desired top layer is a **pure function of two inputs**:
 `attention.conversation_live` and "is the browser busy". The aside yaw's sign
@@ -144,12 +144,12 @@ Transitions issue the minimum:
 
 - `wander -> browsing` — declare the `gaze-hold` goal.
 - `browsing -> wander` — `declare_goal` with no goal (only if one is standing).
-- `* -> conversation` — take the lock (t9); the browsing goal is **not**
-  cleared, because the lock owns the head by recency and the goal simply
-  resumes when the lock releases.
-- `conversation -> browsing` — release the lock (t9), then re-declare the goal
-  only if it is not still standing.
-- `conversation -> wander` — release the lock (t9) and clear the goal.
+- `* -> conversation` — `look_at_sound`, then `lock_face`; the browsing goal is
+  **not** cleared, because the lock owns the head by recency and the goal
+  simply resumes when the lock releases.
+- `conversation -> browsing` — `release_face`, then re-declare the goal only if
+  it is not still standing.
+- `conversation -> wander` — `release_face` and clear the goal.
 
 Every transition costs exactly one `[SENSE stage=gaze source=nova
 event=layer]` line naming `old -> new reason=...`, and every op one
@@ -170,9 +170,73 @@ anything, and leaves the layer alone: while the browser is still busy the
 stack stays in `browsing` with nothing standing, so the later `idle`
 transition issues no second clear.
 
+### The conversation layer
+
+When a conversation goes live — the first USER transcript, or Nova starting to
+speak, whichever the wired `AttentionState` sees first — the head **turns
+toward the voice and then locks on the face**: one `look_at_sound`, then
+`lock_face`, in that order, within one worker tick. That is the order a person
+does it in, and it also gives the runtime's face detector the best possible
+frame to answer `lock_face` from.
+
+The lock is held straight through Nova's replies and the listening gaps in
+between. It is given back only when the conversation itself **fades** (the
+attention window closes) — one `release_face`, and `LockState.mark_released
+("auto-fade")` on the engine's `ok: true`.
+
+**No face-presence belief lives in the harness.** The engine's own refusal,
+`{"ok": false, "error": "no face known"}`, *is* the presence check. A refused
+lock is simply retried while the conversation stays live, on a backoff of
+**3, 6, 12, 24, 30, 30, … seconds** (`LOCK_RETRY_BACKOFF_S`, whose last value
+repeats), so a conversation that starts with nobody in frame still locks on the
+moment somebody leans in. A degraded `{"ok": null}` counts as **unknown**: the
+belief is left exactly as it was, never read as locked, and the retry continues
+on the same schedule.
+
+Refusals cost one log line per *conversation*, not per attempt: the first logs
+`[SENSE stage=gaze source=nova event=lock] no face known — retrying with
+backoff`, the rest are counted, and the fade logs either
+`locked after=Xs attempts=N` (it locked) or `lock never held: refusals=N` (it
+never did).
+
+**Ownership.** The automatic hold is taken as `owner="auto"`. A lock the MODEL
+took (`LockState.owner == "model"`, via its own `lock_face` tool call) is never
+re-taken and never released by this layer — the model asked for that lock
+deliberately, and an automatic hold overruling it would be the harness
+overruling the mind it serves. Entering a conversation under a model lock logs
+`model lock standing — auto hold not taken` and takes no hold of its own.
+
+**Losing the lock.** `on_lock_released(reason)` — wire it from the bus's
+`motion/lock-released` tap — clears the belief, submits nothing, and drops the
+retry deadline so the backoff re-arms and the hold is taken back while the
+conversation is still live. The same happens when the ENGINE goes away and
+`LockState.locked` falls to `None` under us. Believing a lock we no longer hold
+is the one failure that cannot fix itself, so every ambiguous answer resolves
+toward "not held": an *unconfirmed* `release_face` still clears the belief,
+because the runtime drops a standing lock on its own max-hold timer regardless
+of what the harness believes, and a stale "held" would suppress the next lock
+attempt forever. The cost of being wrong the other way is one redundant
+release.
+
+### Start and stop hygiene
+
+`start()` submits one `release_face` and one `declare_goal` None **before** the
+worker thread exists, on the caller's thread but under the same op lock: a
+harness that just restarted has no idea what the previous process left standing
+on the runtime, and both ops are idempotent no-ops when nothing is held
+(`release_face` answers `ok: true` "not locked"). `stop()` mirrors it — a
+`release_face` only if an `auto`-owned lock is held, a `declare_goal` None only
+if a goal is standing — before joining the worker. The worker's own exit path
+(for a `stop_event` set from outside, where nobody ever calls `stop()`) runs the
+same hygiene behind the same one-shot flag, so a stop mid-conversation costs
+exactly one release either way and a second `stop()` submits nothing.
+
 ### Status
 
 `status()` reports `{"layer", "browser_busy", "conversation_live",
-"goal_standing"}`. No hook and no worker tick ever raises — a broken
-`AttentionState` degrades to "not live", a failed op is logged and the loop
+"goal_standing", "lock_held", "lock_attempts", "next_lock_retry_s"}` —
+`lock_attempts` and `next_lock_retry_s` are per-conversation and reset at every
+fade; `next_lock_retry_s` is `None` when no retry is pending. No hook and no
+worker tick ever raises — a broken `AttentionState` degrades to "not live", a
+broken `LockState` to "not the model's", a failed op is logged and the loop
 continues — and the worker exits within one tick of its stop event.

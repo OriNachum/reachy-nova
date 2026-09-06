@@ -19,10 +19,25 @@ So postures here are **layered, lowest first**::
   alternating per browse, so two browses in a row do not look identical).
   ``gaze-hold`` claims only the head channel, so antennas and body yaw keep
   feel-alive's own sway underneath it.
-* ``CONVERSATION`` — someone is actually talking. The face lock (task **t9**)
-  owns the head; the browsing goal is deliberately **left standing** beneath
-  it, because the lock wins by recency and the goal simply resumes when the
-  lock releases.
+* ``CONVERSATION`` — someone is actually talking. The face lock owns the head;
+  the browsing goal is deliberately **left standing** beneath it, because the
+  lock wins by recency and the goal simply resumes when the lock releases.
+
+**The conversation layer (t9).** Entering it turns the head toward the voice
+(``look_at_sound``) and then asks for a standing face lock (``lock_face``,
+owned ``"auto"``). The lock is held through Nova's replies AND the listening
+gaps — it is given back only when the conversation itself fades. There is no
+face-presence belief in this module on purpose: the ENGINE's own refusal
+("no face known") IS the presence check, and a second opinion kept here would
+be a second thing to drift. A refused (or degraded) lock is simply retried
+while the conversation stays live, on the :data:`LOCK_RETRY_BACKOFF_S`
+schedule, so a conversation that starts with nobody in frame still locks on
+the moment somebody leans in.
+
+A lock the MODEL took (``lock_state.owner == "model"``) is never touched by
+this layer: not re-taken, not released. The model asked for that lock
+deliberately, and an automatic hold quietly stealing or dropping it would be
+the harness overruling the mind it serves.
 
 The desired top layer is a **pure function of two inputs**:
 :attr:`~reachy_nova.harness.attention.AttentionState.conversation_live` and
@@ -45,11 +60,11 @@ gets there first. So it runs on the CALLER's thread — but through the same
 serialising op lock the worker uses, so it is still exactly one writer at a
 time.
 
-**Task t9 seam.** :meth:`_enter_conversation` / :meth:`_leave_conversation`
-are where the conversation layer's ``look_at_sound``/``lock_face``/
-``release_face`` spool calls will live. In this task they only log and keep
-state. Both are called by the worker while holding :attr:`_op_lock`, so t9
-may issue serialised ops from inside them directly via :meth:`_op`.
+The single-writer rule has exactly two more exceptions, both deliberate and
+both taken under the same :attr:`_op_lock`: :meth:`start` and :meth:`stop`
+run their hygiene (``release_face`` / ``declare_goal`` None) on the CALLER's
+thread, because "the harness leaves the head the way it found it" has to be
+true before the worker exists and after it is gone.
 
 stdlib only; never imports ``reachy_mini`` or ``reachy``
 (``tests/test_harness_boundary.py``).
@@ -67,7 +82,7 @@ from typing import Any
 from .. import sensory_log
 from .attention import AttentionState
 from .lock_state import LockState
-from .tools import DECLARE_GOAL, IntentTools
+from .tools import DECLARE_GOAL, LOCK_FACE, LOOK_AT_SOUND, RELEASE_FACE, IntentTools
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +94,7 @@ STAGE = "gaze"
 SOURCE = "nova"
 EVENT_LAYER = "layer"
 EVENT_OP = "op"
+EVENT_LOCK = "lock"
 
 # --------------------------------------------------------------------------- #
 # The layers                                                                   #
@@ -115,6 +131,19 @@ FALLBACK_LIVE_S = 45.0
 #: not on an event, so the loop must re-check on its own).
 DEFAULT_TICK_S = 0.25
 
+#: How long to wait before retrying a ``lock_face`` the engine refused (or
+#: could not confirm), in seconds, indexed by attempt. The LAST value repeats
+#: for every attempt beyond the tuple, so a conversation held with nobody in
+#: frame settles into one quiet probe every 30 s rather than either giving up
+#: or hammering the spool. The early values are short because the common
+#: refusal is simply "the face detector has not caught up yet", which
+#: resolves in a second or two.
+LOCK_RETRY_BACKOFF_S = (3.0, 6.0, 12.0, 24.0, 30.0)
+
+#: The lock owner this layer takes, and the one it must never touch.
+OWNER_AUTO = "auto"
+OWNER_MODEL = "model"
+
 #: Default browsing pose: up, and aside by this much (degrees).
 DEFAULT_UP_PITCH_DEG = 10.0
 DEFAULT_SIDE_YAW_DEG = 15.0
@@ -131,8 +160,12 @@ class GazeStack:
             whose ``conversation_live`` decides the conversation layer. When
             ``None`` (or broken), a local "live until now + 45 s" fallback fed
             by :meth:`on_transcript` / :meth:`on_sonic_state` is used instead.
-        lock_state: the harness's gaze-lock belief. Held for task t9, which
-            takes and releases the lock; t8 never touches it.
+        lock_state: the harness's gaze-lock belief. The conversation layer
+            marks it ``owner="auto"`` on a confirmed lock and clears it on a
+            confirmed release, and reads ``owner``/``locked`` to stay off a
+            lock the MODEL took. ``None`` is fine — the layer then simply has
+            no way to tell an auto hold from a model one, and behaves as if
+            every lock were its own.
         clock: monotonic-seconds source, injectable for tests.
         tick_s: worker cadence (see :data:`DEFAULT_TICK_S`).
         side_yaw_deg: how far aside the browsing pose looks, in degrees. The
@@ -186,6 +219,25 @@ class GazeStack:
         #: Sign of the NEXT browsing aside yaw (+1 first, then alternating).
         self._next_side = 1.0
 
+        #: Whether an AUTO-owned face lock is believed held right now. Written
+        #: only under :attr:`_op_lock` (or by :meth:`on_lock_released`, which
+        #: only ever clears it — a clear can never be wrong in the dangerous
+        #: direction).
+        self.lock_held = False
+        #: Per-conversation lock bookkeeping, all reset by
+        #: :meth:`_reset_lock_retry`.
+        self._lock_attempts = 0
+        self._lock_refusals = 0
+        self._refusal_logged = False
+        self._ever_locked = False
+        self._conversation_started_at: float | None = None
+        self._next_lock_retry_at: float | None = None
+        self._retry_index = 0
+
+        #: Set once the stop hygiene has run, so the caller's :meth:`stop` and
+        #: the worker's own exit path cannot both submit it.
+        self._hygiene_done = False
+
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._external_stop: threading.Event | None = None
@@ -194,21 +246,59 @@ class GazeStack:
     # -- lifecycle ---------------------------------------------------------- #
 
     def start(self, stop_event: threading.Event) -> None:
-        """Spawn the single worker thread (idempotent)."""
+        """Run the start hygiene, then spawn the single worker thread (idempotent).
+
+        The hygiene is one ``release_face`` and one ``declare_goal`` None,
+        submitted on the CALLER's thread before the worker exists — a harness
+        that just restarted has no idea what the previous process left
+        standing on the runtime, and both ops are idempotent no-ops when
+        nothing is held (``release_face`` answers ``ok: true`` "not locked").
+        Starting from a known-clean head is worth two spool round trips.
+        """
         if self._thread is not None and self._thread.is_alive():
             return
         self._external_stop = stop_event
         self._stop.clear()
+        with self._op_lock:
+            self._hygiene_done = False
+            self.lock_held = False
+            self._reset_lock_retry()
+            self._op(RELEASE_FACE, {}, "start-hygiene release")
+            self._op(DECLARE_GOAL, {"goal": None}, "start-hygiene clear goal")
+            self.goal_standing = False
         self._thread = threading.Thread(target=self._run, name="nova-gaze", daemon=True)
         self._thread.start()
 
     def stop(self, timeout: float = 2.0) -> None:
-        """Ask the worker to exit and join it (within one tick, plus any op)."""
+        """Run the stop hygiene, then ask the worker to exit and join it.
+
+        The hygiene runs BEFORE the join, on the caller's thread but under
+        :attr:`_op_lock`, so it can never race the worker's last tick. It is
+        guarded by a one-shot flag shared with the worker's own exit path, so
+        a stop that arrives mid-conversation costs exactly one release either
+        way — and a second :meth:`stop` submits nothing at all.
+        """
         self._stop.set()
+        with self._op_lock:
+            self._stop_hygiene()
         self._wake.set()
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=timeout)
+
+    def _stop_hygiene(self) -> None:
+        """Give back whatever we still hold. Caller holds the op lock; once."""
+        if self._hygiene_done:
+            return
+        self._hygiene_done = True
+        if self.lock_held and not self._model_owns_lock():
+            result = self._op(RELEASE_FACE, {}, "stop-hygiene release")
+            self.lock_held = False
+            if self.lock_state is not None and _confirmed(result):
+                self._mark_released("auto-stop")
+        if self.goal_standing:
+            self._op(DECLARE_GOAL, {"goal": None}, "stop-hygiene clear goal")
+            self.goal_standing = False
 
     def is_alive(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -267,6 +357,28 @@ class GazeStack:
         except Exception as exc:  # noqa: BLE001
             logger.warning("gaze stack on_speaker_idle raised: %s", exc)
 
+    def on_lock_released(self, reason: str | None = None) -> None:
+        """The RUNTIME dropped the lock (wire this from the bus's
+        ``motion/lock-released`` tap).
+
+        Believing a lock we no longer hold is the one failure that cannot fix
+        itself: the layer would sit there content while the head wandered off
+        mid-sentence. So this only ever CLEARS, submits nothing, and drops the
+        retry deadline so the worker re-arms the backoff and tries to take the
+        hold back while the conversation is still live.
+        """
+        try:
+            if self._model_owns_lock():
+                return
+            self.lock_held = False
+            self._next_lock_retry_at = None
+            sensory_log.stage(
+                STAGE, SOURCE, EVENT_LOCK, f"runtime dropped the lock reason={reason}"
+            )
+            self._wake.set()
+        except Exception as exc:  # noqa: BLE001 - a hook must never raise
+            logger.warning("gaze stack on_lock_released raised: %s", exc)
+
     def _note_conversation_tick(self) -> None:
         with self._flag_lock:
             self._live_until = self._clock() + FALLBACK_LIVE_S
@@ -316,12 +428,16 @@ class GazeStack:
             return self._browser_busy
 
     def status(self) -> dict:
-        """The four things worth knowing about the posture layer."""
+        """Everything worth knowing about the posture layer, in one dict."""
+        due = self._next_lock_retry_at
         return {
             "layer": self.layer,
             "browser_busy": self.browser_busy(),
             "conversation_live": self.conversation_live(),
             "goal_standing": self.goal_standing,
+            "lock_held": self.lock_held,
+            "lock_attempts": self._lock_attempts,
+            "next_lock_retry_s": None if due is None else max(0.0, due - self._clock()),
         }
 
     # -- the worker ----------------------------------------------------------- #
@@ -336,9 +452,19 @@ class GazeStack:
                 self._settle()
             except Exception as exc:  # noqa: BLE001 - a bad tick never kills the loop
                 logger.warning("gaze stack worker tick raised: %s", exc)
+        # The worker's own exit path runs the same hygiene as stop(), guarded
+        # by the same one-shot flag: a stop_event set from outside never joins
+        # this thread, so without this a lock taken mid-conversation would
+        # outlive the harness that took it.
+        try:
+            with self._op_lock:
+                self._stop_hygiene()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("gaze stack exit hygiene raised: %s", exc)
 
     def _settle(self) -> None:
-        """Compute the desired top layer and issue only the transition ops."""
+        """Compute the desired top layer, issue the transition ops, then let
+        the conversation layer's lock retry have its turn."""
         with self._op_lock:
             live = self.conversation_live()
             busy = self.browser_busy()
@@ -348,12 +474,15 @@ class GazeStack:
                 else (LAYER_BROWSING if busy else LAYER_WANDER)
             )
             old = self.layer
-            if desired == old:
-                return
-            reason = f"conversation_live={live} browser_busy={busy}"
-            sensory_log.stage(STAGE, SOURCE, EVENT_LAYER, f"{old} -> {desired} reason={reason}")
-            self._transition(old, desired)
-            self.layer = desired
+            if desired != old:
+                reason = f"conversation_live={live} browser_busy={busy}"
+                sensory_log.stage(
+                    STAGE, SOURCE, EVENT_LAYER, f"{old} -> {desired} reason={reason}"
+                )
+                self._transition(old, desired)
+                self.layer = desired
+            if self.layer == LAYER_CONVERSATION:
+                self._tick_lock()
 
     def _transition(self, old: str, new: str) -> None:
         """Issue ONLY the ops this transition needs. Caller holds the op lock."""
@@ -374,33 +503,169 @@ class GazeStack:
         if self.goal_standing:
             self._clear_goal("wander")
 
-    # -- the t9 seam ---------------------------------------------------------- #
+    # -- the conversation layer ----------------------------------------------- #
 
     def _enter_conversation(self) -> None:
-        """**Task t9 seam.** Take the conversation posture.
+        """Take the conversation posture: turn toward the voice, then lock on.
 
-        In t8 this only logs. t9 fills it in with the ``look_at_sound`` +
-        ``lock_face`` (owner ``"auto"``) spool calls and their retry schedule.
+        Called by the worker under :attr:`_op_lock`, with :attr:`layer` still
+        the OLD layer, so it issues its ops directly through :meth:`_op`.
 
-        It is called by the worker while holding :attr:`_op_lock`, so it may
-        issue serialised ops directly via :meth:`_op`, and it may rely on
-        :attr:`layer` still being the OLD layer, :attr:`goal_standing` being
-        current, and :attr:`lock_state` / :attr:`last_speaker_idle_at` being
-        readable.
+        ``look_at_sound`` first and ``lock_face`` second is the order a person
+        does it in: you turn toward the voice, and only then settle on the
+        face. It also gives the runtime's own face detector the best possible
+        frame to answer ``lock_face`` from — the head is already pointing the
+        right way when the question is asked.
         """
-        sensory_log.stage(STAGE, SOURCE, EVENT_LAYER, "enter conversation (lock deferred to t9)")
+        self._reset_lock_retry()
+        self._conversation_started_at = self._clock()
+        if self._model_owns_lock():
+            # The model asked for this lock itself. Do not re-take it, do not
+            # look anywhere, and (see _leave_conversation) do not release it.
+            sensory_log.stage(
+                STAGE, SOURCE, EVENT_LOCK, "model lock standing — auto hold not taken"
+            )
+            self.lock_held = False
+            return
+        self._op(LOOK_AT_SOUND, {}, "look at sound")
+        self._attempt_lock("enter")
 
     def _leave_conversation(self) -> None:
-        """**Task t9 seam.** Give the conversation posture back.
+        """Give the conversation posture back: release an AUTO-owned lock.
 
-        In t8 this only logs. t9 fills it in with the ``release_face`` call,
-        submitted only when the lock's owner is ``"auto"``. Same guarantees as
-        :meth:`_enter_conversation`: called under :attr:`_op_lock`, with
-        :attr:`layer` still the OLD layer.
+        Same guarantees as :meth:`_enter_conversation` — under
+        :attr:`_op_lock`, with :attr:`layer` still the OLD layer.
         """
-        sensory_log.stage(
-            STAGE, SOURCE, EVENT_LAYER, "leave conversation (release deferred to t9)"
-        )
+        if self._model_owns_lock():
+            sensory_log.stage(
+                STAGE, SOURCE, EVENT_LOCK, "model lock standing — not released on fade"
+            )
+            self._reset_lock_retry()
+            return
+        if self.lock_held:
+            result = self._op(RELEASE_FACE, {}, "release face reason=fade")
+            if _confirmed(result):
+                self._mark_released("auto-fade")
+            else:
+                # Clear the belief anyway. The runtime drops a standing lock on
+                # its own max-hold timer regardless of what we believe, so a
+                # belief kept "held" on an unconfirmed release would go stale
+                # with nothing left to correct it — and a stale "held" is the
+                # one error that suppresses the next lock attempt. The cost of
+                # being wrong the other way is one redundant release later.
+                sensory_log.stage(
+                    STAGE,
+                    SOURCE,
+                    EVENT_LOCK,
+                    "release unconfirmed — clearing the belief anyway",
+                )
+            self.lock_held = False
+        elif self._lock_attempts and not self._ever_locked:
+            sensory_log.stage(
+                STAGE, SOURCE, EVENT_LOCK, f"lock never held: refusals={self._lock_refusals}"
+            )
+        self._reset_lock_retry()
+
+    def _tick_lock(self) -> None:
+        """One conversation tick: notice a lost lock, or retry a refused one.
+
+        Caller holds the op lock and has already confirmed the layer is
+        ``conversation``.
+        """
+        if self._model_owns_lock():
+            return
+        if self.lock_held:
+            if self._engine_dropped_the_lock():
+                self.lock_held = False
+                self._next_lock_retry_at = None
+            else:
+                return
+        if self._next_lock_retry_at is None:
+            self._schedule_lock_retry()
+            return
+        if self._clock() >= self._next_lock_retry_at:
+            self._attempt_lock("retry")
+
+    def _attempt_lock(self, why: str) -> bool:
+        """One ``lock_face``. Returns whether the lock is now believed held."""
+        self._lock_attempts += 1
+        result = self._op(LOCK_FACE, {}, f"lock face attempt={self._lock_attempts} reason={why}")
+        ok = result.get("ok") if isinstance(result, dict) else None
+        if ok is True:
+            self.lock_held = True
+            self._ever_locked = True
+            self._next_lock_retry_at = None
+            if self.lock_state is not None:
+                try:
+                    self.lock_state.mark_locked(owner=OWNER_AUTO)
+                except Exception as exc:  # noqa: BLE001 - a belief is not worth a crash
+                    logger.warning("gaze stack could not mark the lock: %s", exc)
+            started = self._conversation_started_at
+            waited = 0.0 if started is None else max(0.0, self._clock() - started)
+            sensory_log.stage(
+                STAGE,
+                SOURCE,
+                EVENT_LOCK,
+                f"locked after={waited:.1f}s attempts={self._lock_attempts}",
+            )
+            return True
+        if ok is False:
+            # "no face known" is the ENGINE's presence check answering, not an
+            # error: nobody is in frame yet. ONE line per conversation says so;
+            # the rest are counted and summarised at fade, because a 45-minute
+            # conversation with nobody in view must not cost 90 log lines.
+            self._lock_refusals += 1
+            if not self._refusal_logged:
+                self._refusal_logged = True
+                sensory_log.stage(
+                    STAGE, SOURCE, EVENT_LOCK, "no face known — retrying with backoff"
+                )
+        # ok is None (degraded, or the call itself failed): UNKNOWN, never
+        # "locked". The belief is left exactly as it was and we retry on the
+        # same schedule — see _op's ok=unknown line for what actually happened.
+        self._schedule_lock_retry()
+        return False
+
+    def _schedule_lock_retry(self) -> None:
+        index = min(self._retry_index, len(LOCK_RETRY_BACKOFF_S) - 1)
+        self._retry_index += 1
+        self._next_lock_retry_at = self._clock() + LOCK_RETRY_BACKOFF_S[index]
+
+    def _reset_lock_retry(self) -> None:
+        self._lock_attempts = 0
+        self._lock_refusals = 0
+        self._refusal_logged = False
+        self._ever_locked = False
+        self._retry_index = 0
+        self._next_lock_retry_at = None
+        self._conversation_started_at = None
+
+    def _model_owns_lock(self) -> bool:
+        if self.lock_state is None:
+            return False
+        try:
+            return self.lock_state.owner == OWNER_MODEL
+        except Exception as exc:  # noqa: BLE001 - degrade to "not the model's"
+            logger.warning("gaze stack could not read the lock owner: %s", exc)
+            return False
+
+    def _engine_dropped_the_lock(self) -> bool:
+        """Has the belief stopped saying ``True`` under us (engine restart)?"""
+        if self.lock_state is None:
+            return False
+        try:
+            return self.lock_state.locked is not True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("gaze stack could not read the lock belief: %s", exc)
+            return False
+
+    def _mark_released(self, reason: str) -> None:
+        if self.lock_state is None:
+            return
+        try:
+            self.lock_state.mark_released(reason)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("gaze stack could not mark the release: %s", exc)
 
     # -- the ops -------------------------------------------------------------- #
 
@@ -488,3 +753,8 @@ def _refused(result: dict | None) -> bool:
     well be standing".
     """
     return isinstance(result, dict) and result.get("ok") is False
+
+
+def _confirmed(result: dict | None) -> bool:
+    """Did the engine confirm this op with ``ok: true``? Nothing else counts."""
+    return isinstance(result, dict) and result.get("ok") is True
