@@ -1019,11 +1019,14 @@ def build_app() -> list[object]:
     except Exception as err:  # noqa: BLE001
         _stage("supervise", "nova", "component", f"component absent name=eyes reason={err}")
 
-    # standing reflexes — the face cue crosses the bus only through this rule
-    ensure_face_rule()
-    # …and with the hold on, the nod that rule runs is retired: the hold and
-    # the nod fight for the same channel (see retire_face_nod_rule).
+    # standing reflexes — with the hold OFF the face cue crosses the bus only
+    # through this rule, so it is (re)installed; with the hold ON the nod that
+    # rule runs would fight the hold for the head, so the rule is tombstoned
+    # instead and never re-installed (installing then retiring on every boot
+    # cost two overlay writes and two reloads for nothing — t12 review).
     if switches.face_hold:
         retire_face_nod_rule()
+    else:
+        ensure_face_rule()
 
     return components

@@ -460,11 +460,19 @@ def test_face_rule_matches_the_engine_grammar():
     assert entry["cooldown_s"] == 30.0  # the runtime's own face re-announce cooldown
 
 
-def test_build_app_runs_the_ensure_face_rule_step(monkeypatch):
+def test_build_app_runs_the_ensure_face_rule_step_only_without_the_hold(monkeypatch):
+    """With the face hold OFF the nod rule is the only face reflex, so it is
+    installed; with the hold ON (the default) it is never installed, only
+    retired — installing then tombstoning every boot was two overlay writes
+    and two reloads for nothing."""
     calls = []
     monkeypatch.setattr(app, "ensure_face_rule", lambda **kw: calls.append(kw) or True)
+    monkeypatch.setenv("NOVA_FACE_HOLD", "0")
     _build()
     assert len(calls) == 1
+    monkeypatch.setenv("NOVA_FACE_HOLD", "1")
+    _build()
+    assert len(calls) == 1  # unchanged: not installed when the hold is on
 
 
 def test_ensure_face_rule_degrades_absent_without_a_state_dir(caplog):
