@@ -325,7 +325,7 @@ class EyesComponent:
         raw = getattr(msg, "payload", b"") or b""
         try:
             payload = json.loads(raw.decode() if isinstance(raw, bytes) else str(raw))
-        except (ValueError, UnicodeDecodeError):
+        except ValueError:  # UnicodeDecodeError is a ValueError
             return
         if not isinstance(payload, dict):
             return

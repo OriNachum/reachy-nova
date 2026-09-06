@@ -20,7 +20,7 @@ import pytest
 from reachy_nova.harness import eyes, supervisor
 
 
-@pytest.fixture()
+@pytest.fixture
 def state_dir(tmp_path, monkeypatch):
     """A throwaway REACHY_STATE_DIR so status() touches no real state."""
     monkeypatch.setenv("REACHY_STATE_DIR", str(tmp_path))

@@ -355,7 +355,7 @@ class GazeStack:
         except Exception as exc:  # noqa: BLE001 - a hook must never raise
             logger.warning("gaze stack on_browser_state raised: %s", exc)
 
-    def on_transcript(self, role: str, text: str) -> None:
+    def on_transcript(self, role: str, _text: str) -> None:
         """A USER line is someone talking — note a conversation tick.
 
         Only the local fallback clock is fed here: when an
@@ -502,11 +502,12 @@ class GazeStack:
         with self._op_lock:
             live = self.conversation_live()
             busy = self.browser_busy()
-            desired = (
-                LAYER_CONVERSATION
-                if live
-                else (LAYER_BROWSING if busy else LAYER_WANDER)
-            )
+            if live:
+                desired = LAYER_CONVERSATION
+            elif busy:
+                desired = LAYER_BROWSING
+            else:
+                desired = LAYER_WANDER
             old = self.layer
             if desired != old:
                 reason = f"conversation_live={live} browser_busy={busy}"

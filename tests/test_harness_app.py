@@ -1200,7 +1200,8 @@ def test_all_switches_on_compose_the_gaze_stack_and_the_eyes():
     assert eyes.name == "eyes"
     # Both carry the supervisor's lifecycle…
     for component in (gaze, eyes):
-        assert hasattr(component, "start") and hasattr(component, "stop")
+        assert hasattr(component, "start")
+        assert hasattr(component, "stop")
     # …and the eyes belief is discoverable exactly the way the lock one is
     # (supervisor.run takes no eyes_state kwarg — _find_eyes_state is the seam).
     assert supervisor._find_eyes_state(components) is eyes.eyes
