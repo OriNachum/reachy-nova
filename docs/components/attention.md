@@ -117,6 +117,81 @@ in front of the robot mid-sentence neither knows nor cares. Resetting
 attention there would make the robot go cold mid-conversation every few
 minutes; the no-op exists to name that bug.
 
+## Voice gate
+
+`SonicSpeaker` (`reachy_nova/harness/speaking.py`, task t6) is the first
+consumer of the window, and it gates the **mouth only**. The mic feed to
+Sonic stays open in every case below — a robot that stopped listening when
+it was not addressed could never hear its own name.
+
+### The verdict
+
+`speaker.attention_verdict(now=None)` is a **pure** function of the
+attention state, returning `"allowed"` or `"not-addressed"`:
+
+| Verdict | When |
+| --- | --- |
+| `allowed` | no attention gate (`attention=None`) |
+| `allowed` | the window is **warm** — this is a conversation |
+| `allowed` | an **inject** landed within `attention_grace_s` (default 3 s): the utterance is a reaction to a body cue or a tool result, not a reply to speech |
+| `allowed` | **nothing was ever transcribed** — a greeting on boot has no misheard sentence behind it |
+| `allowed` | the last transcript **named** the robot (the window may have gone cold while Sonic was thinking; the person still asked) |
+| `not-addressed` | cold **and** the last transcript is nameless **and** it is more recent than any inject |
+
+Being pure and public matters: `app.py` calls the same function when the
+ASSISTANT transcript arrives, so the ledger's decision and the speaker's
+decision can never disagree.
+
+### The drop
+
+The verdict is taken **once per utterance**, on the edge into `"speaking"` —
+never per chunk, because half a sentence spoken because the window closed
+between chunk 2 and chunk 3 is worse than either answering or staying quiet.
+A `not-addressed` utterance then has every chunk dropped in `_enqueue`,
+which is the attention gate's mirror of the quiet gate's `_quiet_blocks`:
+
+- no post, no `play_sound`, nothing uploaded;
+- the echo gate is never armed (the ear is untouched);
+- the queue is never purged and `on_playback_failure` never fires — a gate
+  drop is not mouth loss, and the mind must not think the mouth is gone;
+- `attention.note_utterance()` is **not** called: a suppressed reply must
+  not renew the window, or the robot would talk its way back into a
+  conversation from silence;
+- one line, whatever the chunk count, plus one summary when the utterance
+  ends:
+
+```text
+[SENSE stage=speak source=nova event=attention] dropped reason=not-addressed duration=1.00s (further chunks of this utterance counted, not logged)
+[SENSE stage=speak source=nova event=attention-resume] utterance dropped count=4 reason=not-addressed (cold window, nameless transcript)
+```
+
+`speaker.attention_drops` counts the dropped chunks over the speaker's whole
+life (cumulatively — unlike `quiet_drops`, there is no "release" edge for a
+window that goes cold on its own).
+
+### The late transcript
+
+Sonic sometimes emits audio *before* the transcript that provoked it reaches
+the harness. The speaking edge then sees no transcript, correctly allows the
+utterance, and a moment later a nameless transcript lands. `app.py` calls
+`speaker.recheck_attention()` immediately after
+`attention.note_transcript(...)`; if an utterance allowed **only** for want
+of a transcript is still in flight and the verdict has flipped, it is cut
+with a single `preempt()` and marked suppressed, so the rest of it drops.
+
+The cost is at most **one clipped chunk** (~1 s already posted) — the price
+of the race, and much cheaper than the whole unwanted sentence. The recheck
+is idempotent and a no-op for an utterance allowed for any other reason.
+
+### Memory hygiene
+
+A reply nobody heard is not part of the conversation, so it must not be
+distilled into memory: `Ledger.append(..., dropped=True)` writes no line and
+counts `ledger.attention_skips` instead. `app.py` passes
+`dropped=(speaker.attention_verdict() == "not-addressed")` for ASSISTANT
+lines. USER lines are real speech and are never dropped this way — the robot
+should remember being talked near, just not remember answering.
+
 ## Configuration
 
 | Env | Default | Meaning |
@@ -147,5 +222,8 @@ mystery.
 
 ## Wiring
 
-This module is pure state and wires itself to nothing — `app.py`, the
-speaker and the gaze stack consume it in a later task.
+This module is pure state and wires itself to nothing. `SonicSpeaker`
+consumes it through `attention=` (see [Voice gate](#voice-gate) above);
+`app.py` owns the wiring — `note_transcript` + `recheck_attention` on every
+user transcript, `note_inject` on every inject, and the ledger's `dropped=`
+for ASSISTANT lines — and the gaze stack reads `conversation_live`.

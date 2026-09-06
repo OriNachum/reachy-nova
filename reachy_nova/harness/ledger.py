@@ -87,6 +87,9 @@ class Ledger:
         self.appended = 0
         #: Appends that were no-ops because quiet was armed.
         self.skipped_quiet = 0
+        #: Appends refused because the caller said the line never reached a
+        #: human ear (``dropped=True`` — the attention gate at the speaker).
+        self.attention_skips = 0
         #: Failed writes (append or truncate), each latched to at most one
         #: senselog line until a write succeeds again.
         self.drops = 0
@@ -96,13 +99,37 @@ class Ledger:
 
     # -- write ---------------------------------------------------------- #
 
-    def append(self, kind: str, text: str, ts: float | None = None, **fields: Any) -> bool:
+    def append(
+        self,
+        kind: str,
+        text: str,
+        ts: float | None = None,
+        *,
+        dropped: bool = False,
+        **fields: Any,
+    ) -> bool:
         """Append one ``{"ts", "kind", "text", ...fields}`` NDJSON line.
 
-        Returns ``False`` without writing anything while quiet is armed, or
-        when the write itself fails — either way the failure is counted,
-        never raised.
+        Returns ``False`` without writing anything while quiet is armed, when
+        the caller says the line was *dropped*, or when the write itself
+        fails — every one of those is counted, never raised.
+
+        ``dropped`` is memory hygiene for the attention gate (t6). A reply
+        the speaker refused to play because nobody was addressing the robot
+        was never heard by anyone, so it is not part of the conversation and
+        must not be distilled into memory by the compactor — a robot that
+        remembers saying things nobody heard is a robot that misremembers.
+        ``app.py`` passes ``dropped=(speaker.attention_verdict() ==
+        "not-addressed")`` for ASSISTANT lines; USER lines are always real
+        speech and are never dropped this way. The skip is counted in
+        :attr:`attention_skips` and, like the quiet skip, not logged: it is
+        the ordinary shape of a cold robot, not a fault.
         """
+        if dropped:
+            with self._lock:
+                self.attention_skips += 1
+            return False
+
         record: dict[str, Any] = {
             "ts": self._clock() if ts is None else ts,
             "kind": kind,
