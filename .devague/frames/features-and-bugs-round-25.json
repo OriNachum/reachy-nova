@@ -4,7 +4,7 @@
   "schema_version": 6,
   "status": "exported",
   "created": "2026-09-06T05:50:27Z",
-  "updated": "2026-09-06T09:52:19Z",
+  "updated": "2026-09-06T10:45:32Z",
   "claims": [
     {
       "id": "c1",
@@ -1380,6 +1380,15 @@
       "seam": "camera gate",
       "behavior": "the camera state at acceptance is recorded from a live sample; item-2 live checks are blocked, never assumed",
       "source_text": "Challenge / reversibility-and-ops (runtime restart 07:13 BST 2026-09-06): a runtime restart is not a camera recovery on this device \u2014 the receive pipeline fails at media acquisition with 'GStreamer pipeline error (gst-core-error-quark code=4): state change failed' and frame_available stays false (435/435, then 171/171 snapshots) while /dev/video0-1 are held by the daemon's processes; item 2's live acceptance is blocked on the runtime/daemon media path (reachy-mini-cli issue filed), and the harness side of item 2 ships behind NOVA_FACE_HOLD regardless, verified by unit tests against a fake spool until the camera returns.",
+      "origin": "llm",
+      "status": "proposed"
+    },
+    {
+      "id": "o28",
+      "claim_id": "c16",
+      "seam": "rules overlay validator vs the runtime's rules schema (reachy-mini-cli #177)",
+      "behavior": "an operator names table and a rule keyed on name_mentioned pass the overlay's whole-file validation; a malformed table refuses the write with the file untouched",
+      "source_text": "The runtime's canonical names gain 'nova' where the name is matched: reachy/speech/engagement.py and reachy/behavior/transcript_sense.py DEFAULT_NAMES, reachy/speech/name_match.py defaults, and the sleep wake phrase default, with collision-table entries for the new initial ('no', 'never', 'over', 'nova' vs 'no va'); shipped on the robot's wireless-motor-enable branch and on main via PR (q4).",
       "origin": "llm",
       "status": "proposed"
     }
