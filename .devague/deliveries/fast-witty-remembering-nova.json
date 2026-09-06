@@ -2,7 +2,7 @@
   "plan_slug": "fast-witty-remembering-nova",
   "schema_version": 2,
   "created": "2026-09-05T22:22:38Z",
-  "updated": "2026-09-05T23:56:07Z",
+  "updated": "2026-09-06T00:17:49Z",
   "deviations": [
     {
       "id": "d1",
@@ -155,6 +155,21 @@
       "status": "proposed",
       "classification": "acceptable",
       "seq": 37
+    },
+    {
+      "id": "d12",
+      "what": "PR #24 review round (Qodo, 9 threads): 8 fixes landed in d7fbcab outside any plan task \u2014 failed chunk deletes retried then abandoned by name; at most 2 Lite calls in flight plus botocore timeouts; Lite vocalizations now synthesised and played through the speaker; the ledger records delivered senses only (inject_text returns its fate; deferred cues ledgered on drain); persisted memory entries validated; the vision cue goes through the ledger wrapper; the speech-burst window resets per session; the ledger's quiet check is under its lock. 1 pushback: the reactor's internal bounded queue is the repo's existing never-block-the-caller pattern (browser, forge) and what c28 requires; CLAUDE.md's pattern line now names it.",
+      "task_ref": "t18",
+      "reason": "Human gate 3 (the PR) produced valid reliability and correctness findings the plan's tests had not exercised; each is small, covered by a new test, and deployed to the robot.",
+      "affects": [
+        "t8",
+        "t11",
+        "t14"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable",
+      "seq": 38
     }
   ],
   "evidence": [

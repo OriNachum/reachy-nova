@@ -79,6 +79,7 @@ Ori's confirmation; they are quoted as recorded, not as approved.
 - `d9` — liveness window 900 s and floor 0.05 by default; the Lite reactor feeds back its last five lines — a person at the desk still tripped the 180 s window, and three pats got the identical line
 - `d10` — playback queue bound 90 chunks (was 8); a 35 s reply dropped 12 chunks — plus a process slip: that commit shipped with one red test for a few minutes, fixed in `03c73d1`
 - `d11` — scene descriptions reach Sonic as a brief, capped body cue — the raw 400–850 char Omni text became a 30 s monologue at every harness start
+- `d12` — the PR #24 review round: eight fixes in `d7fbcab` (failed chunk deletes retried then abandoned by name; at most two Lite calls in flight plus botocore timeouts; Lite vocalizations synthesised and played through the speaker; the ledger records delivered senses only; persisted memory entries validated; the vision cue through the ledger wrapper; the speech-burst window reset per session; the ledger's quiet check under its lock) and one pushback (the reactor's internal bounded queue is the repo's existing never-block-the-caller pattern; CLAUDE.md's pattern line now names it)
 - not covered by any record: `t14` kept the bare `sonic.inject_text` for the browse and qq-memory legs (only the bus and now the vision leg go through the wrapper), per the task's stated allowance
 
 ## Drift From Plan
@@ -96,6 +97,7 @@ Ori's confirmation; they are quoted as recorded, not as approved.
 | `t2` (`d9`) | h18 promised no liveness restart in a 10-minute quiet stretch; two attempts at a mic-energy gate could not tell a person moving about from a person talking, and the rotation makes a long window safe | acceptable |
 | `t8` (`d10`) | the whole-utterance design never queued more than one item per utterance, so the bound of 8 was never exercised | acceptable |
 | `t14` (`d11`) | a bare scene report is not a cue the persona knows how to treat briefly; invisible in tests because the vision leg is Omni-model-gated on the dev box | acceptable |
+| `t8`, `t11`, `t14` (`d12`) | Human gate 3 (the PR) produced valid reliability and correctness findings the plan's tests had not exercised; each is small, covered by a new test, and deployed to the robot | acceptable |
 | `t18` | the 10-minute spoken session with Ori has not happened; only pats and the robot's own replies are in the journal, so the tone verdict and the heard-to-audio median are unmeasured | needs-follow-up |
 
 ## Evidence
@@ -104,7 +106,9 @@ Ori's confirmation; they are quoted as recorded, not as approved.
 - tests: `tests/test_harness_boundary.py` — 19 passed
 - tests: per-honesty-condition node ids filed as plan evidence `e1`–`e22` against obligations `o1`–`o16` (`devague evidence --list`)
 - lint: `markdownlint-cli2 --config ~/.markdownlint-cli2.yaml` on the round's docs — 0 errors
-- commits: `4583c44..f4ee46c` on `spec/fast-witty-remembering-nova` (36 commits; 15 task commits, 15 TDD-gated merges, 1 test fix, 5 post-deploy fixes)
+- commits: `4583c44..d7fbcab` on `spec/fast-witty-remembering-nova` (40 commits; 15 task commits, 15 TDD-gated merges, 1 test fix, 5 post-deploy fixes, the delivery summary and devague state, 1 review-fix commit)
+- tests: `uv run pytest -n auto` at `d7fbcab` — 1804 passed, 1 skipped
+- PR #24: CI test + SonarCloud gate green; Qodo review of 9 threads answered in `d7fbcab` (8 fixes, 1 pushback)
 - robot journal (harness on `9bb4d90`/`f4ee46c`, 2026-09-06 00:42–00:53 BST, read over ssh): `rotation delay=0 replay=2 age=420s` at 00:49:43.76 with the new session listening 0.5 s later; first chunk played 0.80 / 0.37 / 0.59 / 0.56 / 0.50 s after `Utterance audio started` on five replies; 0 liveness restarts, 0 stream deaths, 0 `queue-full` drops in the window; four consecutive pats answered "Thank you!", "Mmm, that feels nice!", "That tickles!", "Yup, that's nice!" — filed as `e23`–`e26`
 - robot journal (before the round, harness `f936f11`, 2026-09-05): 9.9 s of silence before a 12.52 s reply, 6.0 s before a 4.20 s reply; short replies queued 4.3–4.6 s after first audio on the 4 s speaking watchdog; six liveness restarts 180 s apart in a quiet room
 - device probes (t7, 2026-09-06): Nova 2 Lite from the robot 0.97 / 1.06 median / 1.34 s; two 1 s tones posted gate-exact heard seamless, 100 ms pre-roll heard early (plan risks `r1`, `r2`)
@@ -135,8 +139,8 @@ Ori's confirmation; they are quoted as recorded, not as approved.
 ## Remaining Work / Follow-up
 
 - `t18` — run the spoken 10-minute session with Ori on `f4ee46c`: talk (to measure heard-to-audio), pat mid-sentence (deferred cue live), stay quiet 10 minutes with nobody at the desk (h18 in full), ask "what were we talking about" after a rotation (h8 second half), have a guest speak (h14), record the tone verdict (h1/h17); then update this document's claims. Owner: Ori + operator.
-- confirm or reject deviations `d1`–`d11` (`devague deviate --confirm dN`); `d4` (mood only via Lite), `d7` and `d8` are the ones with substance
-- open the final PR from `spec/fast-witty-remembering-nova` to `main` via the cicd skill with this document and the t16 audit note in the body; merging publishes 0.4.0 to PyPI
+- confirm or reject deviations `d1`–`d12` (`devague deviate --confirm dN`); `d4` (mood only via Lite), `d7` and `d8` are the ones with substance
+- PR #24 is open with CI green and the first review round answered; merging publishes 0.4.0 to PyPI, after which the robot's checkout goes back to `main`
 - `d4` follow-up: decide whether the compactor's replay context block should carry the mood sentence so Sonic sees it directly
 - upstream reachy-mini-cli: the clip rider has produced no new clip since boot (same `ts` all evening) — the vision leg only ever sees the boot clip; and #162 (streaming speaker feed) remains the gap-free sub-second path
 - pre-existing, untouched: an awscrt `InvalidStateError` traceback on every Sonic stream close; a wheel install lacks `config/nervous-system/rules.yaml` (plan risk `r9`); the installed metadata version on the device stays 0.3.0 until the next pip reinstall
