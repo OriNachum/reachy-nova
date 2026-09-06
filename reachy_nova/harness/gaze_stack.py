@@ -18,7 +18,11 @@ So postures here are **layered, lowest first**::
   runtime's ``gaze-hold`` behaviour holds the head up and aside (the aside side
   alternating per browse, so two browses in a row do not look identical).
   ``gaze-hold`` claims only the head channel, so antennas and body yaw keep
-  feel-alive's own sway underneath it.
+  feel-alive's own sway underneath it. A ``gaze-hold`` alone is not enough,
+  though — the runtime's own ``orient-to-sound`` and ``nod`` reflexes still
+  compete for the head by recency (task t10), so entering this layer also
+  merges :data:`BROWSING_INHIBITS` into the runtime's CURRENT inhibited set,
+  and leaving it (to WANDER) gives back only the names it added.
 * ``CONVERSATION`` — someone is actually talking. The face lock owns the head;
   the browsing goal is deliberately **left standing** beneath it, because the
   lock wins by recency and the goal simply resumes when the lock releases.
@@ -82,7 +86,15 @@ from typing import Any
 from .. import sensory_log
 from .attention import AttentionState
 from .lock_state import LockState
-from .tools import DECLARE_GOAL, LOCK_FACE, LOOK_AT_SOUND, RELEASE_FACE, IntentTools
+from .tools import (
+    DECLARE_GOAL,
+    LOCK_FACE,
+    LOOK_AT_SOUND,
+    RELEASE_FACE,
+    SET_INHIBITION,
+    IntentTools,
+)
+from .tools import current_inhibitions as _runtime_current_inhibitions
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +118,13 @@ LAYER_CONVERSATION = "conversation"
 
 #: The runtime behaviour the browsing layer declares as a standing goal.
 GAZE_HOLD_BEHAVIOR = "gaze-hold"
+
+#: Runtime head reflexes the browsing layer keeps off a head it is holding in
+#: the thinking pose (task t10). ``orient-to-sound`` and ``nod`` both steal
+#: the head from a standing ``gaze-hold`` goal by recency — the same failure
+#: mode a face lock has, just from the runtime's own reflex layer instead of
+#: another harness component.
+BROWSING_INHIBITS = ("orient-to-sound", "nod")
 
 #: The browser states that mean "a browse is in flight". Everything else —
 #: ``idle``, ``error``, an unknown string, ``None`` — means it is not, because
@@ -171,6 +190,11 @@ class GazeStack:
         side_yaw_deg: how far aside the browsing pose looks, in degrees. The
             SIGN alternates per browse; this is the magnitude.
         up_pitch_deg: how far up the browsing pose looks, in degrees.
+        current_inhibitions: reads the runtime's CURRENT inhibited set — the
+            live set the browsing layer merges its own additions into and
+            restores out of (see :data:`BROWSING_INHIBITS`). Defaults to
+            :func:`reachy_nova.harness.tools.current_inhibitions`; injectable
+            for tests so they never touch a real state dir.
     """
 
     name = "gaze"
@@ -184,6 +208,7 @@ class GazeStack:
         tick_s: float = DEFAULT_TICK_S,
         side_yaw_deg: float = DEFAULT_SIDE_YAW_DEG,
         up_pitch_deg: float = DEFAULT_UP_PITCH_DEG,
+        current_inhibitions: Callable[[], list[str]] | None = None,
     ) -> None:
         self._intents = intents
         self._attention = attention
@@ -192,6 +217,7 @@ class GazeStack:
         self.tick_s = max(0.01, float(tick_s))
         self.side_yaw_deg = float(side_yaw_deg)
         self.up_pitch_deg = float(up_pitch_deg)
+        self._current_inhibitions = current_inhibitions or _runtime_current_inhibitions
 
         #: Guards the PRODUCER flags only — held for microseconds, never
         #: across an op, so a hook can never be blocked behind a spool round
@@ -218,6 +244,13 @@ class GazeStack:
         self.goal_standing = False
         #: Sign of the NEXT browsing aside yaw (+1 first, then alternating).
         self._next_side = 1.0
+
+        #: Names from :data:`BROWSING_INHIBITS` the stack currently believes
+        #: IT added to the runtime's inhibited set (as opposed to names that
+        #: were already inhibited for some other reason before browsing
+        #: started, which are never the stack's to remove). Written only
+        #: under :attr:`_op_lock`.
+        self._browsing_added: set[str] = set()
 
         #: Whether an AUTO-owned face lock is believed held right now. Written
         #: only under :attr:`_op_lock` (or by :meth:`on_lock_released`, which
@@ -435,6 +468,7 @@ class GazeStack:
             "browser_busy": self.browser_busy(),
             "conversation_live": self.conversation_live(),
             "goal_standing": self.goal_standing,
+            "browsing_inhibits": sorted(self._browsing_added),
             "lock_held": self.lock_held,
             "lock_attempts": self._lock_attempts,
             "next_lock_retry_s": None if due is None else max(0.0, due - self._clock()),
@@ -498,10 +532,12 @@ class GazeStack:
             # in which case there is nothing to re-declare.
             if not self.goal_standing:
                 self._declare_browsing_goal()
+            self._enter_browsing_inhibits()
             return
         # -> wander
         if self.goal_standing:
             self._clear_goal("wander")
+        self._leave_browsing_inhibits()
 
     # -- the conversation layer ----------------------------------------------- #
 
@@ -694,6 +730,80 @@ class GazeStack:
         # Mirror image of the declare: only an explicit refusal leaves the
         # goal believed standing, so a later transition tries the clear again.
         self.goal_standing = _refused(result)
+
+    # -- browsing head-reflex inhibits (task t10) ----------------------------- #
+
+    def _enter_browsing_inhibits(self) -> None:
+        """Entering (or resuming) BROWSING: add :data:`BROWSING_INHIBITS`.
+
+        Two cases, told apart by :attr:`_browsing_added`:
+
+        * Fresh entry (from WANDER, or first-ever browse): merge the runtime's
+          CURRENT inhibited set with :data:`BROWSING_INHIBITS` in one
+          ``set_inhibition``, remembering exactly which names were not already
+          there — those, and only those, are ours to give back later.
+        * Resuming from CONVERSATION: the names may already be standing (a
+          face lock re-asserts its own inhibitions, but ``nod`` is the
+          harness's own addition and is not guaranteed to survive a
+          replacement) — re-read the live set and re-add only what is
+          missing, rather than assuming nothing changed underneath us.
+        """
+        if self._browsing_added:
+            self._reassert_browsing_inhibits()
+        else:
+            self._declare_browsing_inhibits()
+
+    def _declare_browsing_inhibits(self) -> None:
+        live = self._read_inhibitions()
+        added = [name for name in BROWSING_INHIBITS if name not in live]
+        merged = sorted(set(live) | set(BROWSING_INHIBITS))
+        result = self._op(
+            SET_INHIBITION, {"behaviors": merged}, f"browsing inhibit add={added}"
+        )
+        # Mirror the goal-declare pattern: anything but an explicit refusal is
+        # believed to have taken.
+        if not _refused(result):
+            self._browsing_added = set(added)
+
+    def _reassert_browsing_inhibits(self) -> None:
+        live = self._read_inhibitions()
+        missing = [name for name in BROWSING_INHIBITS if name not in live]
+        if not missing:
+            return
+        merged = sorted(set(live) | set(missing))
+        result = self._op(
+            SET_INHIBITION, {"behaviors": merged}, f"browsing inhibit re-add={missing}"
+        )
+        if not _refused(result):
+            self._browsing_added = self._browsing_added | set(missing)
+
+    def _leave_browsing_inhibits(self) -> None:
+        """Leaving BROWSING for WANDER: give back only the names WE added.
+
+        Re-reads the live set first rather than assuming it — a later-wins
+        operator change (say, adding ``antenna-sway``) in the meantime must
+        survive the restore.
+        """
+        if not self._browsing_added:
+            return
+        live = self._read_inhibitions()
+        remaining = sorted(set(live) - self._browsing_added)
+        result = self._op(
+            SET_INHIBITION,
+            {"behaviors": remaining},
+            f"browsing inhibit remove={sorted(self._browsing_added)}",
+        )
+        # Mirror the goal-clear pattern: only an explicit refusal leaves the
+        # names believed still added, so a later transition retries the give-back.
+        if not _refused(result):
+            self._browsing_added = set()
+
+    def _read_inhibitions(self) -> list[str]:
+        try:
+            return list(self._current_inhibitions())
+        except Exception as exc:  # noqa: BLE001 - degrade to "nothing known inhibited"
+            logger.warning("gaze stack could not read current inhibitions: %s", exc)
+            return []
 
     def _op(self, tool_name: str, params: dict, detail: str) -> dict | None:
         """One serialised tool call; logs its outcome; never raises.
