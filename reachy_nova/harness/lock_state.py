@@ -15,6 +15,16 @@ file the runtime does not write. Two things update it:
    our own ``release_face``, but ``mind-offline``/``max-hold`` are the runtime
    acting without us, and only the bus tells us it happened.
 
+Alongside the belief itself, this also tracks *who took the lock* —
+``"auto"`` or ``"model"``. A coming feature has the harness take a gaze lock
+on its own initiative (an automatic hold), while the model can also take one
+on purpose via the ``lock_face`` tool; at release time the two must not be
+confused, since an automatic hold must never release a lock the model asked
+for. The owner is only ever meaningful while a lock is actually believed
+held, so it clears alongside the belief everywhere the belief clears: a
+confirmed release, a runtime ``motion/lock-released`` event, and an
+engine-drop grace expiring.
+
 A belief this cheap is worth exactly what it costs to keep current, and no
 more: it is read-only local color for :func:`reachy_nova.harness.supervisor.
 status` (``locked: bool|None`` — ``None`` when unknown, e.g. from a
@@ -53,6 +63,11 @@ DEFAULT_DROP_GRACE_S = 5.0
 
 #: Env override for :data:`DEFAULT_DROP_GRACE_S`, in seconds.
 DROP_GRACE_ENV = "NOVA_LOCK_DROP_GRACE_S"
+
+#: Valid values for :meth:`LockState.mark_locked`'s *owner* — who took the
+#: lock: the harness itself, acting automatically, or the model via a
+#: ``lock_face`` tool call.
+_VALID_OWNERS = ("auto", "model")
 
 
 def default_drop_grace_s() -> float:
@@ -93,6 +108,7 @@ class LockState:
     ) -> None:
         self._lock = threading.Lock()
         self._locked: bool | None = None
+        self._owner: str | None = None
         self._clock = clock
         self.drop_grace_s = (
             default_drop_grace_s() if drop_grace_s is None else float(drop_grace_s)
@@ -112,10 +128,36 @@ class LockState:
         with self._lock:
             return self._locked
 
-    def mark_locked(self) -> None:
-        """Record a confirmed ``lock_face`` — call only on the engine's ``ok: true``."""
+    @property
+    def owner(self) -> str | None:
+        """``"auto"``/``"model"`` when a lock is believed held, ``None`` otherwise.
+
+        ``None`` whenever :attr:`locked` is not ``True`` — unlocked, unknown,
+        released, or just cleared by an expired engine-drop grace — since an
+        owner only means something while a lock is actually believed held.
+        Settles a pending engine drop first, same as :attr:`locked`, so a
+        caller that only ever reads ``owner`` still sees it expire on time.
+        """
+        self.settle()
+        with self._lock:
+            return self._owner if self._locked else None
+
+    def mark_locked(self, owner: str = "model") -> None:
+        """Record a confirmed ``lock_face`` — call only on the engine's ``ok: true``.
+
+        *owner* is ``"auto"`` when the HARNESS took the lock on its own
+        initiative, or ``"model"`` (the default, matching every existing
+        caller) when the model asked for it via the ``lock_face`` tool. This
+        distinction exists so release-time logic can tell the two apart: an
+        automatic hold must never release a lock the model asked for. Any
+        other value raises :class:`ValueError` and leaves the belief (and any
+        previous owner) unchanged.
+        """
+        if owner not in _VALID_OWNERS:
+            raise ValueError(f"invalid lock owner: {owner!r} (expected 'auto' or 'model')")
         with self._lock:
             self._locked = True
+            self._owner = owner
             self._drop_pending_since = None
 
     def mark_released(self, reason: str | None = None) -> None:
@@ -127,10 +169,12 @@ class LockState:
         happened via the bus's own ``inject_template`` (see rules.yaml's
         ``motion/lock-released`` entry) before this belief update ever runs,
         but this log line is the belief-tracking side, same as
-        :meth:`on_engine_dropped`'s.
+        :meth:`on_engine_dropped`'s. Clears the owner along with the belief —
+        once nothing is locked, nobody owns it.
         """
         with self._lock:
             self._locked = False
+            self._owner = None
             self._drop_pending_since = None
         sensory_log.stage(_STAGE, _SOURCE, _EVENT, f"released reason={reason}")
 
@@ -189,9 +233,10 @@ class LockState:
         """Clear a believed lock once the engine has been down past the grace.
 
         Idempotent and cheap: safe to call from the supervisor's poll loop on
-        every tick, and from every :attr:`locked` read. Returns whether this
-        call was the one that dropped the belief (so the caller can tell a
-        no-op tick from the real thing); logs the ONE named line when it was.
+        every tick, and from every :attr:`locked`/:attr:`owner` read. Returns
+        whether this call was the one that dropped the belief (so the caller
+        can tell a no-op tick from the real thing); logs the ONE named line
+        when it was. Clears the owner along with the belief.
         """
         with self._lock:
             since = self._drop_pending_since
@@ -200,6 +245,7 @@ class LockState:
             self._drop_pending_since = None
             was_locked = self._locked
             self._locked = None
+            self._owner = None
         if not was_locked:
             return False
         sensory_log.stage(

@@ -196,3 +196,113 @@ def test_l6_the_grace_is_env_overridable(monkeypatch):
 def test_l6_a_bad_grace_env_falls_back_to_the_default(monkeypatch, raw):
     monkeypatch.setenv("NOVA_LOCK_DROP_GRACE_S", raw)
     assert LockState().drop_grace_s == pytest.approx(5.0)
+
+
+# --------------------------------------------------------------------------- #
+# Owner (t3 prep for the coming automatic gaze lock): who took the lock, so   #
+# release-time logic can tell an automatic hold from one the model asked for #
+# and never release a lock the model took on purpose.                        #
+# --------------------------------------------------------------------------- #
+
+
+def test_owner_is_none_when_unlocked():
+    assert LockState().owner is None
+
+
+def test_owner_defaults_to_model_on_a_bare_mark_locked():
+    state = LockState()
+    state.mark_locked()
+    assert state.locked is True
+    assert state.owner == "model"
+
+
+def test_owner_can_be_marked_auto():
+    state = LockState()
+    state.mark_locked(owner="auto")
+    assert state.owner == "auto"
+
+
+def test_owner_can_be_marked_model_explicitly():
+    state = LockState()
+    state.mark_locked(owner="model")
+    assert state.owner == "model"
+
+
+def test_owner_rejects_invalid_values_and_leaves_state_unchanged():
+    state = LockState()
+    state.mark_locked(owner="auto")
+
+    with pytest.raises(ValueError):
+        state.mark_locked(owner="bogus")
+
+    assert state.locked is True
+    assert state.owner == "auto"
+
+
+def test_owner_rejects_invalid_values_when_previously_unlocked():
+    state = LockState()
+
+    with pytest.raises(ValueError):
+        state.mark_locked(owner="nope")
+
+    assert state.locked is None
+    assert state.owner is None
+
+
+def test_owner_clears_on_mark_released():
+    state = LockState()
+    state.mark_locked(owner="auto")
+
+    state.mark_released()
+
+    assert state.locked is False
+    assert state.owner is None
+
+
+def test_owner_clears_on_bus_lock_released_event():
+    state = LockState()
+    state.mark_locked(owner="model")
+
+    state.on_bus_event({"source": "motion", "type": "lock-released", "reason": "max-hold"})
+
+    assert state.locked is False
+    assert state.owner is None
+
+
+def test_owner_clears_when_an_engine_drop_settles_past_the_grace():
+    clock = FakeClock()
+    state = LockState(clock=clock, drop_grace_s=5.0)
+    state.mark_locked(owner="auto")
+
+    state.on_engine_dropped()
+    clock.advance(6.0)
+    state.settle()
+
+    assert state.locked is None
+    assert state.owner is None
+
+
+def test_owner_survives_an_engine_drop_within_the_grace():
+    clock = FakeClock()
+    state = LockState(clock=clock, drop_grace_s=5.0)
+    state.mark_locked(owner="model")
+
+    state.on_engine_dropped()
+    clock.advance(1.0)
+    state.on_engine_live()
+    clock.advance(60.0)
+
+    assert state.locked is True
+    assert state.owner == "model"
+
+
+def test_owner_reading_settles_a_pending_drop_like_locked_does():
+    clock = FakeClock()
+    state = LockState(clock=clock, drop_grace_s=5.0)
+    state.mark_locked(owner="auto")
+
+    state.on_engine_dropped()
+    clock.advance(6.0)
+
+    assert state.owner is None
+    assert state.locked is None
