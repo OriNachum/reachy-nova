@@ -85,6 +85,7 @@ LOCK_FACE = "lock_face"
 RELEASE_FACE = "release_face"
 LOOK_AT_FACE = "look_at_face"
 LOOK_AT_SOUND = "look_at_sound"
+THINK = "think"
 FORGE = "forge"
 USE_SKILL = "use_skill"
 AUTHOR_RULE = "author_rule"
@@ -108,7 +109,10 @@ END_SILENCE = "end_silence"
 #: instead of talking to the runtime at all. ``lock_face``/``release_face``
 #: (task t9) are the fourth and fifth: spool-backed no-argument ops, same
 #: shape as the original five, riding the runtime's own gaze-lock intent
-#: kinds.
+#: kinds. ``think`` (task t7) is the sixth: published like ``look_at_face``
+#: for the same reason (finding L4 — the model reaches for the name it would
+#: guess), a thin ``run_behavior`` alias over the runtime's ``thoughtful``
+#: entry.
 ACTION_SET: tuple[str, ...] = (
     RUN_BEHAVIOR,
     DECLARE_GOAL,
@@ -122,6 +126,7 @@ ACTION_SET: tuple[str, ...] = (
     RELEASE_FACE,
     LOOK_AT_FACE,
     LOOK_AT_SOUND,
+    THINK,
     FORGE,
     USE_SKILL,
     AUTHOR_RULE,
@@ -164,6 +169,30 @@ GAZE_ALIAS_BEHAVIORS: dict[str, str] = {
 #: How long a gaze one-shot runs when the model names no duration — the same
 #: "about 2 seconds" the ``run_behavior`` description already advertises.
 DEFAULT_GAZE_DURATION_S = 2.0
+
+#: The runtime behavior behind the ``think`` alias tool (task t7): a small
+#: "looking up and aside" glance, published like ``look_at_face`` for the same
+#: reason (finding L4). The library entry is pitch 8 up, yaw 10 aside, roll 5,
+#: over 3 seconds — the yaw is the only axis this tool controls; the rest is
+#: baked into the runtime's own ``thoughtful`` behaviour.
+THINK_BEHAVIOR = "thoughtful"
+
+#: Seconds a ``think`` glance holds — the runtime library entry's own duration.
+THINK_DURATION_S = 3.0
+
+#: The yaw offset (degrees) a ``think`` glance uses for each side.
+#:
+#: Sign convention (not settled anywhere else in this module, so decided and
+#: recorded here): reachy-mini-cli's ``face_lock.py`` says "a face at large x
+#: (the robot's right) yields a negative yaw" — i.e. in the runtime, POSITIVE
+#: yaw turns the head toward the robot's OWN left. So looking to the robot's
+#: left is ``+10.0`` and to its right is ``-10.0``.
+THINK_YAW_LEFT = 10.0
+THINK_YAW_RIGHT = -10.0
+
+#: Refusal when ``think`` is called with a ``side`` that is neither 'left' nor
+#: 'right'.
+THINK_SIDE_INVALID_REASON = "'side' must be 'left' or 'right' when given"
 
 #: Top-level fields a goto command may carry.
 _GOTO_FIELDS = frozenset({"label", "head", "antennas", "body_yaw", "duration", "interpolation"})
@@ -306,9 +335,68 @@ UNMUTE_OP = "unmute"
 #: just a hand-release) also restores the body's voice.
 QUIET_TICK_S = 1.0
 
+#: The EFFECTFUL tools refused when :class:`~reachy_nova.harness.attention.
+#: AttentionState` says the model is acting on ambient, nameless speech while
+#: cold (task t7) — see :func:`_is_cold_and_nameless`. Deliberately excludes
+#: the read-only/voice-shaping tools (``recall_senses``, the quiet pair, the
+#: voice-level trio, ``release_face``): none of those moves the body or
+#: durable state on someone's behalf who never addressed the robot.
+COLD_REFUSED_TOOLS: frozenset[str] = frozenset(
+    {
+        BROWSE,
+        FORGE,
+        USE_SKILL,
+        AUTHOR_RULE,
+        GOTO,
+        RUN_BEHAVIOR,
+        DECLARE_GOAL,
+        SET_MODE,
+        SET_INHIBITION,
+        CREATE_RULE,
+        ENROLL_FACE,
+        LOCK_FACE,
+        LOOK_AT_FACE,
+        LOOK_AT_SOUND,
+        THINK,
+    }
+)
+
+#: Refusal reason for a :data:`COLD_REFUSED_TOOLS` member called while the
+#: robot is cold and the speech it would be acting on never named it.
+NOT_ADDRESSED_REASON = "not addressed — the robot was not spoken to by name"
+
 
 class ToolRefused(ValueError):
     """A pre-flight refusal: nothing was written to the spool."""
+
+
+def _is_cold_and_nameless(attention: object | None) -> bool:
+    """Is the model acting on ambient, nameless speech while cold?
+
+    ``attention`` is duck-typed as :class:`~reachy_nova.harness.attention.
+    AttentionState` — ``None`` (no attention wired) always answers ``False``,
+    the same fail-open shape every other absent-component check in this module
+    uses; a harness that has not opted into cold-refusal must behave exactly
+    as it did before this existed.
+
+    True only when ALL of: the model is not in a warm (named) window; the
+    last USER transcript it saw did not name the robot; a transcript actually
+    happened (nothing to be nameless about otherwise); and nothing has
+    injected into the conversation SINCE that transcript — an inject after the
+    nameless transcript means the model has fresh grounds of its own to act
+    on, not just an overheard sentence.
+    """
+    if attention is None:
+        return False
+    return (
+        not attention.warm
+        and attention.last_transcript_named is False
+        and attention.last_transcript_at is not None
+        and (
+            attention.last_inject_at is None
+            or attention.last_transcript_at > attention.last_inject_at
+        )
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -595,6 +683,23 @@ TOOL_SPECS: list[dict] = [
                     "type": "number",
                     "description": "Seconds to hold the turn. Omit for the "
                     f"default ({DEFAULT_GAZE_DURATION_S:g}).",
+                },
+            },
+            "required": [],
+        },
+    ),
+    _spec(
+        THINK,
+        "Look up and aside for a moment, as if thinking. Optional side "
+        "'left' or 'right'; alternates by default.",
+        {
+            "type": "object",
+            "properties": {
+                "side": {
+                    "type": "string",
+                    "enum": ["left", "right"],
+                    "description": "Which way to glance. Omit to alternate sides "
+                    "automatically.",
                 },
             },
             "required": [],
@@ -999,6 +1104,21 @@ def _build_look_at_sound(args: Mapping) -> dict:
     return _build_gaze_alias(LOOK_AT_SOUND, args)
 
 
+def _build_think(side: str) -> dict:
+    """``think`` — the ``thoughtful`` one-shot, for the given resolved *side*.
+
+    A thin ``run_behavior`` alias exactly like the gaze pair above (finding
+    L4 again) — built through :func:`_build_run_behavior` so the two paths
+    never drift apart. *side* is already resolved (an explicit valid value or
+    the instance's alternation pick) by the time this runs; see
+    :meth:`IntentTools._think_tool`.
+    """
+    yaw = THINK_YAW_LEFT if side == "left" else THINK_YAW_RIGHT
+    return _build_run_behavior(
+        {"name": THINK_BEHAVIOR, "params": {"yaw": yaw}, "duration": THINK_DURATION_S}
+    )
+
+
 _BUILDERS = {
     RUN_BEHAVIOR: _build_run_behavior,
     DECLARE_GOAL: _build_declare_goal,
@@ -1044,6 +1164,7 @@ class IntentTools:
         history: object | None = None,
         quiet: QuietState | None = None,
         lock_state: LockState | None = None,
+        attention: object | None = None,
     ) -> None:
         # ``forge``/``use_skill`` (deviation d1) drive a ForgeLeg handle the
         # same way ``browse`` drives a NovaBrowser: injected, and refused with
@@ -1073,6 +1194,16 @@ class IntentTools:
         # supervisor._find_lock_state) without a second constructor argument
         # threaded through every layer between them.
         self.lock_state = lock_state
+        # ``execute`` (task t7) refuses the effectful tools when this reads
+        # cold-and-nameless (see ``_is_cold_and_nameless``) — a model acting on
+        # ambient speech nobody addressed to it. ``None`` (the default) is the
+        # pre-t7 shape: everything stays allowed, same as before this existed.
+        self._attention = attention
+        # ``think`` (task t7) alternates sides when the model omits 'side' —
+        # a small toggle, not full AppState: it only needs to remember which
+        # side it glanced last, and a restart forgetting that is harmless.
+        self._think_lock = threading.Lock()
+        self._think_next_left = True
         # Did WE put SPEAK_BEHAVIOR into the runtime's inhibited set? Only then
         # may we take it back out: somebody else holding 'speak' down (an
         # operator, a rule) must survive our release untouched.
@@ -1183,6 +1314,10 @@ class IntentTools:
             )
         if not isinstance(params, Mapping):
             raise ToolRefused(f"arguments for {tool_name!r} must be an object (got {params!r})")
+        if tool_name in COLD_REFUSED_TOOLS and _is_cold_and_nameless(self._attention):
+            raise ToolRefused(NOT_ADDRESSED_REASON)
+        if tool_name == THINK:
+            return self._think_tool(params)
         if tool_name == CREATE_RULE:
             return self._create_rule(params)
         if tool_name == BROWSE:
@@ -1201,6 +1336,23 @@ class IntentTools:
             return self._lock_face_tool(tool_name, params)
         return self.submit_and_await(_BUILDERS[tool_name](params))
 
+    def _think_tool(self, params: Mapping) -> dict:
+        """``think`` — resolve 'side' (explicit or alternated), then spool it.
+
+        An explicit 'side' is validated and used as-is, and does NOT perturb
+        the alternation — only an omitted 'side' consumes a toggle flip, so a
+        model that occasionally names a side explicitly still alternates
+        normally on the calls it leaves to us.
+        """
+        side = params.get("side")
+        if side is not None and side not in ("left", "right"):
+            raise ToolRefused(THINK_SIDE_INVALID_REASON)
+        if side is None:
+            with self._think_lock:
+                side = "left" if self._think_next_left else "right"
+                self._think_next_left = not self._think_next_left
+        return self.submit_and_await(_build_think(side))
+
     def _lock_face_tool(self, tool_name: str, params: Mapping) -> dict:
         """``lock_face``/``release_face`` — spool round-trip, then mirror the
         engine's CONFIRMED verdict into :attr:`lock_state`.
@@ -1215,7 +1367,9 @@ class IntentTools:
         result = self.submit_and_await(_BUILDERS[tool_name](params))
         if self.lock_state is not None and result.get("ok") is True:
             if tool_name == LOCK_FACE:
-                self.lock_state.mark_locked()
+                # The MODEL asked for this lock via the tool — as opposed to
+                # the harness taking one on its own initiative ("auto").
+                self.lock_state.mark_locked(owner="model")
             else:
                 self.lock_state.mark_released("requested")
         return result
@@ -1291,8 +1445,12 @@ class IntentTools:
             raise ToolRefused(BROWSE_DISABLED_REASON)
         if self._browser is None:
             raise ToolRefused(BROWSE_NOT_WIRED_REASON)
-        self._browser.queue_task(instruction, url)
-        return {"ok": True, "queued": True, "instruction": instruction, "url": url}
+        result = self._browser.queue_task(instruction, url)
+        if result is None:
+            # An older NovaBrowser stub that predates the typed return
+            # (task t2) — preserve the shape this tool always reported.
+            return {"ok": True, "queued": True, "instruction": instruction, "url": url}
+        return result
 
     # -- voice level (task t10) --------------------------------------------
 

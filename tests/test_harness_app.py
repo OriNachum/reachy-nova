@@ -628,6 +628,7 @@ PRE_T14_TOOL_NAMES = [
     "release_face",
     "look_at_face",
     "look_at_sound",
+    "think",
     "forge",
     "use_skill",
     "author_rule",

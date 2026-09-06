@@ -27,6 +27,7 @@ out of scope for this repo), `reachy_nova/harness/lock_state.py`
 | `run_behavior("look-at-face")` | one-shot: glance at the person in front of you | yes — an ordinary `run_behavior` intent |
 | `lock_face` | standing: keep the gaze on whoever the runtime already knows, until released | yes — its own intent kind |
 | `release_face` | stop a standing lock, return to normal look-around | yes — its own intent kind |
+| `think` | one-shot: look up and aside for a moment, as if thinking; optional `side` ('left'/'right'), alternates by default | yes — an ordinary `run_behavior` intent (`"thoughtful"`) |
 
 The two glances are ordinary `run_behavior` calls naming a gesture the
 runtime's library ships — the gaze one-shots default to about 2 seconds and
