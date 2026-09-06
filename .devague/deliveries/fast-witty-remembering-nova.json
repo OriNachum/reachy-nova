@@ -2,7 +2,7 @@
   "plan_slug": "fast-witty-remembering-nova",
   "schema_version": 2,
   "created": "2026-09-05T22:22:38Z",
-  "updated": "2026-09-06T00:17:49Z",
+  "updated": "2026-09-06T00:47:29Z",
   "deviations": [
     {
       "id": "d1",
@@ -170,6 +170,21 @@
       "status": "proposed",
       "classification": "acceptable",
       "seq": 38
+    },
+    {
+      "id": "d13",
+      "what": "Post-deploy fix fc2178b: Bedrock cuts a Nova 2 Sonic stream with no INTERACTIVE content for 295 s ('Please ensure gaps between audio bytes and interactive content are less than 295 seconds'; three deaths at exactly 296 s of quiet, 01:14/01:30/01:35). A quiet idle session now rotates cleanly after 270 s without interactive content (NOVA_SONIC_IDLE_ROTATE_S), and the cutoff, if it still hits, restarts with no backoff. The Lite reactor also refuses an exact repeat of one of its recent lines (falls back to the template, 'lite-repeat') after 'Thank you!' came back twice in four pats despite the prompt.",
+      "task_ref": "t12",
+      "reason": "The spec's rotation (c12) targeted the 8-minute connection limit; the 295 s interactive-content rule is a second, undocumented Bedrock limit that only a quiet room exposes.",
+      "affects": [
+        "t12",
+        "t11",
+        "t18"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable",
+      "seq": 39
     }
   ],
   "evidence": [
