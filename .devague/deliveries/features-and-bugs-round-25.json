@@ -2,7 +2,7 @@
   "plan_slug": "features-and-bugs-round-25",
   "schema_version": 2,
   "created": "2026-09-06T07:50:25Z",
-  "updated": "2026-09-06T09:57:36Z",
+  "updated": "2026-09-06T10:45:33Z",
   "deviations": [
     {
       "id": "d1",
@@ -36,6 +36,54 @@
       "status": "proposed",
       "classification": "acceptable",
       "seq": 42
+    },
+    {
+      "id": "d4",
+      "what": "t15's runtime name-list change (c16) is not delivered: reverted upstream after merge",
+      "task_ref": "t15",
+      "reason": "reachy-mini-cli PR #178 was split upstream to select_face only (main f2515e0, 'split/178-select-face-only') and the names commit a8535a2 was reverted on the device branch (11db40d); DEFAULT_NAMES on main and on the robot are back to ('reachy', 'robot'). The harness side of 'answers to Nova' (persona, attention window opened by 'nova') is delivered; the runtime's name lists are not. Who reverted and why is not recorded in the commit \u2014 to confirm with Ori",
+      "affects": [],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "needs-follow-up",
+      "seq": 43
+    },
+    {
+      "id": "d5",
+      "what": "the conversation layer now opens only on someone speaking (Nova's own voice renews but never opens), and the antennas sway (amp 10, period 5, re-issued every 50 s) while the automatic lock is held \u2014 commit 7dfdba6",
+      "task_ref": "t9",
+      "reason": "live 2026-09-06 (Ori: 'It feels rigid now. No liveness.'): the runtime's face lock inhibits feel-alive entirely and Nova's own utterances opened a conversation, so the lock was held almost continuously and nothing breathed or swayed; c7's 'Nova speaking counts as conversation activity' is narrowed to renew-only (only a USER transcript opens one), and an antenna-sway is kept running while the automatic lock is held (a runtime-side fix to the lock's inhibits was not pursued: the runtime repo is off limits per Ori)",
+      "affects": [],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable",
+      "seq": 44
+    },
+    {
+      "id": "d6",
+      "what": "t15's runtime name-list change (c16) moved to a configurable path: reachy-mini-cli #177 (the runtime agent) adds a top-level names overlay table and a name_mentioned sense field; the harness mirrors both in rules_overlay.py (issue #27, commit 67d5d75) and will write names = [\"nova\"] into the operator head once #177 is on the device \u2014 supersedes d4's 'reverted upstream' reading",
+      "task_ref": "t15",
+      "reason": "operator decision on reachy-mini-cli #175: the runtime hardcodes no peer's name, so #178 was split and the names commit reverted; every agent manages its own repo, the interface is issues",
+      "affects": [
+        "t17"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "needs-follow-up",
+      "seq": 45
+    },
+    {
+      "id": "d7",
+      "what": "the face-detection load fix on the device is a systemd drop-in over reachy-mini-cli #180's knobs (REACHY_FACE_DETECT_INTERVAL=1.0, REACHY_FACE_DETECT_MAX_WIDTH=640): 0.5 s on the 640-px frame measured a 9.9 Hz tick, 41 overruns/min and engine-heartbeat flaps every ~10 s; 1.0 s measures 27.7 Hz, 11 overruns/min, no flaps",
+      "task_ref": "t20",
+      "reason": "Ori: 'look at me works, but very slow'; the CM4 tick fell to ~7 Hz under full-frame detection every 0.5 s; #180 and the device-branch merge cb1ab7c predate the every-agent-owns-its-repo rule and are the runtime agent's to keep or drop",
+      "affects": [
+        "t19"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "classification": "acceptable",
+      "seq": 46
     }
   ],
   "evidence": [
@@ -779,6 +827,101 @@
       "status": "proposed",
       "superseded": false,
       "seq": 41
+    },
+    {
+      "id": "e40",
+      "obligation_ref": "o4",
+      "test_ref": "robot journals 11:30:33-11:31:20 BST (harness pid 24999 @ 61bde6f, runtime 0.52.1 detect 1.0 s/640 px), Ori in view",
+      "behavior_text": "'noah look at me' -> look_at_sound ok, lock_face ok on the first attempt (locked after=0.2s attempts=1), liveness sway ok=true under the lock, held through the conversation, motion/face-lost reported twice (absent_s=3.0) with the person present, runtime release on fade",
+      "contract_text": "first transcript or utterance -> look_at_sound then lock_face, retried with backoff, held through gaps, released on fade",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "live journal lines at the named commit with the operator at the desk",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T10:30:33Z",
+        "commit": "61bde6f"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 47
+    },
+    {
+      "id": "e41",
+      "obligation_ref": "o18",
+      "test_ref": "harness journal 11:30:33 and 11:34:26 BST @ 61bde6f",
+      "behavior_text": "'noah look at me' opened the window by=noah; a nameless 'oh' from cold was dropped not-addressed (utterance dropped count=5 for the session)",
+      "contract_text": "cold nameless replies dropped like quiet; a name opens 45 s",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "live journal lines at the named commit",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T10:34:26Z",
+        "commit": "61bde6f"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 48
+    },
+    {
+      "id": "e42",
+      "obligation_ref": "o27",
+      "test_ref": "MQTT reachy/events/sense/snapshot 10 s samples on the robot, 10:27-10:38Z, plus runtime overrun and harness heartbeat counts",
+      "behavior_text": "230/230 and 191/191 snapshots carried a frame; tick 23.0 Hz at detect 1.0 s; 9.9 Hz at 0.5 s with 41 overruns/min and engine-heartbeat flaps every ~10 s; 27.7 Hz back at 1.0 s with 11 overruns/min and no flaps",
+      "contract_text": "the camera state at acceptance is recorded from a live sample",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "live samples on the device at the named commit",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T10:38:00Z",
+        "commit": "61bde6f"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 49
+    },
+    {
+      "id": "e43",
+      "obligation_ref": "o28",
+      "test_ref": "tests/test_harness_rules_overlay.py::test_an_operator_names_table_is_accepted_and_preserved, ::test_an_operator_rule_keyed_on_name_mentioned_is_accepted, ::test_nova_may_author_a_rule_keyed_on_name_mentioned, ::test_a_bad_operator_names_table_refuses_the_write_untouched (8 cases), ::test_validate_names_normalises_like_the_runtime, ::test_the_names_bounds_are_the_runtimes",
+      "behavior_text": "a names table in the operator head survives a managed-block write byte-exact; name_mentioned predicates pass; eight malformed tables refuse the write naming the entry with the file untouched and no temp file left; bounds pinned to the runtime's rules.py (8 names, 3 letters)",
+      "contract_text": "an operator names table and a rule keyed on name_mentioned pass the overlay's whole-file validation; a malformed table refuses the write with the file untouched",
+      "evidence_type": "automated",
+      "strength": "execution",
+      "strength_basis": "13 tests ran red before the change and green after; full suite 2096 passed",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T10:42:00Z",
+        "commit": "67d5d75"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 50
+    },
+    {
+      "id": "e44",
+      "obligation_ref": "o14",
+      "test_ref": "robot journal 11:43:30 BST after restart @ 67d5d75",
+      "behavior_text": "switches chunked_playback=on lite_reactions=on memory=on face_hold=on think_posture=on attention_gate=on persona=default; persona chars=1796; face-nod tombstone unchanged; start-hygiene release and clear goal ok",
+      "contract_text": "three fail-open switches in the start-up line",
+      "evidence_type": "observation",
+      "strength": "execution",
+      "strength_basis": "live journal at the named commit",
+      "outcome": "pass",
+      "run": {
+        "timestamp": "2026-09-06T10:43:30Z",
+        "commit": "67d5d75"
+      },
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false,
+      "seq": 51
     }
   ],
   "deltas": [
@@ -875,6 +1018,48 @@
       ],
       "evidence_refs": [
         "e36"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false
+    },
+    {
+      "id": "b8",
+      "kind": "amended",
+      "behavior_text": "under a 1.0 s detection interval the runtime's face box (1.5 s TTL) blanks on a single missed detection: motion/face-lost fired twice (absent_s=3.0) in a 30 s hold with the person present; the TTL should track the interval (runtime side, reachy-mini-cli #181/#180)",
+      "caused_by": [
+        "c41"
+      ],
+      "evidence_refs": [
+        "e40"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false
+    },
+    {
+      "id": "b9",
+      "kind": "added",
+      "behavior_text": "the head settles about a third of the way to the face and chases it one detection cycle at a time: the runtime's face-lock aim is open-loop (absolute target = box offset x 20 deg against an 87 deg camera FOV), filed as reachy-mini-cli #181; Ori: 'It follows me in a delay', 'not focusing on me on center of the camera'",
+      "caused_by": [
+        "c7"
+      ],
+      "evidence_refs": [
+        "e40"
+      ],
+      "origin": "llm",
+      "status": "proposed",
+      "superseded": false
+    },
+    {
+      "id": "b10",
+      "kind": "added",
+      "behavior_text": "the overlay validator accepts the runtime's names table (at most 8 letters-only names of 3+ characters) and a name_mentioned predicate; the names write itself is deferred until reachy-mini-cli #177 is on the device, because the current runtime refuses the whole file",
+      "caused_by": [
+        "c16"
+      ],
+      "evidence_refs": [
+        "e43"
       ],
       "origin": "llm",
       "status": "proposed",
