@@ -38,18 +38,36 @@ def normalise_history(blocks: list[dict]) -> list[dict[str, str]]:
     """
     cleaned: list[dict[str, str]] = []
     for block in blocks or []:
-        if not isinstance(block, dict):
+        clean = _clean_block(block)
+        if clean is None:
             continue
-        role = str(block.get("role", "") or "").strip().upper()
-        text = str(block.get("text", "") or "").strip()
-        if role not in HISTORY_ROLES or not text:
-            continue
-        if cleaned and cleaned[-1]["role"] == role:
-            cleaned[-1] = {"role": role, "text": cleaned[-1]["text"] + "\n" + text}
-        else:
-            cleaned.append({"role": role, "text": text})
+        _append_merging_roles(cleaned, clean)
     while cleaned and cleaned[0]["role"] != "USER":
         cleaned.pop(0)
     if len(cleaned) > 1 and cleaned[-1]["role"] == "USER":
         cleaned.pop()
     return cleaned
+
+
+def _clean_block(block: object) -> dict[str, str] | None:
+    """``{role, text}`` with the role upper-cased and the text stripped, or ``None``.
+
+    ``None`` for anything that is not a dict, carries a role outside
+    ``USER``/``ASSISTANT``, or has blank text — the drop rules above.
+    """
+    if not isinstance(block, dict):
+        return None
+    role = str(block.get("role", "") or "").strip().upper()
+    text = str(block.get("text", "") or "").strip()
+    if role not in HISTORY_ROLES or not text:
+        return None
+    return {"role": role, "text": text}
+
+
+def _append_merging_roles(cleaned: list[dict[str, str]], block: dict[str, str]) -> None:
+    """Append *block*, or merge it into the tail when the tail has the same role."""
+    if cleaned and cleaned[-1]["role"] == block["role"]:
+        merged_text = cleaned[-1]["text"] + "\n" + block["text"]
+        cleaned[-1] = {"role": block["role"], "text": merged_text}
+    else:
+        cleaned.append(block)

@@ -156,7 +156,7 @@ class Ledger:
                     continue
                 try:
                     record = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
+                except ValueError:  # json.JSONDecodeError is a ValueError
                     self.malformed += 1
                     dropped += 1
                     continue
@@ -199,7 +199,7 @@ class Ledger:
                 continue
             try:
                 record = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
+            except ValueError:  # json.JSONDecodeError is a ValueError
                 self.malformed += 1
                 continue
             if not isinstance(record, dict):

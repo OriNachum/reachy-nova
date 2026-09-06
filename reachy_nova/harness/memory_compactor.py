@@ -142,19 +142,25 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     start = text.find("{")
     if start == -1:
         return None
+    end = _balanced_object_end(text, start)
+    if end == -1:
+        return None
+    return _parse_json_dict(text[start : end + 1])
 
+
+def _balanced_object_end(text: str, start: int) -> int:
+    """Index of the ``}`` that closes the ``{`` at *start*, or ``-1``.
+
+    Brace depth is tracked outside string literals only; inside one, the
+    scanner just follows the escape/close-quote state until the literal ends.
+    """
     depth = 0
     in_string = False
     escape = False
     for i in range(start, len(text)):
         ch = text[i]
         if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
+            in_string, escape = _string_state_after(ch, escape)
             continue
         if ch == '"':
             in_string = True
@@ -163,13 +169,28 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
         elif ch == "}":
             depth -= 1
             if depth == 0:
-                candidate = text[start : i + 1]
-                try:
-                    parsed = json.loads(candidate)
-                except (json.JSONDecodeError, ValueError):
-                    return None
-                return parsed if isinstance(parsed, dict) else None
-    return None
+                return i
+    return -1
+
+
+def _string_state_after(ch: str, escape: bool) -> tuple[bool, bool]:
+    """``(in_string, escape)`` after reading *ch* inside a JSON string literal."""
+    if escape:
+        return True, False
+    if ch == "\\":
+        return True, True
+    if ch == '"':
+        return False, False
+    return True, False
+
+
+def _parse_json_dict(candidate: str) -> dict[str, Any] | None:
+    """*candidate* parsed as JSON when it is an object, else ``None``."""
+    try:
+        parsed = json.loads(candidate)
+    except ValueError:  # json.JSONDecodeError is a ValueError
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 # --------------------------------------------------------------------------- #
@@ -194,21 +215,33 @@ def _coerce_entries(raw: Any, now: float, *, with_kind: bool) -> list[dict[str, 
         return []
     out: list[dict[str, Any]] = []
     for entry in raw:
-        if isinstance(entry, str):
-            text, kind = entry, ""
-        elif isinstance(entry, dict):
-            text = entry.get("text")
-            kind = entry.get("kind", "")
-        else:
-            continue
-        if not isinstance(text, str) or not text.strip():
-            continue
-        record: dict[str, Any] = {"text": text.strip(), "ts": now}
-        if with_kind:
-            kind = kind.strip().lower() if isinstance(kind, str) else ""
-            record["kind"] = kind if kind in _VALID_ITEM_KINDS else "fact"
-        out.append(record)
+        record = _coerce_entry(entry, now, with_kind=with_kind)
+        if record is not None:
+            out.append(record)
     return out
+
+
+def _coerce_entry(entry: Any, now: float, *, with_kind: bool) -> dict[str, Any] | None:
+    """One ``{text, ts[, kind]}`` record from a string or dict entry, else ``None``."""
+    if isinstance(entry, str):
+        text, kind = entry, ""
+    elif isinstance(entry, dict):
+        text = entry.get("text")
+        kind = entry.get("kind", "")
+    else:
+        return None
+    if not isinstance(text, str) or not text.strip():
+        return None
+    record: dict[str, Any] = {"text": text.strip(), "ts": now}
+    if with_kind:
+        record["kind"] = _coerce_kind(kind)
+    return record
+
+
+def _coerce_kind(kind: Any) -> str:
+    """A known item kind, lower-cased; blank, non-string or unknown means ``fact``."""
+    kind = kind.strip().lower() if isinstance(kind, str) else ""
+    return kind if kind in _VALID_ITEM_KINDS else "fact"
 
 
 def _merge_entries(
@@ -510,7 +543,7 @@ class MemoryCompactor:
             return {"topics": [], "items": []}
         try:
             data = json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
+        except ValueError:  # json.JSONDecodeError is a ValueError
             return {"topics": [], "items": []}
         if not isinstance(data, dict):
             return {"topics": [], "items": []}

@@ -196,7 +196,8 @@ def test_act_enabled_adds_a_supervised_browser_wired_for_progress(monkeypatch):
     assert isinstance(adapter.browser, NovaBrowser)
     # IntentTools wired the browser handle AND its progress narration.
     assert adapter.browser.on_progress == sonic.inject_text
-    assert hasattr(adapter, "start") and hasattr(adapter, "stop")
+    assert hasattr(adapter, "start")
+    assert hasattr(adapter, "stop")
     # core 3 + tools + network leg (2) + lite reactor + bus + compactor + browser
     assert len(components) == 10
 
@@ -230,7 +231,8 @@ def test_omni_model_set_adds_the_vision_leg_wired_to_bus_and_sonic(monkeypatch):
     leg._on_answer("A person sits at a desk. " * 30)
     assert len(seen) == 1
     text, sense_class = seen[0]
-    assert text.startswith("(you glance around: ") and text.endswith(") (react briefly if at all)")
+    assert text.startswith("(you glance around: ")
+    assert text.endswith(") (react briefly if at all)")
     assert sense_class == "vision"
     assert len(text) < 320
     # core 3 + tools + network leg (2) + lite reactor + bus + compactor + vision
@@ -592,7 +594,8 @@ def test_browser_result_callback_reaches_the_conversation(monkeypatch):
     inner = getattr(browser, "browser", None) or getattr(browser, "_browser")
     assert inner.on_result is not None
     inner.on_result("The answer is 42.")
-    assert len(injected) == 1 and "The answer is 42." in injected[0]
+    assert len(injected) == 1
+    assert "The answer is 42." in injected[0]
 
 
 def test_l5_the_prompt_tells_nova_when_to_release_face_and_recall_senses():
@@ -1100,7 +1103,8 @@ def test_the_ledger_records_only_delivered_senses():
     assert sonic.on_deferred_delivered is not None
     sonic.on_deferred_delivered("(just now, while you were talking: someone petted you)", "pat")
     records = _ledger_records()
-    assert len(records) == 1 and records[0]["sense_class"] == "pat"
+    assert len(records) == 1
+    assert records[0]["sense_class"] == "pat"
 
 
 def test_vision_cues_go_through_the_ledger_wrapper():
@@ -1113,9 +1117,11 @@ def test_vision_cues_go_through_the_ledger_wrapper():
     if not app_vision:
         pytest.skip("vision leg not built in this environment")
     app_vision[0]._on_answer("A cat on the desk.")
-    assert seen and seen[0][1] == "vision"
+    assert seen
+    assert seen[0][1] == "vision"
     records = _ledger_records()
-    assert records and records[-1]["sense_class"] == "vision"
+    assert records
+    assert records[-1]["sense_class"] == "vision"
 
 
 def test_lite_vocalizations_play_through_the_speaker():
@@ -1129,4 +1135,6 @@ def test_lite_vocalizations_play_through_the_speaker():
     fed = []
     speaker.on_audio_chunk = lambda samples: fed.append(samples)
     reactor._on_vocalize("purr")
-    assert len(fed) == 1 and fed[0].dtype.name == "float32" and len(fed[0]) > 2400
+    assert len(fed) == 1
+    assert fed[0].dtype.name == "float32"
+    assert len(fed[0]) > 2400

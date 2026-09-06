@@ -522,7 +522,8 @@ def test_queued_and_played_sense_lines_carry_duration(stop_event, caplog, chunke
         rendered = [rec.getMessage() for rec in caplog.records]
         queued = [line for line in rendered if "stage=speak" in line and "queued" in line]
         played = [line for line in rendered if "stage=speak" in line and "played" in line]
-        assert queued and "0.10" in queued[0]
+        assert queued
+        assert "0.10" in queued[0]
         assert played
     finally:
         stop_event.set()
@@ -934,7 +935,8 @@ def test_a_failed_chunk_delete_is_one_named_line_and_playback_continues(
             if "reason=chunk-delete-failed" in rec.getMessage()
         ]
         assert len(drops) == 1, "the delete failure is latched, not per chunk"
-        assert "stage=speak" in drops[0] and "source=nova" in drops[0]
+        assert "stage=speak" in drops[0]
+        assert "source=nova" in drops[0]
         assert speaker.chunks_played == 4  # every chunk still played
         assert speaker.playback_failures == 0  # a failed delete is not mouth loss
     finally:
@@ -1258,9 +1260,11 @@ def test_a_failed_chunk_delete_is_retried_then_abandoned_with_a_name(caplog):
 
     speaker = SonicSpeaker(gate=EchoGate(margin_s=0.0), poster=lambda *a: None, deleter=flaky)
     speaker._delete_file("nova-1-1.wav")
-    assert speaker.files_deleted == 0 and speaker.delete_failures == 1
+    assert speaker.files_deleted == 0
+    assert speaker.delete_failures == 1
     speaker._reap_due()  # the retry backlog is drained on the next reap
-    assert speaker.files_deleted == 1 and calls == ["nova-1-1.wav", "nova-1-1.wav"]
+    assert speaker.files_deleted == 1
+    assert calls == ["nova-1-1.wav", "nova-1-1.wav"]
 
     always = SonicSpeaker(
         gate=EchoGate(margin_s=0.0), poster=lambda *a: None, deleter=lambda b, n: (_ for _ in ()).throw(RuntimeError("down"))

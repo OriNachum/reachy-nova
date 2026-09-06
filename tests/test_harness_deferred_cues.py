@@ -582,7 +582,9 @@ class TestDrainOnUtteranceEnd:
 
         texts = [e["textInput"]["content"] for e in sent if "textInput" in e]
         assert len(texts) == 3
-        assert "a pat" in texts[0] and "a face" in texts[1] and "a sound" in texts[2]
+        assert "a pat" in texts[0]
+        assert "a face" in texts[1]
+        assert "a sound" in texts[2]
 
     def test_at_most_four_cues_drain_per_transition(self, caplog):
         sonic = self._speaking_sonic()

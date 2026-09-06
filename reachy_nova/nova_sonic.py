@@ -36,6 +36,9 @@ INPUT_SAMPLE_RATE = 16000
 OUTPUT_SAMPLE_RATE = 24000
 CHUNK_DURATION_MS = 100
 INPUT_CHUNK_SIZE = int(INPUT_SAMPLE_RATE * CHUNK_DURATION_MS / 1000)
+# mediaType of every TEXT content block on the stream (system prompt, history
+# replay, injected text, tool results) and of Sonic's text output.
+TEXT_MEDIA_TYPE = "text/plain"
 
 # Resilience watchdogs (see _check_clock_step / _check_response_liveness).
 # The robot has no RTC: it can boot with a stale clock and have NTP step time
@@ -188,6 +191,23 @@ DEFAULT_ROTATE_DEADLINE_S = 470.0
 DEFAULT_HISTORY_MAX_BLOCKS = 8
 # Roles the Nova 2 input-events page accepts for replayed history content.
 HISTORY_ROLES = ("USER", "ASSISTANT")
+
+
+def _warn_unsupported_history_roles(blocks: list) -> None:
+    """Log a NAMED warning for every history block whose role Sonic rejects.
+
+    A pure logging pass, run before ``normalise_history`` drops such blocks
+    silently: the operator gets to see *which* role was wrong rather than
+    just a shorter replay. Non-dict entries and empty roles are ignored here
+    (the normaliser handles them).
+    """
+    for block in blocks:
+        role = str(block.get("role", "") or "").strip().upper() if isinstance(block, dict) else ""
+        if role and role not in HISTORY_ROLES:
+            logger.warning(
+                f"history block skipped: role={block.get('role')!r} is not one of "
+                f"{'/'.join(HISTORY_ROLES)}"
+            )
 
 
 def _idle_rotate_s() -> float:
@@ -732,13 +752,7 @@ class NovaSonic:
             )
             blocks = []
 
-        for block in blocks:
-            role = str(block.get("role", "") or "").strip().upper() if isinstance(block, dict) else ""
-            if role and role not in HISTORY_ROLES:
-                logger.warning(
-                    f"history block skipped: role={block.get('role')!r} is not one of "
-                    f"{'/'.join(HISTORY_ROLES)}"
-                )
+        _warn_unsupported_history_roles(blocks)
         # Defensive shaping at the SENDER: USER first, roles alternating, no
         # trailing USER — Bedrock kills the whole stream otherwise (live
         # incident 2026-09-06, see harness/history_blocks.py).
@@ -758,7 +772,7 @@ class NovaSonic:
                     "type": "TEXT",
                     "interactive": False,
                     "role": role,
-                    "textInputConfiguration": {"mediaType": "text/plain"},
+                    "textInputConfiguration": {"mediaType": TEXT_MEDIA_TYPE},
                 }
             })
             await self._send({
@@ -811,7 +825,7 @@ class NovaSonic:
         logger.info(f"Sending promptStart (voice={self.voice_id})")
         prompt_start = {
             "promptName": self._prompt_name,
-            "textOutputConfiguration": {"mediaType": "text/plain"},
+            "textOutputConfiguration": {"mediaType": TEXT_MEDIA_TYPE},
             "audioOutputConfiguration": {
                 "mediaType": "audio/lpcm",
                 "sampleRateHertz": OUTPUT_SAMPLE_RATE,
@@ -837,7 +851,7 @@ class NovaSonic:
                 "type": "TEXT",
                 "interactive": True,
                 "role": "SYSTEM",
-                "textInputConfiguration": {"mediaType": "text/plain"},
+                "textInputConfiguration": {"mediaType": TEXT_MEDIA_TYPE},
             }
         })
         await self._send({
@@ -1437,7 +1451,7 @@ class NovaSonic:
                         "type": "TEXT",
                         "interactive": True,
                         "role": "USER",
-                        "textInputConfiguration": {"mediaType": "text/plain"},
+                        "textInputConfiguration": {"mediaType": TEXT_MEDIA_TYPE},
                     }
                 })
                 await self._send({
@@ -1560,7 +1574,7 @@ class NovaSonic:
                             "toolResultInputConfiguration": {
                                 "toolUseId": tool_use_id,
                                 "type": "TEXT",
-                                "textInputConfiguration": {"mediaType": "text/plain"},
+                                "textInputConfiguration": {"mediaType": TEXT_MEDIA_TYPE},
                             },
                         }
                     })

@@ -348,7 +348,9 @@ class TestContentEndLogging:
 
         lines = _content_end_lines(caplog)
         assert len(lines) == 1
-        assert "type=" in lines[0] and "role=" in lines[0] and "stopReason=" in lines[0]
+        assert "type=" in lines[0]
+        assert "role=" in lines[0]
+        assert "stopReason=" in lines[0]
 
     def test_assistant_end_still_ends_the_speaking_state(self, caplog):
         """Logging is additive: the branch's existing effect is unchanged."""

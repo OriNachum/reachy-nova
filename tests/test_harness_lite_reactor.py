@@ -121,7 +121,7 @@ def _full_context() -> dict:
     }
 
 
-@pytest.fixture()
+@pytest.fixture
 def make_reactor():
     """Build+start a LiteReactor and guarantee it is stopped afterwards."""
     started: list[tuple[LiteReactor, threading.Event]] = []
@@ -200,7 +200,8 @@ def test_react_returns_immediately_and_delivers_well_formed_plan(
     assert "a pat on the head" in user_text  # senses
     assert "weather earlier" in user_text  # memory
     assert "playful mood" in user_text  # mood
-    assert "hey there" in user_text and "hi!" in user_text  # exchanges
+    assert "hey there" in user_text  # exchanges
+    assert "hi!" in user_text  # exchanges
 
     assert any(
         "planned" in line and "gesture=antenna-sway" in line and "latency=" in line
@@ -407,10 +408,11 @@ def test_full_queue_evicts_oldest_pending_request_with_named_drop(
 
     assert reactor.evicted == 1
     evicted_lines = _drops(caplog, lite_reactor.REASON_EVICTED)
-    assert evicted_lines and "cue-1" in evicted_lines[0]
-    assert d1.calls == [] and d2.calls == [] and d3.calls == [], (
-        "eviction must not itself deliver anything for either request"
-    )
+    assert evicted_lines
+    assert "cue-1" in evicted_lines[0]
+    assert d1.calls == [], "eviction must not itself deliver anything for either request"
+    assert d2.calls == [], "eviction must not itself deliver anything for either request"
+    assert d3.calls == [], "eviction must not itself deliver anything for either request"
 
     remaining = []
     while True:
@@ -453,7 +455,8 @@ def test_recent_lines_are_fed_back_so_the_same_cue_varies():
 
     text = _build_user_text("(someone is petting you)", {}, ["Ah, that feels nice!", "Thank you!"])
     assert "must NOT reuse" in text
-    assert "Ah, that feels nice!" in text and "Thank you!" in text
+    assert "Ah, that feels nice!" in text
+    assert "Thank you!" in text
     assert "must NOT reuse" not in _build_user_text("(someone is petting you)", {}, [])
 
 
@@ -548,7 +551,8 @@ def test_an_exact_repeat_of_a_recent_line_falls_back_to_the_template():
         deadline = _time.monotonic() + 3.0
         while len(delivered) < 2 and _time.monotonic() < deadline:
             _time.sleep(0.01)
-        assert delivered[0].startswith("(") and "Thank you!" in delivered[0]
+        assert delivered[0].startswith("(")
+        assert "Thank you!" in delivered[0]
         assert delivered[1] == "tmpl", "the repeat is replaced by the template"
         assert r.fallbacks == 1
     finally:

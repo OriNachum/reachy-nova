@@ -383,7 +383,8 @@ def test_history_returns_context_block_then_recent_exchanges_under_the_cap(tmp_p
     # Bedrock's shape: USER first, roles alternating, ends on the assistant.
     assert [b["role"] for b in blocks] == ["USER", "ASSISTANT", "USER", "ASSISTANT"]
     assert blocks[0]["text"].startswith("(earlier today")
-    assert "gardening" in blocks[0]["text"] and "wants tomato tips" in blocks[0]["text"]
+    assert "gardening" in blocks[0]["text"]
+    assert "wants tomato tips" in blocks[0]["text"]
     # only the last three exchanges are kept, so the context block stands alone
     assert blocks[0]["text"].endswith("spoken to.)")
     assert blocks[1]["text"] == "tomatoes, obviously"
@@ -431,7 +432,8 @@ def test_history_never_opens_with_the_assistant(tmp_path):
 
     blocks = compactor.history()
 
-    assert blocks and blocks[0]["role"] == "USER"
+    assert blocks
+    assert blocks[0]["role"] == "USER"
     assert [b["role"] for b in blocks] == ["USER", "ASSISTANT"]
     assert blocks[1]["text"] == "Thank you!\nLovely."
 
@@ -557,4 +559,5 @@ def test_malformed_persisted_entries_never_disable_replay(tmp_path):
     assert memory["topics"][0]["ts"] == 0.0
     assert [e["text"] for e in memory["items"]] == ["wants tips"]
     blocks = compactor.history()
-    assert blocks and "gardening" in blocks[0]["text"]
+    assert blocks
+    assert "gardening" in blocks[0]["text"]
