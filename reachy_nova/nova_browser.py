@@ -71,6 +71,25 @@ def act_enabled() -> bool:
 class NovaBrowser:
     """Manages browser automation tasks via Amazon Nova Act."""
 
+    #: Progress narration collapses to at most these two phases (issue #8):
+    #: a fresh Sonic session reading a mid-task "Working on: X..." line as a
+    #: request would call the browse tool again, so every cue is worded as a
+    #: status, never a request.
+    PROGRESS_PHASE_START = "start"
+    PROGRESS_PHASE_WORKING = "working"
+
+    #: At most one on_progress callback per this many seconds, per task
+    #: (monotonic clock) — most Sonic conversation injects inside this
+    #: window get dropped by the voice model's own throttle anyway, and a
+    #: burst read back-to-back risks looking like a fresh request.
+    PROGRESS_RATE_LIMIT_S = 10.0
+
+    #: Duplicate-instruction window for queue_task dedupe (issue #8): a
+    #: fresh Sonic session restarted mid-flight can re-issue the same browse
+    #: request; within this window (and always while the same instruction is
+    #: still the running task) the repeat is dropped rather than re-queued.
+    DEDUPE_WINDOW_S = 300
+
     def __init__(
         self,
         on_result: Callable[[str], None] | None = None,
@@ -79,6 +98,7 @@ class NovaBrowser:
         on_progress: Callable[[str], None] | None = None,
         headless: bool = True,
         chrome_channel: str = "chromium",
+        clock: Callable[[], float] | None = None,
     ):
         self.on_result = on_result
         self.on_screenshot = on_screenshot
@@ -86,6 +106,7 @@ class NovaBrowser:
         self.on_progress = on_progress
         self.headless = headless
         self.chrome_channel = chrome_channel
+        self._clock = clock or time.monotonic
 
         self._task_queue: queue.Queue[dict] = queue.Queue()
         self._thread: threading.Thread | None = None
@@ -98,6 +119,10 @@ class NovaBrowser:
         self.current_task = ""
         self.history: list[dict] = []
 
+        self._last_progress_emit_ts: float | None = None
+        # (normalised instruction, enqueue timestamp) for queue_task dedupe.
+        self._recent_instructions: list[tuple[str, float]] = []
+
     def _set_state(self, state: str) -> None:
         self.state = state
         if self.on_state_change:
@@ -107,31 +132,109 @@ class NovaBrowser:
                 pass
 
     def _emit_progress(self, message: str) -> None:
-        """Emit a progress update for narration."""
+        """Emit a progress update for narration.
+
+        The single emission point for browser progress narration. Always
+        logs (grep-able even when the callback is rate-limited), but the
+        ``on_progress`` callback itself fires at most once per
+        ``PROGRESS_RATE_LIMIT_S`` seconds per task — a burst of phase
+        messages landing inside the same second must not multiply into a
+        burst of conversation injects.
+        """
         logger.info(f"[Browser progress] {message}")
+        now = self._clock()
+        if (
+            self._last_progress_emit_ts is not None
+            and now - self._last_progress_emit_ts < self.PROGRESS_RATE_LIMIT_S
+        ):
+            return
+        self._last_progress_emit_ts = now
         if self.on_progress:
             try:
                 self.on_progress(message)
             except Exception:
                 pass
 
-    def queue_task(self, instruction: str, url: str | None = None) -> None:
+    def _phase_message(self, phase: str, instruction: str) -> str:
+        """Build the status-shaped narration for one progress phase.
+
+        Worded as a status report, never a request — a fresh Sonic session
+        that hears "Working on: X..." mid-flight can read it as an
+        instruction and call the browse tool again (issue #8).
+        """
+        if phase == self.PROGRESS_PHASE_START:
+            return f"Status: your browser is starting on '{instruction}' — no action needed."
+        if phase == self.PROGRESS_PHASE_WORKING:
+            return f"Status: your browser is working on '{instruction}' — no action needed."
+        raise ValueError(f"unknown browser progress phase: {phase!r}")
+
+    @staticmethod
+    def _normalize_instruction(instruction: str) -> str:
+        return " ".join((instruction or "").strip().lower().split())
+
+    def queue_task(self, instruction: str, url: str | None = None) -> dict:
         """Queue a browser automation task (fire-and-forget).
 
         No-op when ``NOVA_ACT_ENABLED`` is off (the default) — nothing
         consumes the queue in that case since :meth:`start` never spins up
         the worker thread.
 
+        Deduplicates (issue #8): a normalised instruction equal to the
+        currently running task's (while ``state == "busy"``), or to any
+        queued/recently-enqueued task's within ``DEDUPE_WINDOW_S`` seconds,
+        is dropped instead of enqueued — a fresh Sonic session restarted
+        mid-flight otherwise re-issues the same browse request.
+
         Args:
             instruction: Natural language instruction for what to do.
             url: Optional URL to navigate to first.
+
+        Returns:
+            A dict describing what happened: ``{"ok": False, "queued":
+            False, "reason": "nova-act-disabled"}`` when disabled;
+            ``{"ok": True, "queued": False, "duplicate": True,
+            "instruction": ..., "url": ...}`` when deduped; otherwise
+            ``{"ok": True, "queued": True, "instruction": ..., "url": ...}``.
         """
         if not act_enabled():
             sensory_log.stage(
                 "act", "browser", "queue_task", "dropped reason=nova-act-disabled"
             )
-            return
+            return {"ok": False, "queued": False, "reason": "nova-act-disabled"}
+
+        normalized = self._normalize_instruction(instruction)
+        now = self._clock()
+        self._recent_instructions = [
+            (norm, ts)
+            for norm, ts in self._recent_instructions
+            if now - ts < self.DEDUPE_WINDOW_S
+        ]
+
+        is_running_duplicate = (
+            self.state == "busy"
+            and self._normalize_instruction(self.current_task) == normalized
+        )
+        is_recent_duplicate = any(
+            norm == normalized for norm, _ts in self._recent_instructions
+        )
+        if is_running_duplicate or is_recent_duplicate:
+            sensory_log.stage(
+                "act",
+                "browser",
+                "queue_task",
+                f"dropped reason=duplicate window=300s instruction={normalized}",
+            )
+            return {
+                "ok": True,
+                "queued": False,
+                "duplicate": True,
+                "instruction": instruction,
+                "url": url,
+            }
+
+        self._recent_instructions.append((normalized, now))
         self._task_queue.put({"instruction": instruction, "url": url})
+        return {"ok": True, "queued": True, "instruction": instruction, "url": url}
 
     def execute(self, instruction: str, url: str | None = None) -> str:
         """Execute a browser task synchronously, blocking until complete.
@@ -215,7 +318,7 @@ class NovaBrowser:
 
         region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
         self._ensure_workflow()
-        self._emit_progress("Starting a cloud browser session...")
+        logger.info("Starting a cloud browser session...")
         with browser_session(region) as client:
             ws_url, headers = client.generate_ws_headers()
             with NovaAct(
@@ -225,7 +328,9 @@ class NovaBrowser:
                 starting_page=url or "https://www.google.com",
                 tty=False,
             ) as nova:
-                self._emit_progress(f"Working on: {instruction}...")
+                self._emit_progress(
+                    self._phase_message(self.PROGRESS_PHASE_WORKING, instruction)
+                )
                 # act_get, not act: a voice browse request is almost always a
                 # question, and in this SDK the model's answer only comes back
                 # through act_get's parsed_response (ActResult carries none).
@@ -239,9 +344,12 @@ class NovaBrowser:
         result_holder = task.get("_result_holder")
         self.current_task = instruction
         self._set_state("busy")
+        self._last_progress_emit_ts = None
 
         try:
-            self._emit_progress("Opening browser...")
+            self._emit_progress(
+                self._phase_message(self.PROGRESS_PHASE_START, instruction)
+            )
             if browser_surface() == SURFACE_AGENTCORE:
                 result = self._act_on_agentcore(instruction, url)
             else:
@@ -258,15 +366,17 @@ class NovaBrowser:
                         tty=False,
                     )
                     self._nova.start()
-                    self._emit_progress(f"Navigating to {url or 'Google'}...")
+                    logger.info("Navigating to %s", url or "Google")
                 elif url:
-                    self._emit_progress(f"Navigating to {url}...")
+                    logger.info("Navigating to %s", url)
                     self._nova.go_to_url(url)
 
-                self._emit_progress(f"Working on: {instruction}...")
+                self._emit_progress(
+                    self._phase_message(self.PROGRESS_PHASE_WORKING, instruction)
+                )
                 result = self._nova.act(instruction, max_steps=act_max_steps())
 
-            self._emit_progress("Done! Reading results...")
+            logger.info("[Browser progress] Done! Reading results...")
             self._capture_screenshot()
 
             result_text = f"Done: {instruction}"
