@@ -536,7 +536,11 @@ rules:
     priority: NORMAL
     urgency: NOW
     llm_evaluate: false
-    voice: brief
+    # Demoted from brief to none on 2026-09-06: with the CM4 ticking at ~7 Hz
+    # under face detection, the runtime reported face-lost every 20-40 s while
+    # the person sat there, and every notice became a spoken "they wandered
+    # off". History-only until reachy-mini-cli #179 lowers the detection load.
+    voice: none
     sense: face
     inject_template: "(the person you were watching is out of view)"
 
