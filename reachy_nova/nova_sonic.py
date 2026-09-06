@@ -1819,17 +1819,7 @@ class NovaSonic:
     async def _drain_deferred(self, gen: int) -> None:
         """Deliver the parked cues, newest text per sense class, oldest first."""
         if not self._active or self._session_gen != gen:
-            # Session restarted — the cues belong to a conversation that is
-            # gone. A body cue is discarded (delivering it into a session that
-            # never heard the utterance it interrupted would be a reaction to
-            # nothing); a parked *answer* goes onto the must-deliver retry
-            # queue instead, which is the whole point of the marker.
-            for cue in self._deferred.drain():
-                if cue.must_deliver:
-                    self._retry_or_drop(
-                        "stale-session", cue.text, True, cue.sense_class,
-                        self._as_must_deliver_item(cue),
-                    )
+            self._requeue_stale_deferred()
             return
         cues = self._deferred.drain()
         if not cues:
@@ -1841,34 +1831,7 @@ class NovaSonic:
             if delivered >= deferred_cues.MAX_DRAIN_PER_TRANSITION:
                 self._deferred.log_overflow(cue, cue.age(now))
                 continue
-            text = self._deferred.render(cue, now)
-            sensory_stage(
-                "inject", "speech", str(uuid.uuid4()),
-                f"drained class={cue.sense_class} age={cue.age(now):.1f}s "
-                f"text={text[:60]!r}",
-            )
-            # The 3s throttle is deliberately NOT consulted: the cue already
-            # waited out a whole utterance, which is what the throttle exists
-            # to enforce. It is re-armed below so the injects that follow the
-            # drain are spaced normally again.
-            #
-            # A parked *answer* keeps its marker across the deferral: if the
-            # session rotated, or this send raises, it goes onto the
-            # must-deliver retry queue — carrying the cue's ORIGINAL text, so
-            # the age annotation is applied once, at whichever send finally
-            # reaches the wire.
-            await self._send_user_text(
-                text,
-                gen,
-                must_deliver=cue.must_deliver,
-                sense_class=cue.sense_class,
-                retry_item=self._as_must_deliver_item(cue) if cue.must_deliver else None,
-            )
-            if self.on_deferred_delivered is not None:
-                try:
-                    self.on_deferred_delivered(text, cue.sense_class)
-                except Exception as e:  # noqa: BLE001 - a ledger hiccup must not stop the drain
-                    logger.warning(f"on_deferred_delivered raised: {e}")
+            await self._deliver_deferred(cue, now, gen)
             delivered += 1
 
         if delivered:
@@ -1877,6 +1840,55 @@ class NovaSonic:
             # NOT liveness input: a quiet body cue or a tool result legitimately
             # gets no answer from the model (robot, 2026-09-06). Only sustained
             # speech-level mic audio counts — see feed_audio.
+
+    def _requeue_stale_deferred(self) -> None:
+        """The session restarted under the parked cues: drop or re-queue them.
+
+        The cues belong to a conversation that is gone. A body cue is
+        discarded (delivering it into a session that never heard the
+        utterance it interrupted would be a reaction to nothing); a parked
+        *answer* goes onto the must-deliver retry queue instead, which is the
+        whole point of the marker.
+        """
+        for cue in self._deferred.drain():
+            if cue.must_deliver:
+                self._retry_or_drop(
+                    "stale-session", cue.text, True, cue.sense_class,
+                    self._as_must_deliver_item(cue),
+                )
+
+    async def _deliver_deferred(self, cue: deferred_cues.DeferredCue, now: float, gen: int) -> None:
+        """Put one parked cue on the wire, then tell the ledger it went.
+
+        The 3s throttle is deliberately NOT consulted: the cue already waited
+        out a whole utterance, which is what the throttle exists to enforce.
+        The caller re-arms it once the drain is done so the injects that
+        follow are spaced normally again.
+
+        A parked *answer* keeps its marker across the deferral: if the session
+        rotated, or this send raises, it goes onto the must-deliver retry
+        queue — carrying the cue's ORIGINAL text, so the age annotation is
+        applied once, at whichever send finally reaches the wire.
+        """
+        text = self._deferred.render(cue, now)
+        sensory_stage(
+            "inject", "speech", str(uuid.uuid4()),
+            f"drained class={cue.sense_class} age={cue.age(now):.1f}s "
+            f"text={text[:60]!r}",
+        )
+        await self._send_user_text(
+            text,
+            gen,
+            must_deliver=cue.must_deliver,
+            sense_class=cue.sense_class,
+            retry_item=self._as_must_deliver_item(cue) if cue.must_deliver else None,
+        )
+        if self.on_deferred_delivered is None:
+            return
+        try:
+            self.on_deferred_delivered(text, cue.sense_class)
+        except Exception as e:  # noqa: BLE001 - a ledger hiccup must not stop the drain
+            logger.warning(f"on_deferred_delivered raised: {e}")
 
     def send_tool_result(self, tool_use_id: str, result: str) -> None:
         """Send a tool result back to the Nova Sonic conversation."""

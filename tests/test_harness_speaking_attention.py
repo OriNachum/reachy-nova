@@ -170,10 +170,12 @@ def test_cold_nameless_reply_is_dropped_at_the_speaker(stop_event, clock, caplog
             assert speaker.playback_failures == 0
             drops = attention_drop_lines(caplog)
             assert len(drops) == 1
-            assert "dropped reason=not-addressed" in drops[0]
+            not_addressed = "dropped reason=not-addressed"
+            assert not_addressed in drops[0]
             summary = attention_summary_lines(caplog)
             assert len(summary) == 1
-            assert "count=1" in summary[0]
+            count_one = "count=1"
+            assert count_one in summary[0]
 
         # The window is untouched: a suppressed utterance never renews it.
         assert attention.last_utterance_at == before_utterance_at
