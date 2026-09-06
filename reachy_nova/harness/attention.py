@@ -21,8 +21,10 @@ Nova is being *addressed*:
 
 **Two reads off one clock.** :attr:`warm` governs the VOICE; it is true only
 after a NAME opened the window. :attr:`conversation_live` governs the GAZE; it
-is true after ANY transcript or utterance, named or not, for the same window
-length. They deliberately disagree for a nameless transcript from cold: someone
+is true after ANY USER transcript, named or not, for the same window length —
+and Nova's own utterances only ever RENEW it, never open it, because a robot
+cannot start a conversation by talking to itself. They deliberately disagree
+for a nameless transcript from cold: someone
 in the room is plainly talking, so the eyes follow them, but nobody addressed
 the robot, so the mouth stays shut. Wiring both to the same boolean is what
 made the old robot either blind or a chatterbox.
@@ -314,9 +316,10 @@ class AttentionState:
     def conversation_live(self) -> bool:
         """Has anyone spoken — either side — inside the window? Governs the gaze.
 
-        True after ANY transcript or utterance, named or not, and independent
-        of :attr:`warm`: a nameless transcript from cold makes this True while
-        :attr:`warm` stays False.
+        True after ANY USER transcript, named or not, and independent of
+        :attr:`warm`: a nameless transcript from cold makes this True while
+        :attr:`warm` stays False. Nova's own utterances renew it while it is
+        live and can never open it (see :meth:`note_utterance`).
         """
         self.settle()
         with self._lock:
@@ -368,11 +371,21 @@ class AttentionState:
         return "opened"
 
     def note_utterance(self) -> None:
-        """Nova spoke. Renews a warm window; never opens a cold one.
+        """Nova spoke. Renews an open window; never opens a closed one.
 
-        Its own voice keeps a conversation alive but can never start one —
+        Her own voice keeps a conversation alive but can never start one —
         otherwise a single unprompted line would warm the robot up forever by
-        talking to itself.
+        talking to itself. That is true of BOTH clocks: :attr:`warm` is renewed
+        only while it is already warm, and :attr:`conversation_live` only while
+        it is already live.
+
+        The gaze clock used to be renewed unconditionally here, and the live
+        robot showed what that costs (2026-09-06, "It feels rigid now. No
+        liveness."): Nova's own reactions to body cues — and her opening line
+        at every session start — opened a conversation nobody was having, the
+        conversation layer took a face lock, the lock inhibited ``feel-alive``
+        and ``orient-to-sound``, and she renewed the whole thing by speaking
+        into it. A robot cannot start a conversation with itself.
         """
         self.settle()
         with self._lock:
@@ -380,7 +393,8 @@ class AttentionState:
             self.last_utterance_at = now
             if self._is_quiet():
                 return
-            self._live_until = now + self.window_s
+            if now < self._live_until:
+                self._live_until = now + self.window_s
             if self._opened_at is not None:
                 self._warm_until = now + self.window_s
 

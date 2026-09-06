@@ -434,6 +434,40 @@ def test_local_liveness_fallback_when_no_attention_is_wired():
         stack.stop()
 
 
+def test_the_fallback_clock_is_never_opened_by_novas_own_voice():
+    """Live finding, 2026-09-06 ("It feels rigid now. No liveness.").
+
+    The fallback follows the same rule the wired ``AttentionState`` does: a
+    speaking edge from COLD opens nothing (otherwise Nova's own reaction to a
+    body cue raises the conversation layer with nobody in the room), and a
+    USER transcript still opens it at once.
+    """
+    clock = FakeClock()
+    intents = FakeIntents()
+    stack = GazeStack(intents, attention=None, clock=clock, tick_s=TICK)
+    stack.start(threading.Event())
+    drain_start_hygiene(intents)
+    try:
+        stack.on_sonic_state("speaking")
+        stack.on_sonic_state("idle")
+        time.sleep(TICK * 6)
+        assert stack.status()["conversation_live"] is False
+        assert stack.layer == LAYER_WANDER
+        assert intents.snapshot() == []
+
+        stack.on_transcript("user", "hello")
+        wait_for(lambda: stack.layer == LAYER_CONVERSATION, message="conversation layer")
+
+        # ...and once it IS live, her voice renews it past the 45 s window.
+        clock.now += 40.0
+        stack.on_sonic_state("speaking")
+        clock.now += 40.0
+        time.sleep(TICK * 6)
+        assert stack.layer == LAYER_CONVERSATION
+    finally:
+        stack.stop()
+
+
 # --------------------------------------------------------------------------- #
 # 6. robustness: a raising op, a fast stop                                      #
 # --------------------------------------------------------------------------- #

@@ -28,7 +28,7 @@ observes it.
 | Property | Governs | True when |
 | --- | --- | --- |
 | `warm` | the **voice** | a NAME opened the window and it has not run out |
-| `conversation_live` | the **gaze** | ANY transcript or utterance landed inside the window |
+| `conversation_live` | the **gaze** | ANY USER transcript landed inside the window (Nova's own utterances renew it, never open it) |
 
 They deliberately disagree for a nameless transcript from cold: somebody in
 the room is plainly talking, so the eyes follow them (`conversation_live`
@@ -94,6 +94,20 @@ one** — otherwise the robot would warm itself up by talking to itself.
 `note_inject()` renews `warm` only, not `conversation_live`: an inject is the
 robot's nervous system talking to its own mind, and nobody in the room said
 anything.
+
+**Her own voice never opens a conversation.** `note_utterance()` renews
+`conversation_live` only while it is *already* live; from cold it records
+`last_utterance_at` and changes nothing. It used to push the gaze clock out
+unconditionally, and the live robot showed what that costs (2026-09-06, Ori:
+"It feels rigid now. No liveness."): Nova's own reactions to body cues — and
+her opening line at every session start — opened a conversation nobody was
+having, which raised the [gaze stack](gaze.md)'s conversation layer, which took
+a face lock, which inhibits `feel-alive` and `orient-to-sound` while held; she
+then renewed the whole thing by speaking into it, so the journal read
+`wander -> conversation` every minute or two with nobody in the room. A USER
+transcript — named or not — still opens `conversation_live` immediately, which
+is the only thing that ever should: a robot cannot start a conversation by
+talking to itself.
 
 Each note also records `last_transcript_at`, `last_transcript_named`,
 `last_utterance_at` and `last_inject_at` (monotonic floats, or `None`) for

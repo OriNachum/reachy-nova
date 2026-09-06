@@ -172,8 +172,10 @@ transition issues no second clear.
 
 ### The conversation layer
 
-When a conversation goes live — the first USER transcript, or Nova starting to
-speak, whichever the wired `AttentionState` sees first — the head **turns
+When a conversation goes live — a USER transcript, named or not; never Nova's
+own voice, which only ever *renews* a conversation somebody else opened (see
+[attention](attention.md)), in the wired `AttentionState` and in the local
+fallback clock alike — the head **turns
 toward the voice and then locks on the face**: one `look_at_sound`, then
 `lock_face`, in that order, within one worker tick. That is the order a person
 does it in, and it also gives the runtime's face detector the best possible
@@ -217,6 +219,27 @@ because the runtime drops a standing lock on its own max-hold timer regardless
 of what the harness believes, and a stale "held" would suppress the next lock
 attempt forever. The cost of being wrong the other way is one redundant
 release.
+
+**Liveness under the hold.** The runtime's face lock inhibits `feel-alive` and
+`orient-to-sound` for as long as it is held, so a held lock is a robot that
+does not breathe, does not sway and does not wander — which is exactly what the
+live robot felt like (2026-09-06, Ori: "It feels rigid now. No liveness.";
+`state.json` active = only `face-lock`, inhibitions
+`['feel-alive', 'orient-to-sound']`). The hold itself is right; the stillness
+is not. So while an AUTO-owned lock is held and the layer stays `conversation`,
+this layer keeps one bounded `run_behavior` of `antenna-sway` running
+underneath it — `SWAY_PARAMS = {"amp": 10.0, "period": 5.0}`,
+`SWAY_DURATION_S = 60.0`, re-issued once fewer than `SWAY_REISSUE_MARGIN_S`
+(10 s) of the last one remain, logged as
+`[SENSE stage=gaze source=nova event=op] liveness sway ok=…`. The behaviour
+claims the ANTENNAS channel only, so it never competes with the lock for the
+head; it is a bounded one-shot rather than a standing goal so it cannot outlive
+the harness that asked for it. It is never issued for a MODEL-owned lock (what
+the body does under the model's own hold is the model's business), never after
+the release, and never in `browsing` or `wander` — where feel-alive owns the
+body and needs no help. `lock_liveness=False` turns it off entirely;
+`status()["sway_until"]` is the monotonic deadline of the sway in flight, or
+`None`.
 
 ### Start and stop hygiene
 
@@ -270,7 +293,7 @@ no-op — nothing written, no reload submitted.
 
 `status()` reports `{"layer", "browser_busy", "conversation_live",
 "goal_standing", "browsing_inhibits", "lock_held", "lock_attempts",
-"next_lock_retry_s"}` — `browsing_inhibits` is the list of
+"next_lock_retry_s", "sway_until"}` — `browsing_inhibits` is the list of
 `BROWSING_INHIBITS` names the stack currently believes it added itself;
 `lock_attempts` and `next_lock_retry_s` are per-conversation and reset at every
 fade; `next_lock_retry_s` is `None` when no retry is pending. No hook and no
